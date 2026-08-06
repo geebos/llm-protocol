@@ -4,7 +4,8 @@
 
 | 文档属性 | 内容 |
 | --- | --- |
-| 文档版本 | v0.4（全 Request 协议转换语义修订） |
+| 项目名称 | llm-protocol |
+| 文档版本 | v0.5（仓库结构改为单仓） |
 | 文档日期 | 2026-08-07 |
 | 阶段范围 | Phase 1：Anthropic Messages ↔ OpenAI Chat；Responses 预留/扩展 |
 | 状态 | 供架构评审与任务拆分 |
@@ -20,6 +21,7 @@
 | v0.2     | 2026-08-07 | 将主 API 调整为面向请求转发的透明转换工厂；输入输出保持客户端协议。 |
 | v0.3     | 2026-08-07 | 主 API 输入输出统一为 Node.js 内置 WHATWG `Request` / `Response`；SSE 通过 `Response.body` 原生流式返回。 |
 | v0.4     | 2026-08-07 | 修正透明请求契约：输入 Request 的 path、headers、body 全部采用 `from` 协议；URL origin 表示目标 Provider，转换器内部完成 endpoint、鉴权头、协议头、body 及响应的双向转换。 |
+| v0.5     | 2026-08-07 | 项目名定为 llm-protocol；仓库结构由 monorepo（packages/）调整为单仓结构，移除独立包的命名与隔离。 |
 
 ## 目录
 
@@ -149,47 +151,44 @@ Node `Request` → `translate(...)` → Node `Response`
 
 ## 4.1 推荐仓库结构
 
+llm-protocol 采用单仓（single-repo）结构，核心、测试框架、可选 sidecar 与 fixtures 同仓组织，不拆分独立 package：
+
 ```text
-packages/
-├── protocol-core/
-│   └── src/
-│       ├── ir/
-│       ├── codecs/
-│       │   ├── anthropic-messages/
-│       │   ├── openai-chat/
-│       │   └── openai-responses/      # P1
-│       ├── streams/
-│       ├── capabilities/
-│       ├── errors/
-│       └── pipeline/
-├── provider-testkit/
-│   └── src/
-│       ├── providers/
-│       ├── scenarios/
-│       ├── assertions/
-│       └── reporters/
-└── protocol-proxy/                     # 可选内部 sidecar
-    └── src/
-        ├── handler.ts
-        └── upstream-fetch.ts
-
-fixtures/
-├── requests/
-├── responses/
-├── streams/
-└── regressions/
-
-apps/
-└── compat-runner/
+llm-protocol/
+├── src/                            # 协议转换核心
+│   ├── ir/
+│   ├── codecs/
+│   │   ├── anthropic-messages/
+│   │   ├── openai-chat/
+│   │   └── openai-responses/       # P1
+│   ├── streams/
+│   ├── capabilities/
+│   ├── errors/
+│   └── pipeline/
+├── testkit/                        # 多 Provider 测试框架
+│   ├── providers/
+│   ├── scenarios/
+│   ├── assertions/
+│   └── reporters/
+├── proxy/                          # 可选内部 sidecar
+│   ├── handler.ts
+│   └── upstream-fetch.ts
+├── fixtures/                       # 离线 fixture 资产
+│   ├── requests/
+│   ├── responses/
+│   ├── streams/
+│   └── regressions/
+└── apps/
+    └── compat-runner/              # 兼容性测试 CLI
 ```
 
 ## 4.2 关键边界
 
 | **模块**               | **负责**                                          | **不负责**                      |
 |------------------------|---------------------------------------------------|---------------------------------|
-| protocol-core          | 透明转发工厂、解析、IR、渲染、流状态机、能力判断、转换报告 | HTTP 监听、鉴权、业务路由、密钥存储 |
-| provider-testkit       | Provider 配置、真实调用、断言、报告、成本控制     | 生产流量转发                    |
-| protocol-proxy（可选） | 将 core 接入内部 HTTP sidecar、调用上游、pipe SSE | 用户鉴权和业务路由              |
+| src/（核心）           | 透明转发工厂、解析、IR、渲染、流状态机、能力判断、转换报告 | HTTP 监听、鉴权、业务路由、密钥存储 |
+| testkit/               | Provider 配置、真实调用、断言、报告、成本控制     | 生产流量转发                    |
+| proxy/（可选）         | 将核心接入内部 HTTP sidecar、调用上游、pipe SSE   | 用户鉴权和业务路由              |
 | Agent Gateway          | 鉴权、路由、上游凭据、配额、审计                  | 协议细节转换                    |
 
 # 5. 协议与能力范围
@@ -963,8 +962,8 @@ P0 最小组合：
 # 13. 交付物与里程碑
 ## 13.1 交付物
 
-- `@org/llm-protocol-core`：透明 `translate(...)` 工厂、IR、codec、stream codec、pipeline、capabilities、errors。
-- `@org/llm-provider-testkit`：ProviderAdapter、scenario、assertion、reporter。
+- `llm-protocol`（单仓单包）：透明 `translate(...)` 工厂、IR、codec、stream codec、pipeline、capabilities、errors。
+- `llm-protocol` 内置 `testkit/`：ProviderAdapter、scenario、assertion、reporter（同仓维护，不单独发布）。
 - `compat-runner`：CLI，可按 Provider/能力/标签运行测试。
 - fixtures：请求、响应、SSE、回归案例，包含来源和预期语义。
 - 兼容性报告：JSON + JUnit + Markdown/HTML 摘要。

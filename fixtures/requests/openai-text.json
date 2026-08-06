@@ -1,0 +1,16 @@
+{
+  "id": "openai-text",
+  "protocol": "openai-chat",
+  "description": "System + multi-turn text request",
+  "source": "tests/codecs.test.ts openai fixtures",
+  "request": {
+    "model": "gpt-4o",
+    "stream": false,
+    "messages": [
+      { "role": "system", "content": "You are a helpful assistant." },
+      { "role": "user", "content": "Hello" },
+      { "role": "assistant", "content": "Hi there!" },
+      { "role": "user", "content": "Tell me about planets." }
+    ]
+  }
+}

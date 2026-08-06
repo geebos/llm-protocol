@@ -1,0 +1,15 @@
+{
+  "id": "anthropic-text-response",
+  "protocol": "anthropic-messages",
+  "description": "Simple text completion with usage",
+  "source": "tests/codecs.test.ts / pipeline.test.ts fixtures",
+  "response": {
+    "id": "msg_123",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-4-5",
+    "content": [{ "type": "text", "text": "Hello from Claude" }],
+    "stop_reason": "end_turn",
+    "usage": { "input_tokens": 8, "output_tokens": 4 }
+  }
+}

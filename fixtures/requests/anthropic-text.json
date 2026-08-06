@@ -1,0 +1,17 @@
+{
+  "id": "anthropic-text",
+  "protocol": "anthropic-messages",
+  "description": "Multi-turn text request with system prompt",
+  "source": "docs/tech.md 9.3 example shape",
+  "request": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "stream": false,
+    "system": "You are a helpful assistant.",
+    "messages": [
+      { "role": "user", "content": "Hello" },
+      { "role": "assistant", "content": [{ "type": "text", "text": "Hi there!" }] },
+      { "role": "user", "content": "Tell me about planets." }
+    ]
+  }
+}

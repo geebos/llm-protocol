@@ -1,0 +1,27 @@
+{
+  "id": "openai-tool-response",
+  "protocol": "openai-chat",
+  "description": "Text + tool_calls completion",
+  "source": "tests/codecs.test.ts tool fixtures",
+  "response": {
+    "id": "chatcmpl_789",
+    "object": "chat.completion",
+    "created": 1700000001,
+    "model": "gpt-4o",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "I will check the weather.",
+          "tool_calls": [
+            { "id": "call_1", "type": "function", "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" } }
+          ]
+        },
+        "finish_reason": "tool_calls",
+        "logprobs": null
+      }
+    ],
+    "usage": { "prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30 }
+  }
+}

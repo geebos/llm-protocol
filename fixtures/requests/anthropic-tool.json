@@ -1,0 +1,31 @@
+{
+  "id": "anthropic-tool",
+  "protocol": "anthropic-messages",
+  "description": "Assistant tool_use + user tool_result re-injection",
+  "source": "tests/codecs.test.ts tool fixtures",
+  "request": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "stream": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          { "type": "text", "text": "Calling echo." },
+          { "type": "tool_use", "id": "toolu_1", "name": "echo", "input": { "text": "hi" } }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "hi" }]
+      }
+    ],
+    "tools": [
+      {
+        "name": "echo",
+        "description": "Echo back the text",
+        "input_schema": { "type": "object", "properties": { "text": { "type": "string" } } }
+      }
+    ]
+  }
+}

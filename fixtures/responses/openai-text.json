@@ -1,0 +1,21 @@
+{
+  "id": "openai-text-response",
+  "protocol": "openai-chat",
+  "description": "Simple text completion with usage",
+  "source": "tests/pipeline.test.ts openai response fixture",
+  "response": {
+    "id": "chatcmpl_456",
+    "object": "chat.completion",
+    "created": 1700000000,
+    "model": "gpt-4o",
+    "choices": [
+      {
+        "index": 0,
+        "message": { "role": "assistant", "content": "Hello from GPT" },
+        "finish_reason": "stop",
+        "logprobs": null
+      }
+    ],
+    "usage": { "prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12 }
+  }
+}

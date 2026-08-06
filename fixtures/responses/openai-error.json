@@ -1,0 +1,14 @@
+{
+  "id": "openai-error",
+  "protocol": "openai-chat",
+  "description": "Upstream error envelope (invalid API key)",
+  "source": "tests/pipeline.test.ts error fixture",
+  "status": 401,
+  "error": {
+    "error": {
+      "message": "Incorrect API key",
+      "type": "invalid_request_error",
+      "code": "invalid_api_key"
+    }
+  }
+}
