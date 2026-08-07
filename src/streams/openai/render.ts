@@ -35,6 +35,7 @@ export function createOpenAiChatStreamRenderer(
   let terminal = false;
   let errorSent = false;
   let reasoningReported = false;
+  let cacheUsageReported = false;
   let cachedUsage: CanonicalUsage | undefined;
   let id = `chatcmpl-${crypto.randomUUID()}`;
   let model: string | undefined;
@@ -76,6 +77,32 @@ export function createOpenAiChatStreamRenderer(
     });
   }
 
+  function renderUsage(usage: CanonicalUsage): Record<string, unknown> {
+    const cacheTotal =
+      (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+    const promptTokens =
+      usage.inputTokens !== undefined && cacheTotal > 0
+        ? usage.inputTokens + cacheTotal
+        : usage.inputTokens;
+    if (usage.inputTokens !== undefined && cacheTotal > 0 && !cacheUsageReported) {
+      cacheUsageReported = true;
+      report?.({
+        code: "cache_usage_approximation",
+        message: `Composed prompt_tokens=${promptTokens} from input_tokens + cache tokens for OpenAI stream`,
+        fidelity: "COMPATIBLE",
+        field: "usage.prompt_tokens",
+      });
+    }
+    return {
+      ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}),
+      ...(usage.outputTokens !== undefined
+        ? { completion_tokens: usage.outputTokens }
+        : {}),
+      ...(usage.totalTokens !== undefined ? { total_tokens: usage.totalTokens } : {}),
+      ...(usage.providerDetails ?? {}),
+    };
+  }
+
   return new TransformStream<CanonicalStreamEvent, Uint8Array>({
     transform(event, controller) {
       // Usage may legally arrive after message_end (compatible providers put it
@@ -112,7 +139,24 @@ export function createOpenAiChatStreamRenderer(
         case "reasoning_start":
           return;
         case "reasoning_delta":
-          if (event.text === undefined) return;
+          // Opaque thinking signature (Anthropic signature_delta): only a
+          // provider that declares an opaque-signature field can carry it
+          // (P1-2); otherwise it is dropped with a warning, never silently.
+          if (event.text === undefined) {
+            const sigCap = profile.capabilities.reasoning;
+            if (event.opaque !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
+              chunk(controller, { [sigCap.signatureField]: event.opaque }, null);
+            } else if (event.opaque !== undefined) {
+              report?.({
+                code: "thinking_signature_dropped",
+                message:
+                  "Opaque thinking signature dropped because the target does not declare an opaque-signature field",
+                fidelity: "LOSSY",
+                field: "content.reasoning.signature",
+              });
+            }
+            return;
+          }
           if (reasoningField) {
             chunk(controller, { [reasoningField]: event.text }, null);
             return;
@@ -210,15 +254,4 @@ export function createOpenAiChatStreamRenderer(
       controller.enqueue(encodeDataFrame("[DONE]"));
     },
   });
-}
-
-function renderUsage(usage: CanonicalUsage): Record<string, unknown> {
-  return {
-    ...(usage.inputTokens !== undefined ? { prompt_tokens: usage.inputTokens } : {}),
-    ...(usage.outputTokens !== undefined
-      ? { completion_tokens: usage.outputTokens }
-      : {}),
-    ...(usage.totalTokens !== undefined ? { total_tokens: usage.totalTokens } : {}),
-    ...(usage.providerDetails ?? {}),
-  };
 }

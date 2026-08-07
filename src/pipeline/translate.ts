@@ -20,7 +20,7 @@ import {
   type ProtocolAdapter,
 } from "../codecs/protocol-adapter.js";
 import type { TranslationTrace, TranslateOptions, ForwardTranslator } from "./types.js";
-import { createSSEParser, createCanonicalValidator } from "../streams/index.js";
+import { createSSEParser, createCanonicalValidator, withAnthropicKeepAlive } from "../streams/index.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
 
@@ -51,6 +51,7 @@ export function translate<
   const trace = options.trace;
   const maxBodyBytes = options.maxBodyBytes ?? 10 * 1024 * 1024;
   const timeoutMs = options.timeoutMs;
+  const keepAliveIntervalMs = options.keepAliveIntervalMs ?? 15_000;
 
   /** Same-protocol fast path: no parse, no rewrite (FR-006, 9.11). */
   if ((options.from as string) === (options.to as string)) {
@@ -196,6 +197,7 @@ export function translate<
         ctx,
         baseTrace,
         emitTrace,
+        keepAliveIntervalMs,
       });
     }
 
@@ -237,6 +239,7 @@ interface StreamingContext {
   ctx: CodecContext;
   baseTrace: Omit<TranslationTrace, "streaming" | "traceId" | "durationMs" | "fidelity">;
   emitTrace: (partial: Omit<TranslationTrace, "traceId" | "durationMs" | "fidelity">) => void;
+  keepAliveIntervalMs?: number;
 }
 
 /**
@@ -255,6 +258,7 @@ function translateStreamingResponse({
   ctx,
   baseTrace,
   emitTrace,
+  keepAliveIntervalMs,
 }: StreamingContext): Response {
   if (!targetResponse.body) {
     throw new TranslationError({
@@ -274,8 +278,16 @@ function translateStreamingResponse({
     .pipeThrough(createCanonicalValidator())
     .pipeThrough(source.stream.createRender(report));
 
+  // The Anthropic client keeps its stream alive on periodic pings; inject them
+  // while the upstream is idle so long upstream thinking streams don't look
+  // dead to the SDK (GAP-013). Only applies when the source is Anthropic.
+  const clientStream =
+    source.format === "anthropic-messages"
+      ? withAnthropicKeepAlive(sourceStream, keepAliveIntervalMs)
+      : sourceStream;
+
   emitTrace({ ...baseTrace, streaming: true });
-  return new Response(sourceStream, {
+  return new Response(clientStream, {
     status: mapStatus(targetResponse.status),
     headers: {
       "content-type": "text/event-stream; charset=utf-8",

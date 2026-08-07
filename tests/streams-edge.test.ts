@@ -10,6 +10,7 @@ import {
   createOpenAiChatStreamParser,
   createOpenAiChatStreamRenderer,
   createSSEParser,
+  withAnthropicKeepAlive,
   type CanonicalStreamEvent,
   type SSEFrame,
 } from "../src/streams/index.js";
@@ -356,5 +357,65 @@ describe("OpenAI parser tool index/usage edges", () => {
     expect(events[1]).toEqual({ type: "text_start", index: 0 });
     expect(events[2]).toEqual({ type: "text_delta", index: 0, text: "no role first" });
     expect(events[3]).toEqual({ type: "text_end", index: 0 });
+  });
+});
+
+describe("Anthropic keepalive pings (GAP-013)", () => {
+  function delay(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  it("injects ping frames while the upstream is idle", async () => {
+    // Upstream emits one frame then goes quiet (like a long thinking stream).
+    const upstream = new ReadableStream<Uint8Array>({
+      async start(c) {
+        c.enqueue(new TextEncoder().encode('data: x\n\n'));
+        // never closes during the test window
+      },
+    });
+    const keepAlive = withAnthropicKeepAlive(upstream, 20);
+    const reader = keepAlive.getReader();
+    await reader.read(); // the real frame
+    const frames: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { value } = await reader.read();
+      frames.push(new TextDecoder().decode(value));
+    }
+    await reader.cancel();
+    expect(frames.every((f) => f.includes('event: ping'))).toBe(true);
+    expect(frames.every((f) => f.includes('{"type":"ping"}'))).toBe(true);
+  });
+
+  it("stops pinging and forwards EOF when the upstream closes", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: y\n\n'));
+        c.close();
+      },
+    });
+    const keepAlive = withAnthropicKeepAlive(upstream, 10);
+    const reader = keepAlive.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toBe('data: y\n\n');
+    const second = await reader.read();
+    expect(second.done).toBe(true);
+    await delay(30); // let the timer fire; nothing more may be enqueued
+    const after = await reader.read();
+    expect(after.done).toBe(true);
+  });
+
+  it("forwards cancellation to the upstream (SR-008)", async () => {
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      start() {},
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const keepAlive = withAnthropicKeepAlive(upstream, 10);
+    const reader = keepAlive.getReader();
+    await reader.cancel();
+    await delay(20);
+    expect(cancelled).toBe(true);
   });
 });

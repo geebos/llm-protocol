@@ -7,6 +7,58 @@
  */
 import type { ApiFormat } from "../formats.js";
 
+/**
+ * Reasoning capability declaration (tech-v2.md §14 / P1-2).
+ *
+ * Anthropic `thinking.signature` / `signature_delta` is opaque state a model
+ * may need to resume thinking next turn; OpenAI Chat has no standard field.
+ * Whether the provider can carry it is a declared capability, never guessed
+ * from the model name. When not declared, opaque signatures are dropped with
+ * a warning instead of being silently lost.
+ */
+export interface ReasoningCapability {
+  /** Provider carries visible reasoning text deltas. */
+  text: boolean;
+  /** Provider can round-trip an opaque thinking signature across turns. */
+  opaqueSignature: boolean;
+  /**
+   * Source field that carries the opaque signature in Chat responses/streams
+   * (e.g. a provider-specific reasoning signature field). Required to emit it.
+   */
+  signatureField?: string;
+}
+
+/**
+ * Usage semantics quirks (tech-v2.md §21, GAP-014).
+ *
+ * Declared provider dialect around token accounting; absence means the
+ * standard OpenAI/Anthropic shape is assumed and lossy decisions are warned.
+ */
+export interface UsageCapabilities {
+  /** Provider reports cached input tokens (OpenAI prompt_tokens_details). */
+  cacheRead?: boolean;
+  /** Provider reports cache write/creation tokens. */
+  cacheCreation?: boolean;
+  /** Provider may send usage after the finish chunk (late usage). */
+  usageAfterFinish?: boolean;
+}
+
+/**
+ * Streaming dialect quirks (tech-v2.md §21, GAP-014).
+ *
+ * Provider quirks around SSE framing; absence means standard behavior is
+ * assumed. These declarations let the parser tolerate non-standard streams
+ * without surfacing spurious warnings.
+ */
+export interface StreamCapabilities {
+  /** Whether the provider ends streams with `data: [DONE]` (default true). */
+  doneMarker?: boolean;
+  /** Provider may omit the role chunk before content (default false). */
+  mayOmitRoleChunk?: boolean;
+  /** Provider may split tool id/name/arguments across chunks (default false). */
+  maySplitToolMetadata?: boolean;
+}
+
 export interface ProviderCapabilities {
   tools: boolean;
   parallelTools: boolean;
@@ -14,6 +66,12 @@ export interface ProviderCapabilities {
   thinking: boolean;
   /** Provider-specific reasoning field name in Chat responses (TH-003). */
   reasoningField?: string;
+  /** Opaque signature handling (P1-2); absent means drop-with-warning. */
+  reasoning?: ReasoningCapability;
+  /** Usage dialect (GAP-014). */
+  usage?: UsageCapabilities;
+  /** Streaming dialect (GAP-014). */
+  stream?: StreamCapabilities;
 }
 
 export interface ProviderProfile {

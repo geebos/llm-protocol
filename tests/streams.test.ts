@@ -12,6 +12,8 @@ import {
   type CanonicalStreamEvent,
 } from "../src/streams/index.js";
 import { openaiChatDefaultProfile } from "../src/codecs/openai-chat/index.js";
+import { DEFAULT_POLICIES } from "../src/ir/policies.js";
+import type { TranslationWarning } from "../src/ir/fidelity.js";
 
 async function collect<T>(stream: ReadableStream<T>): Promise<T[]> {
   const out: T[] = [];
@@ -315,9 +317,11 @@ describe("OpenAI SSE -> canonical (target parse)", () => {
     const events = await parseOpenAiStream(stream, Infinity, "reasoning_content");
     expect(events[1]).toEqual({ type: "reasoning_start", index: 0 });
     expect(events[2]).toEqual({ type: "reasoning_delta", index: 0, text: "chain" });
-    expect(events[3]).toEqual({ type: "text_start", index: 0 });
-    expect(events[4]).toEqual({ type: "text_delta", index: 0, text: "answer" });
-    expect(events[5]).toEqual({ type: "reasoning_end", index: 0 });
+    // reasoning closes before text starts so the Anthropic renderer stays
+    // sequential (GAP-001 / 6.3).
+    expect(events[3]).toEqual({ type: "reasoning_end", index: 0 });
+    expect(events[4]).toEqual({ type: "text_start", index: 0 });
+    expect(events[5]).toEqual({ type: "text_delta", index: 0, text: "answer" });
     expect(events[6]).toEqual({ type: "text_end", index: 0 });
 
     // Without a declared field the reasoning text is not guessed.
@@ -510,5 +514,63 @@ describe("canonical -> OpenAI SSE (source render)", () => {
     const last = chunks[chunks.length - 1];
     expect(last.usage).toEqual({ prompt_tokens: 5, completion_tokens: 3 });
     expect(last.choices[0].finish_reason).toBe("stop");
+  });
+
+  it("drops an opaque thinking signature with a warning when no field is declared (P1-2)", async () => {
+    const warnings: TranslationWarning[] = [];
+    const profile = {
+      ...openaiChatDefaultProfile,
+      capabilities: {
+        ...openaiChatDefaultProfile.capabilities,
+        reasoningField: "reasoning_content",
+      },
+    };
+    const bytes = new ReadableStream<CanonicalStreamEvent>({
+      start(c) {
+        for (const e of [
+          { type: "message_start" } as const,
+          { type: "reasoning_start", index: 0 } as const,
+          { type: "reasoning_delta", index: 0, opaque: "SIG-1" } as const,
+          { type: "reasoning_end", index: 0 } as const,
+          { type: "message_end", finishReason: "end_turn" } as const,
+        ]) c.enqueue(e);
+        c.close();
+      },
+    }).pipeThrough(createOpenAiChatStreamRenderer(profile, DEFAULT_POLICIES, (w) => warnings.push(w)));
+    await collect(bytes.pipeThrough(createSSEParser()));
+    const sig = warnings.find((w) => w.code === "thinking_signature_dropped");
+    expect(sig).toBeTruthy();
+    expect(sig!.fidelity).toBe("LOSSY");
+  });
+
+  it("emits an opaque thinking signature to the declared provider field (P1-2)", async () => {
+    const profile = {
+      ...openaiChatDefaultProfile,
+      capabilities: {
+        ...openaiChatDefaultProfile.capabilities,
+        reasoningField: "reasoning_content",
+        reasoning: { text: true, opaqueSignature: true, signatureField: "thinking_signature" },
+      },
+    };
+    const bytes = new ReadableStream<CanonicalStreamEvent>({
+      start(c) {
+        for (const e of [
+          { type: "message_start" } as const,
+          { type: "reasoning_start", index: 0 } as const,
+          { type: "reasoning_delta", index: 0, opaque: "SIG-1" } as const,
+          { type: "reasoning_end", index: 0 } as const,
+          { type: "message_end", finishReason: "end_turn" } as const,
+        ]) c.enqueue(e);
+        c.close();
+      },
+    }).pipeThrough(createOpenAiChatStreamRenderer(profile));
+    const frames = await collect(bytes.pipeThrough(createSSEParser()));
+    const chunks = frames
+      .filter((f) => f.data !== "[DONE]")
+      .map((f) => JSON.parse(f.data));
+    const sigChunk = chunks.find(
+      (c) => c.choices?.[0]?.delta?.thinking_signature === "SIG-1",
+    );
+    expect(sigChunk).toBeTruthy();
   });
 });

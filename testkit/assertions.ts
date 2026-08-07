@@ -56,6 +56,84 @@ export function assertToolCall(
   return call;
 }
 
+/**
+ * Assert at least `min` parallel tool calls, each with a distinct id/name and
+ * valid-JSON arguments (tech-v2.md STREAM-008 / §20 Parallel Tool).
+ */
+export function assertParallelToolCalls(
+  ctx: AssertionContext,
+  min: number,
+): ToolCallView[] {
+  const calls = extractToolCalls(ctx);
+  if (calls.length < min) {
+    fail(`expected >= ${min} parallel tool calls, got ${calls.length}`);
+  }
+  const ids = new Set(calls.map((c) => c.id));
+  if (ids.size !== calls.length) {
+    fail(`parallel tool calls have duplicate ids: ${[...ids].join(",")}`);
+  }
+  for (const call of calls) {
+    if (!call.id) fail("parallel tool call missing id");
+    if (!call.name) fail(`parallel tool call ${call.id} missing name`);
+    try {
+      JSON.parse(call.argumentsText);
+    } catch {
+      fail(`tool arguments are not valid JSON: ${call.argumentsText.slice(0, 120)}`);
+    }
+  }
+  return calls;
+}
+
+/**
+ * Assert the stream carried reasoning deltas before any text (structure-only;
+ * never asserts private reasoning content — tech-v2.md STREAM-001).
+ */
+export function assertReasoningThenText(ctx: AssertionContext): void {
+  if (!ctx.streamFrames) fail("no stream frames to inspect for reasoning");
+  const order: string[] = [];
+  for (const f of ctx.streamFrames) {
+    if (f.data === "[DONE]") continue;
+    if (f.event === "message_start" || f.event === "content_block_start") {
+      order.push("block_start");
+      continue;
+    }
+    try {
+      const data = JSON.parse(f.data) as Record<string, unknown>;
+      if (f.event === "message_delta") {
+        order.push("message_delta");
+        continue;
+      }
+      const delta = (data.delta ?? {}) as Record<string, unknown>;
+      const choiceDelta =
+        ((data.choices as Array<Record<string, unknown>>)?.[0]?.delta ?? {}) as Record<string, unknown>;
+      if (delta.type === "thinking_delta" || delta.type === "signature_delta") {
+        order.push("reasoning_delta");
+      } else if (delta.type === "text_delta") {
+        order.push("text_delta");
+      }
+      if (typeof choiceDelta.content === "string" && choiceDelta.content !== "") {
+        order.push("text_delta");
+      }
+      if (
+        typeof choiceDelta.reasoning_content === "string" &&
+        choiceDelta.reasoning_content !== ""
+      ) {
+        order.push("reasoning_delta");
+      }
+    } catch {
+      /* ignore non-JSON / DONE */
+    }
+  }
+  const firstReasoning = order.indexOf("reasoning_delta");
+  const firstText = order.indexOf("text_delta");
+  if (firstReasoning === -1) {
+    fail("no reasoning delta observed in stream");
+  }
+  if (firstText !== -1 && firstText < firstReasoning) {
+    fail("text delta observed before any reasoning delta");
+  }
+}
+
 export function assertUsagePresent(ctx: AssertionContext): void {
   const usage = extractUsage(ctx);
   if (!usage || typeof usage !== "object") fail("usage missing");

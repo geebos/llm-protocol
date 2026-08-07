@@ -17,6 +17,7 @@ import {
   renderAnthropicContent,
   safeParseJson,
 } from "./content.js";
+import { normalizeAnthropicTurns } from "./normalize.js";
 
 /** Anthropic requires an explicit max_tokens; OpenAI Chat does not. */
 const DEFAULT_MAX_TOKENS = 1024;
@@ -35,6 +36,7 @@ const KNOWN_FIELDS = [
   "stop_sequences",
   "metadata",
   "thinking",
+  "output_config",
   "service_tier",
 ];
 
@@ -104,17 +106,37 @@ function parseToolChoice(choice: unknown, ctx: CodecContext): CanonicalToolChoic
   }
 }
 
-function parseThinking(thinking: unknown, ctx: CodecContext): CanonicalThinkingConfig | undefined {
+/** Anthropic `tool_choice.disable_parallel_tool_use` -> parallelToolCalls=false. */
+function parseDisableParallel(choice: unknown): boolean | undefined {
+  if (!choice || typeof choice !== "object") return undefined;
+  const c = choice as { disable_parallel_tool_use?: unknown };
+  if (c.disable_parallel_tool_use === true) return false;
+  return undefined;
+}
+
+function parseThinking(
+  thinking: unknown,
+  outputConfig: unknown,
+): CanonicalThinkingConfig | undefined {
   if (thinking === undefined) return undefined;
   const t = thinking as { type?: unknown; budget_tokens?: unknown };
-  if (t.type === "disabled") return { enabled: false };
-  if (t.type === "enabled") {
-    return {
-      enabled: true,
-      budgetTokens: typeof t.budget_tokens === "number" ? t.budget_tokens : undefined,
-    };
+  switch (t.type) {
+    case "disabled":
+      return { mode: "disabled" };
+    case "enabled":
+      return {
+        mode: "enabled",
+        budgetTokens: typeof t.budget_tokens === "number" ? t.budget_tokens : undefined,
+      };
+    case "adaptive": {
+      const effort = parseEffort(
+        (outputConfig as { effort?: unknown } | undefined)?.effort,
+      );
+      return { mode: "adaptive", effort };
+    }
+    default:
+      throw validationError(`unsupported thinking type "${String(t.type)}"`);
   }
-  throw validationError(`unsupported thinking type "${String(t.type)}"`);
 }
 
 export const anthropicRequestCodec: RequestCodec = {
@@ -152,8 +174,9 @@ export const anthropicRequestCodec: RequestCodec = {
       system: parseSystem(p.system, ctx),
       tools: parseTools(p.tools, ctx),
       toolChoice: parseToolChoice(p.tool_choice, ctx),
+      parallelToolCalls: parseDisableParallel(p.tool_choice),
       generation,
-      thinking: parseThinking(p.thinking, ctx),
+      thinking: parseThinking(p.thinking, p.output_config),
       extensions,
     };
   },
@@ -180,8 +203,11 @@ export const anthropicRequestCodec: RequestCodec = {
     if (canonical.system?.length) {
       body.system = simplifyTextBlocks(renderAnthropicContent(canonical.system));
     }
-    if (canonical.messages.length) {
-      body.messages = canonical.messages.map((m) => renderMessage(m, ctx));
+    // Anthropic requires well-formed turns (tool_result placement, no runs of
+    // adjacent same-role turns); normalize before rendering (P0-7).
+    const messages = normalizeAnthropicTurns(canonical.messages, ctx);
+    if (messages.length) {
+      body.messages = messages.map((m) => renderMessage(m, ctx));
     }
     if (canonical.tools?.length) {
       body.tools = canonical.tools.map((t) => {
@@ -201,7 +227,24 @@ export const anthropicRequestCodec: RequestCodec = {
       });
     }
     if (canonical.toolChoice) {
-      body.tool_choice = renderToolChoice(canonical.toolChoice);
+      const rendered = renderToolChoice(canonical.toolChoice);
+      if (canonical.parallelToolCalls === false) {
+        rendered.disable_parallel_tool_use = true;
+      }
+      body.tool_choice = rendered;
+    } else if (canonical.parallelToolCalls === false) {
+      // disable_parallel_tool_use is only expressible inside tool_choice.
+      body.tool_choice = {
+        type: "auto",
+        disable_parallel_tool_use: true,
+      };
+      ctx.warnings.push({
+        code: "parallel_tools_downgraded",
+        message:
+          "parallel_tool_calls=false represented as tool_choice.disable_parallel_tool_use=true",
+        fidelity: "COMPATIBLE",
+        field: "tool_choice.disable_parallel_tool_use",
+      });
     }
 
     const gen = canonical.generation;
@@ -225,9 +268,20 @@ export const anthropicRequestCodec: RequestCodec = {
     }
 
     if (canonical.thinking) {
-      body.thinking = canonical.thinking.enabled
-        ? { type: "enabled", budget_tokens: canonical.thinking.budgetTokens }
-        : { type: "disabled" };
+      const t = canonical.thinking;
+      if (t.mode === "disabled") {
+        body.thinking = { type: "disabled" };
+      } else if (t.mode === "enabled") {
+        body.thinking = {
+          type: "enabled",
+          ...(t.budgetTokens !== undefined ? { budget_tokens: t.budgetTokens } : {}),
+        };
+      } else if (t.mode === "adaptive") {
+        body.thinking = { type: "adaptive" };
+        if (t.effort !== undefined) {
+          body.output_config = { effort: t.effort };
+        }
+      }
     }
 
     return body;
@@ -266,7 +320,7 @@ function simplifyUserContent(blocks: unknown[]): unknown {
   return simplifyTextBlocks(blocks);
 }
 
-function renderToolChoice(choice: CanonicalToolChoice): unknown {
+function renderToolChoice(choice: CanonicalToolChoice): Record<string, unknown> {
   switch (choice.type) {
     case "auto":
       return { type: "auto" };
@@ -277,6 +331,16 @@ function renderToolChoice(choice: CanonicalToolChoice): unknown {
     case "tool":
       return { type: "tool", name: choice.name };
   }
+}
+
+const EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
+type ReasoningEffort = (typeof EFFORT_VALUES)[number];
+
+function parseEffort(value: unknown): ReasoningEffort | undefined {
+  if (typeof value === "string" && (EFFORT_VALUES as readonly string[]).includes(value)) {
+    return value as ReasoningEffort;
+  }
+  return undefined;
 }
 
 export { DEFAULT_MAX_TOKENS };

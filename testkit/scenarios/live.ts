@@ -7,7 +7,8 @@
  */
 import type { ApiFormat } from "../../src/formats.js";
 import type { Scenario, ProviderConfig } from "../types.js";
-import { assertToolCall } from "../assertions.js";
+import { assertToolCall, assertParallelToolCalls, assertReasoningThenText } from "../assertions.js";
+import type { ScenarioProfiles } from "./offline.js";
 
 const WEATHER_TOOL = [
   {
@@ -45,18 +46,18 @@ export function converse(protocol: ApiFormat): ApiFormat {
       : protocol;
 }
 
-export function liveScenariosFor(provider: ProviderConfig): Scenario[] {
+export function liveScenariosFor(provider: ProviderConfig): Array<Scenario & ScenarioProfiles> {
   const from = converse(provider.protocol);
   // The request body (and its tools) uses the *source* protocol.
   const sourceTools = from === "openai-chat" ? WEATHER_TOOL : ANTHROPIC_WEATHER_TOOL;
 
-  const scenarios: Scenario[] = [
+  const scenarios: Array<Scenario & ScenarioProfiles> = [
     {
       id: `${provider.id}:live-text`,
       title: `Live text non-streaming (${from} -> ${provider.protocol})`,
       tags: ["live", "text", "non-stream"],
       requires: [],
-      live: { mode: "text", prompt: "Reply with exactly: pong", maxTokens: 32 },
+      live: { mode: "text", prompt: "Reply with exactly: pong", maxTokens: 256 },
       assert: (ctx) => {
         const b = ctx.responseBody as Record<string, unknown> | undefined;
         if (!b) throw new Error("no response body");
@@ -74,7 +75,7 @@ export function liveScenariosFor(provider: ProviderConfig): Scenario[] {
       live: {
         mode: "stream",
         prompt: "Reply with exactly: pong",
-        maxTokens: 32,
+        maxTokens: 256,
       },
       assert: (ctx) => {
         if (!ctx.streamText?.trim()) {
@@ -95,7 +96,7 @@ export function liveScenariosFor(provider: ProviderConfig): Scenario[] {
       live: {
         mode: "tool",
         prompt: "What is the weather in Paris? Use the tool.",
-        maxTokens: 256,
+        maxTokens: 512,
         tools: sourceTools,
         toolResultSecondTurn: true,
       },
@@ -112,6 +113,26 @@ export function liveScenariosFor(provider: ProviderConfig): Scenario[] {
         if (!b) throw new Error("no response body on second turn");
         const text = extractText(b);
         if (!text.trim()) throw new Error("no text answer after tool result");
+      },
+    });
+  }
+
+  if (provider.capabilities.includes("parallel_tools")) {
+    scenarios.push({
+      id: `${provider.id}:live-parallel-tool`,
+      title: `Live parallel tool calls (${from} -> ${provider.protocol})`,
+      tags: ["live", "tool", "parallel"],
+      requires: ["parallel_tools"],
+      live: {
+        mode: "tool",
+        prompt: "What is the weather in Paris AND in Tokyo? Call the tool for both cities in parallel.",
+        maxTokens: 512,
+        tools: sourceTools,
+        toolResultSecondTurn: false,
+      },
+      assert: (ctx) => {
+        // At least two parallel tool calls, distinct ids, valid JSON args.
+        assertParallelToolCalls(ctx, 2);
       },
     });
   }
@@ -139,6 +160,51 @@ export function liveScenariosFor(provider: ProviderConfig): Scenario[] {
         if (!b) throw new Error("no response body");
         if (!extractText(b).trim()) {
           throw new Error(`empty text reply; response=${summarizeBody(b)}`);
+        }
+      },
+    });
+  }
+
+  // Reasoning -> text ordering (tech-v2.md STREAM-001, §20 Recommended). Only
+  // providers declaring a Chat reasoning field can carry thinking into the
+  // source stream; the profile is set so reasoning survives translation
+  // (TH-003, never guessed).
+  const reasoningStreamCapable =
+    provider.protocol === "openai-chat"
+      ? provider.capabilities.includes("chat_reasoning_extension")
+      : provider.capabilities.includes("thinking");
+  if (reasoningStreamCapable) {
+    scenarios.push({
+      id: `${provider.id}:live-reasoning-text`,
+      title: `Live reasoning -> text stream (${from} -> ${provider.protocol})`,
+      tags: ["live", "thinking", "stream"],
+      requires: provider.protocol === "openai-chat" ? ["chat_reasoning_extension"] : ["thinking"],
+      // Declare the OpenAI Chat reasoning field so thinking survives into/out
+      // of the source stream in either direction (TH-003, never guessed).
+      profiles: {
+        "openai-chat": {
+          protocol: "openai-chat",
+          capabilities: {
+            tools: true,
+            parallelTools: true,
+            streaming: true,
+            thinking: true,
+            reasoningField: "reasoning_content",
+          },
+          defaultHeaders: {},
+        },
+      },
+      live: {
+        mode: "stream",
+        prompt: "First think about HTTP/3 briefly, then answer in one sentence.",
+        maxTokens: 512,
+      },
+      assert: (ctx) => {
+        // Structure-only: reasoning deltas precede text; never assert the
+        // private reasoning content itself (10.5).
+        assertReasoningThenText(ctx);
+        if (!ctx.streamText?.trim()) {
+          throw new Error("no text content after reasoning");
         }
       },
     });

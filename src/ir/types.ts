@@ -68,8 +68,21 @@ export interface CanonicalGenerationOptions {
 }
 
 export interface CanonicalThinkingConfig {
-  enabled: boolean;
+  /**
+   * Thinking mode (v2, P0-6):
+   * - `disabled`   -> no thinking (Anthropic `{ type: "disabled" }`)
+   * - `enabled`    -> fixed-budget thinking (Anthropic `{ type: "enabled", budget_tokens }`)
+   * - `adaptive`   -> adaptive thinking (Anthropic `{ type: "adaptive" }` + `output_config.effort`)
+   */
+  mode: "disabled" | "enabled" | "adaptive";
+  /** Fixed thinking budget for `mode: "enabled"` (Anthropic `budget_tokens`). */
   budgetTokens?: number;
+  /** Reasoning effort (OpenAI `reasoning_effort` / Anthropic `output_config.effort`). */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Provider display hint, preserved opaque when declared. */
+  display?: string;
+  /** Provider-specific config, preserved opaque (never parsed by codecs). */
+  providerMetadata?: Record<string, unknown>;
 }
 
 export interface CanonicalRequest {
@@ -80,6 +93,11 @@ export interface CanonicalRequest {
   toolChoice?: CanonicalToolChoice;
   generation?: CanonicalGenerationOptions;
   thinking?: CanonicalThinkingConfig;
+  /**
+   * Whether the provider may run several tool calls in parallel (OpenAI
+   * `parallel_tool_calls`, Anthropic `tool_choice.disable_parallel_tool_use`).
+   */
+  parallelToolCalls?: boolean;
   /** Unrecognized / provider-specific fields, preserved opaque (FR-004). */
   extensions?: Record<string, unknown>;
 }

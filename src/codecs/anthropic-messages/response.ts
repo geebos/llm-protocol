@@ -76,7 +76,7 @@ export const anthropicResponseCodec: ResponseCodec = {
       stop_reason: renderStopReason(canonical.finishReason, ctx),
       stop_sequence: canonical.extensions?.stopSequence ?? null,
     };
-    if (canonical.usage) body.usage = renderUsage(canonical.usage);
+    if (canonical.usage) body.usage = renderUsage(canonical.usage, ctx);
     return body;
   },
 };
@@ -99,9 +99,26 @@ function parseUsage(usage: unknown): CanonicalUsage | undefined {
   return parsed;
 }
 
-function renderUsage(usage: CanonicalUsage): Record<string, unknown> {
+/**
+ * Render canonical usage to Anthropic token counts (P1-1 / 13.5).
+ * OpenAI's `prompt_tokens` includes cached tokens; Anthropic reports them
+ * separately, so subtract cache and clamp at zero when cache fields are present.
+ */
+function renderUsage(usage: CanonicalUsage, ctx: CodecContext): Record<string, unknown> {
+  const cacheTotal =
+    (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+  let inputTokens = usage.inputTokens;
+  if (usage.inputTokens !== undefined && cacheTotal > 0) {
+    inputTokens = Math.max(0, usage.inputTokens - cacheTotal);
+    ctx.warnings.push({
+      code: "cache_usage_approximation",
+      message: `Split input_tokens=${inputTokens} from prompt_tokens minus cache tokens for Anthropic`,
+      fidelity: "COMPATIBLE",
+      field: "usage.input_tokens",
+    });
+  }
   return {
-    ...(usage.inputTokens !== undefined ? { input_tokens: usage.inputTokens } : {}),
+    ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
     ...(usage.outputTokens !== undefined ? { output_tokens: usage.outputTokens } : {}),
     ...(usage.cacheReadTokens !== undefined
       ? { cache_read_input_tokens: usage.cacheReadTokens }

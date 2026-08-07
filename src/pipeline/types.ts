@@ -44,6 +44,13 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
    */
   timeoutMs?: number;
 
+  /**
+   * Anthropic keepalive ping interval in ms while the upstream is idle
+   * (GAP-013). Defaults to 15000; only used when the source protocol is
+   * Anthropic Messages.
+   */
+  keepAliveIntervalMs?: number;
+
   /** Diagnostic hook. Must never receive keys, credentials or prompt bodies. */
   trace?: (trace: TranslationTrace) => void;
 }

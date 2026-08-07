@@ -6,6 +6,7 @@ import type { CanonicalResponse } from "../../ir/response.js";
 import type { CanonicalUsage } from "../../ir/usage.js";
 import type { ContentPart } from "../../ir/types.js";
 import type { ProviderProfile } from "../../capabilities/provider-profile.js";
+import type { UsageCapabilities } from "../../capabilities/provider-profile.js";
 import { validationError } from "../../errors.js";
 import type { CodecContext, ResponseCodec } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
@@ -68,7 +69,7 @@ export function createOpenAiChatResponseCodec(
         model: typeof p.model === "string" ? p.model : undefined,
         content,
         finishReason,
-        usage: parseUsage(p.usage),
+        usage: parseUsage(p.usage, profile.capabilities.usage),
         extensions,
       };
     },
@@ -88,10 +89,32 @@ export function createOpenAiChatResponseCodec(
         (p): p is Extract<ContentPart, { type: "reasoning" }> => p.type === "reasoning",
       );
 
+      // Opaque thinking signatures (P1-2): only a provider declaring an
+      // opaque-signature field can carry them; otherwise warn, never silently
+      // drop the state that may be needed to resume thinking next turn.
+      const sigCap = profile.capabilities.reasoning;
+      const signature = reasoning
+        .map((r) => r.signature)
+        .find((s): s is string => typeof s === "string");
+      if (signature !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
+        // preserved under the provider's declared opaque-signature field
+      } else if (signature !== undefined) {
+        ctx.warnings.push({
+          code: "thinking_signature_dropped",
+          message:
+            "Opaque thinking signature dropped because the target does not declare an opaque-signature field",
+          fidelity: "LOSSY",
+          field: "content.reasoning.signature",
+        });
+      }
+
       const message: Record<string, unknown> = {
         role: "assistant",
         content: text || null,
       };
+      if (signature !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
+        message[sigCap.signatureField] = signature;
+      }
       if (reasoningField && reasoning.length) {
         message[reasoningField] = reasoning.map((r) => r.text ?? "").join("");
       } else if (reasoning.length && policies.reasoning === "provider_metadata") {
@@ -138,7 +161,7 @@ export function createOpenAiChatResponseCodec(
             logprobs: null,
           },
         ],
-        ...(canonical.usage ? { usage: renderUsage(canonical.usage) } : {}),
+        ...(canonical.usage ? { usage: renderUsage(canonical.usage, ctx) } : {}),
       };
     },
   };
@@ -178,7 +201,10 @@ function parseContent(
   return content;
 }
 
-function parseUsage(usage: unknown): CanonicalUsage | undefined {
+function parseUsage(
+  usage: unknown,
+  caps: UsageCapabilities | undefined,
+): CanonicalUsage | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const u = usage as Record<string, unknown>;
   const parsed: CanonicalUsage = {};
@@ -194,13 +220,54 @@ function parseUsage(usage: unknown): CanonicalUsage | undefined {
   for (const key of ["prompt_tokens_details", "completion_tokens_details", "prompt_tokens_details_breakdown"]) {
     if (u[key] !== undefined) details[key] = u[key];
   }
+  const promptDetails = u.prompt_tokens_details as
+    | { cached_tokens?: unknown }
+    | undefined;
+  if (promptDetails && typeof promptDetails.cached_tokens === "number") {
+    parsed.cacheReadTokens = promptDetails.cached_tokens;
+  }
+  // Compatible providers may report cache write/creation under other names
+  // (tech-v2.md §13.2). Only read them when the profile declares the dialect.
+  if (caps?.cacheCreation) {
+    for (const key of ["cache_creation_tokens", "cache_write_tokens", "cached_creation_tokens"]) {
+      if (typeof u[key] === "number") {
+        parsed.cacheCreationTokens = u[key] as number;
+        break;
+      }
+    }
+  }
+  const completionDetails = u.completion_tokens_details as
+    | { reasoning_tokens?: unknown }
+    | undefined;
+  if (completionDetails && typeof completionDetails.reasoning_tokens === "number") {
+    parsed.reasoningTokens = completionDetails.reasoning_tokens;
+  }
   if (Object.keys(details).length) parsed.providerDetails = details;
-  return parsed;
+  return Object.keys(parsed).length ? parsed : undefined;
 }
 
-function renderUsage(usage: CanonicalUsage): Record<string, unknown> {
+/**
+ * Render canonical usage to OpenAI token counts (P1-1 / 13.4).
+ * Anthropic reports cache tokens separately; OpenAI's `prompt_tokens` includes
+ * them, so compose when cache fields are present.
+ */
+function renderUsage(usage: CanonicalUsage, ctx: CodecContext): Record<string, unknown> {
+  const cacheTotal =
+    (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+  const promptTokens =
+    usage.inputTokens !== undefined && cacheTotal > 0
+      ? usage.inputTokens + cacheTotal
+      : usage.inputTokens;
+  if (usage.inputTokens !== undefined && cacheTotal > 0) {
+    ctx.warnings.push({
+      code: "cache_usage_approximation",
+      message: `Composed prompt_tokens=${promptTokens} from input_tokens + cache tokens for OpenAI`,
+      fidelity: "COMPATIBLE",
+      field: "usage.prompt_tokens",
+    });
+  }
   return {
-    ...(usage.inputTokens !== undefined ? { prompt_tokens: usage.inputTokens } : {}),
+    ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}),
     ...(usage.outputTokens !== undefined
       ? { completion_tokens: usage.outputTokens }
       : {}),

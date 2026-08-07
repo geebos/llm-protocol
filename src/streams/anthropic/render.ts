@@ -235,6 +235,54 @@ function renderStopReason(reason: CanonicalFinishReason | undefined): string | n
   return STOP_REASON_MAP[reason] ?? null;
 }
 
+const ANTHROPIC_PING = encodeSSE("ping", JSON.stringify({ type: "ping" }));
+
+/**
+ * Inject Anthropic `ping` keepalive frames while the upstream is idle
+ * (GAP-013). The official Anthropic SDK keeps its stream alive on periodic
+ * pings; without them a long upstream thinking stream (e.g. OpenAI reasoning)
+ * can look dead to the client. Only used when the *source* protocol is
+ * Anthropic. The timer stops on upstream EOF and on cancellation.
+ */
+export function withAnthropicKeepAlive(
+  source: ReadableStream<Uint8Array>,
+  intervalMs = 15_000,
+): ReadableStream<Uint8Array> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let cancelled = false;
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      reader = source.getReader();
+      timer = setInterval(() => {
+        if (cancelled) return;
+        // Backpressure: only ping when the client is keeping up.
+        if ((controller.desiredSize ?? 1) > 0) {
+          controller.enqueue(ANTHROPIC_PING);
+        }
+      }, intervalMs);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+        clearInterval(timer);
+        controller.close();
+      } catch (err) {
+        clearInterval(timer);
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      cancelled = true;
+      clearInterval(timer);
+      void reader?.cancel(reason);
+    },
+  });
+}
+
 function renderUsage(usage: CanonicalUsage): Record<string, unknown> {
   return {
     ...(usage.inputTokens !== undefined ? { input_tokens: usage.inputTokens } : {}),

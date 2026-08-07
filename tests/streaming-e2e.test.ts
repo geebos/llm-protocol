@@ -354,6 +354,53 @@ describe("first-event latency and fragmentation (SR-009, TC-016)", () => {
     expect(buffer).toContain(" late");
   });
 
+  it("injects an Anthropic ping while the upstream is idle (GAP-013)", async () => {
+    // OpenAI upstream starts and then stalls (like long thinking); with the
+    // Anthropic source the client must receive a keepalive ping during the
+    // stall, before any further upstream data.
+    const head = openaiFrame({ id: "c", choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] });
+    const tail = openaiFrame({ id: "c", choices: [{ index: 0, delta: { content: "late" }, finish_reason: null }] }) +
+      openaiFrame({ id: "c", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) +
+      openaiFrame("[DONE]");
+    const upstream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(head));
+        await new Promise((r) => setTimeout(r, 150));
+        controller.enqueue(encoder.encode(tail));
+        controller.close();
+      },
+    });
+    const fetch = (async () =>
+      new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+
+    const forward = translate({
+      from: "anthropic-messages",
+      to: "openai-chat",
+      fetch,
+      keepAliveIntervalMs: 30,
+    });
+    const response = await forward(anthropicMessagesStreamRequest());
+    const reader = response.body!.getReader();
+    let buffer = "";
+    let sawPing = false;
+    let pingElapsed = -1;
+    const t0 = Date.now();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += new TextDecoder().decode(value);
+      if (!sawPing && buffer.includes('event: ping')) {
+        sawPing = true;
+        pingElapsed = Date.now() - t0;
+      }
+    }
+    // ping must arrive during the 150ms stall, before the tail (late text).
+    expect(sawPing).toBe(true);
+    expect(pingElapsed).toBeGreaterThanOrEqual(0);
+    expect(pingElapsed).toBeLessThan(140);
+    expect(buffer).toContain('text":"late"');
+  });
+
   it("survives byte-level fragmentation end to end (TC-016)", async () => {
     const fetch = (async () => {
       const bytes = encoder.encode(anthropicTextStream);

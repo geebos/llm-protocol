@@ -12,6 +12,9 @@ import { anthropicErrorCodec } from "./error.js";
 import { createAnthropicStreamParser } from "../../streams/anthropic/parse.js";
 import { createAnthropicStreamRenderer } from "../../streams/anthropic/render.js";
 import type { TranslationWarning } from "../../ir/fidelity.js";
+import { normalizeAnthropicTurns } from "./normalize.js";
+
+export { normalizeAnthropicTurns };
 
 export const anthropicDefaultProfile: ProviderProfile = {
   protocol: "anthropic-messages",

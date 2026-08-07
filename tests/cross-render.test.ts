@@ -86,7 +86,7 @@ describe("OpenAI request -> Anthropic request render", () => {
       },
       ctx,
     );
-    canonical.thinking = { enabled: true, budgetTokens: 2000 };
+    canonical.thinking = { mode: "enabled", budgetTokens: 2000 };
     const body = openai.request.renderRequest(canonical, false, ctx);
     expect(body).toBeTruthy();
     expect(ctx.warnings.some((w) => w.code === "thinking_dropped")).toBe(true);
@@ -156,6 +156,70 @@ describe("Anthropic request -> OpenAI request render", () => {
       description: "d",
     });
   });
+
+  it("round-trips an opaque thinking signature to a declared Chat field (P1-2 request)", () => {
+    const profile = {
+      protocol: "openai-chat" as const,
+      capabilities: {
+        tools: true,
+        parallelTools: true,
+        streaming: true,
+        thinking: true,
+        reasoningField: "reasoning_content",
+        reasoning: { text: true, opaqueSignature: true, signatureField: "thinking_signature" },
+      },
+      defaultHeaders: {},
+    };
+    const openaiWithReasoning = createOpenAiChatAdapter(profile);
+    const ctx = newCodecContext();
+    const canonical = anthropic.request.parseRequest(anthropicReq, ctx);
+    const body = openaiWithReasoning.request.renderRequest(canonical, false, ctx) as Record<string, unknown>;
+    const msgs = body.messages as Array<Record<string, unknown>>;
+    expect(msgs[1]).toMatchObject({
+      role: "assistant",
+      reasoning_content: "reasoning",
+      thinking_signature: "sig-1",
+    });
+    // signature stays opaque in IR: no warnings about dropping it
+    expect(ctx.warnings.some((w) => w.code === "thinking_signature_dropped")).toBe(false);
+  });
+
+  it("parses an assistant signature back into IR signature (P1-2 request parse)", () => {
+    const profile = {
+      protocol: "openai-chat" as const,
+      capabilities: {
+        tools: true,
+        parallelTools: true,
+        streaming: true,
+        thinking: true,
+        reasoningField: "reasoning_content",
+        reasoning: { text: true, opaqueSignature: true, signatureField: "thinking_signature" },
+      },
+      defaultHeaders: {},
+    };
+    const openaiWithReasoning = createOpenAiChatAdapter(profile);
+    const ctx = newCodecContext();
+    const canonical = openaiWithReasoning.request.parseRequest(
+      {
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            reasoning_content: "chain",
+            thinking_signature: "SIG-XYZ",
+          },
+        ],
+      },
+      ctx,
+    );
+    const part = canonical.messages[0].content[0];
+    expect(part.type).toBe("reasoning");
+    if (part.type === "reasoning") {
+      expect(part.text).toBe("chain");
+      expect(part.signature).toBe("SIG-XYZ");
+    }
+  });
 });
 
 describe("OpenAI response -> Anthropic response render", () => {
@@ -224,6 +288,47 @@ describe("Anthropic response -> OpenAI response render", () => {
     expect(message.reasoning_content).toBe("chain");
     expect(message.content).toBe("Answer");
     expect((body.usage as Record<string, unknown>).prompt_tokens).toBe(8);
+  });
+
+  it("warns when a thinking signature has no declared opaque field (P1-2)", () => {
+    const profile = {
+      protocol: "openai-chat" as const,
+      capabilities: {
+        tools: true,
+        parallelTools: true,
+        streaming: true,
+        thinking: true,
+        reasoningField: "reasoning_content",
+      },
+      defaultHeaders: {},
+    };
+    const openaiWithReasoning = createOpenAiChatAdapter(profile);
+    const ctx = newCodecContext();
+    openaiWithReasoning.response.renderResponse(canonical, ctx);
+    const sig = ctx.warnings.find((w) => w.code === "thinking_signature_dropped");
+    expect(sig).toBeTruthy();
+    expect(sig!.fidelity).toBe("LOSSY");
+  });
+
+  it("preserves a thinking signature under a declared opaque field (P1-2)", () => {
+    const profile = {
+      protocol: "openai-chat" as const,
+      capabilities: {
+        tools: true,
+        parallelTools: true,
+        streaming: true,
+        thinking: true,
+        reasoningField: "reasoning_content",
+        reasoning: { text: true, opaqueSignature: true, signatureField: "thinking_signature" },
+      },
+      defaultHeaders: {},
+    };
+    const openaiWithReasoning = createOpenAiChatAdapter(profile);
+    const ctx = newCodecContext();
+    const body = openaiWithReasoning.response.renderResponse(canonical, ctx) as Record<string, unknown>;
+    const message = (body.choices as Array<Record<string, unknown>>)[0].message as Record<string, unknown>;
+    expect(message.thinking_signature).toBe("sig-1");
+    expect(ctx.warnings.some((w) => w.code === "thinking_signature_dropped")).toBe(false);
   });
 });
 

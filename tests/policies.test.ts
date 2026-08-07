@@ -117,7 +117,9 @@ describe("request-side thinking config (target = openai-chat)", () => {
     });
 
     await forward(anthropicThinkingRequest());
-    expect(captured.metadata).toEqual({ llm_protocol_thinking: { budgetTokens: 1000 } });
+    expect(captured.metadata).toEqual({
+      llm_protocol_thinking: { mode: "enabled", budgetTokens: 1000 },
+    });
     expect(traces[0].warnings.some((w) => w.code === "thinking_provider_metadata")).toBe(true);
   });
 });
