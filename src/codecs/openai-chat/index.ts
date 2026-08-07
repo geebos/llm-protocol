@@ -21,6 +21,7 @@ export const openaiChatDefaultProfile: ProviderProfile = {
     parallelTools: true,
     streaming: true,
     thinking: false,
+    cache: { promptCacheKey: true },
   },
   defaultHeaders: {},
 };
@@ -31,6 +32,7 @@ export function createOpenAiChatAdapter(
 ): ProtocolAdapter {
   return {
     format: profile.protocol,
+    profile,
     endpoint: openaiChatEndpoint,
     headers: createOpenAiChatHeaders(profile),
     request: createOpenAiChatRequestCodec(profile, policies),

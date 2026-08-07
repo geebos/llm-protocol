@@ -220,6 +220,56 @@ describe("Anthropic request -> OpenAI request render", () => {
       expect(part.signature).toBe("SIG-XYZ");
     }
   });
+
+  it("drops the Anthropic billing header from system when targeting OpenAI", () => {
+    const ctx = newCodecContext();
+    const canonical = anthropic.request.parseRequest(
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        stream: false,
+        system: [
+          {
+            type: "text",
+            text: "x-anthropic-billing-header: cc_version=2.1.153.3d1; cc_entrypoint=cli; cch=9a10e;",
+          },
+          { type: "text", text: "You are a helpful assistant." },
+        ],
+        messages: [{ role: "user", content: "hi" }],
+      },
+      ctx,
+    );
+    const body = openai.request.renderRequest(canonical, false, ctx) as Record<string, unknown>;
+    const msgs = body.messages as Array<Record<string, unknown>>;
+    expect(msgs[0]).toEqual({ role: "system", content: "You are a helpful assistant." });
+    expect(JSON.stringify(body)).not.toContain("x-anthropic-billing-header");
+    expect(JSON.stringify(body)).not.toContain("cch=9a10e");
+    expect(ctx.warnings.some((w) => w.code === "anthropic_billing_header_dropped")).toBe(true);
+  });
+
+  it("omits the system message when it only contains a billing header", () => {
+    const ctx = newCodecContext();
+    const canonical = anthropic.request.parseRequest(
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        stream: true,
+        system: [
+          {
+            type: "text",
+            text: "x-anthropic-billing-header: cc_version=2.1.153.3d1; cc_entrypoint=cli; cch=9a10e;",
+          },
+        ],
+        messages: [{ role: "user", content: "hi" }],
+      },
+      ctx,
+    );
+    const body = openai.request.renderRequest(canonical, true, ctx) as Record<string, unknown>;
+    const msgs = body.messages as Array<Record<string, unknown>>;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toEqual({ role: "user", content: "hi" });
+    expect(ctx.warnings.some((w) => w.code === "anthropic_billing_header_dropped")).toBe(true);
+  });
 });
 
 describe("OpenAI response -> Anthropic response render", () => {

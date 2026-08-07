@@ -196,6 +196,59 @@ describe("TC-006 multi-turn tool result re-injection", () => {
   });
 });
 
+describe("Anthropic user turn with text + tool_result keeps OpenAI tool adjacency", () => {
+  it("emits tool messages immediately after the assistant tool_calls (Anthropic -> OpenAI)", async () => {
+    let capturedTargetBody: Record<string, unknown> = {};
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
+      capturedTargetBody = (await req.json()) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ id: "m", type: "message", role: "assistant", model: "c", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: {} }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
+
+    // Claude Code style turn: assistant tool_use, then a user turn carrying
+    // both the tool_result and follow-up text.
+    const request = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { authorization: "Bearer sk-ant", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 256,
+        messages: [
+          { role: "user", content: "what's the weather?" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Let me check." },
+              { type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "Paris" } },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_1", content: "25C, sunny" },
+              { type: "text", text: "and humidity?" },
+            ],
+          },
+        ],
+      }),
+    });
+    await forward(request);
+
+    const msgs = capturedTargetBody.messages as Array<Record<string, unknown>>;
+    const assistantIdx = msgs.findIndex(
+      (m) => m.role === "assistant" && Array.isArray((m as { tool_calls?: unknown }).tool_calls),
+    );
+    expect(assistantIdx).toBeGreaterThan(-1);
+    // OpenAI requires tool messages to immediately follow the tool_calls message.
+    expect(msgs[assistantIdx + 1]).toMatchObject({ role: "tool", tool_call_id: "toolu_1" });
+    expect(msgs[assistantIdx + 2]).toMatchObject({ role: "user", content: "and humidity?" });
+  });
+});
+
 describe("TR-002 synthesized tool ids are reported", () => {
   it("reports a synthesized tool_use id in the trace (Anthropic upstream)", async () => {
     // Anthropic tool_use without an id.

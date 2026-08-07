@@ -91,6 +91,8 @@ npm run compat -- --offline-only   # 离线 fixture 矩阵（必跑，不打真�
 使用 `npm version` 管理版本号，**禁止**手改 `package.json` 的 version 字段。
 
 - 仓库已配置 `publishConfig`（npmjs 公共源）与 `.github/workflows/publish-npm.yml`（`v*` tag 触发 Trusted Publishing 发布）。
+- 本地发布 `publish:local` 会先 `npm version patch --no-git-tag-version`（本地 patch bump，不提交不打 tag）再发布到本地 registry（`http://localhost:9007`），因此工作区可能出现未提交的 version 变更。
+- **发现版本变更不要回滚**：若工作区已存在 version 变更（例如来自 `publish:local`），禁止将其改回 HEAD 上的旧版本，应在当前版本基础上继续 bump。
 
 ### 流程
 

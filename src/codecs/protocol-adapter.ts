@@ -6,6 +6,7 @@
  * over parsed payloads; they never touch the network.
  */
 import type { ApiFormat } from "../formats.js";
+import type { ProviderProfile } from "../capabilities/provider-profile.js";
 import type { CanonicalRequest } from "../ir/types.js";
 import type { CanonicalResponse } from "../ir/response.js";
 import type { CanonicalError } from "../errors.js";
@@ -89,6 +90,8 @@ export interface StreamCodec {
 
 export interface ProtocolAdapter {
   format: ApiFormat;
+  /** Effective profile (default or caller-supplied) driving capability gates. */
+  profile: ProviderProfile;
   endpoint: EndpointCodec;
   headers: HeaderCodec;
   request: RequestCodec;

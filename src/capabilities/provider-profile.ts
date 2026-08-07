@@ -59,6 +59,20 @@ export interface StreamCapabilities {
   maySplitToolMetadata?: boolean;
 }
 
+/**
+ * Prompt-cache affinity dialect.
+ *
+ * OpenAI Chat has no standard cache_control; this project approximates it as
+ * a stable `prompt_cache_key` (cache affinity, not lossless breakpoint
+ * semantics). Whether the target provider accepts that non-standard field is
+ * a declared capability — unknown capability is treated as unsupported, so
+ * nothing is sent to providers that would 400 on it.
+ */
+export interface CacheCapabilities {
+  /** Provider accepts an OpenAI Chat `prompt_cache_key` request field. */
+  promptCacheKey?: boolean;
+}
+
 export interface ProviderCapabilities {
   tools: boolean;
   parallelTools: boolean;
@@ -72,6 +86,8 @@ export interface ProviderCapabilities {
   usage?: UsageCapabilities;
   /** Streaming dialect (GAP-014). */
   stream?: StreamCapabilities;
+  /** Prompt-cache dialect. */
+  cache?: CacheCapabilities;
 }
 
 export interface ProviderProfile {

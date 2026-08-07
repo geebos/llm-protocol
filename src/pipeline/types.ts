@@ -5,6 +5,8 @@ import type { ApiFormat } from "../formats.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import type { ProviderProfile } from "../capabilities/provider-profile.js";
 import type { TranslationPolicies } from "../ir/policies.js";
+import type { CacheAffinityResolver } from "../cache/resolver.js";
+import type { CacheTranslationReport } from "../cache/types.js";
 
 export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> {
   from: From;
@@ -51,6 +53,17 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
    */
   keepAliveIntervalMs?: number;
 
+  /**
+   * Prompt-cache affinity translation (Anthropic `cache_control` -> OpenAI
+   * Chat `prompt_cache_key`). Opt-in; only meaningful when the target is
+   * OpenAI Chat. `resolvers` default to `DEFAULT_CACHE_RESOLVERS` (explicit
+   * `x-llm-prompt-cache-key` header, then `cache_control` anchors). Injection
+   * is gated by the target profile's `capabilities.cache.promptCacheKey`.
+   */
+  cache?: {
+    resolvers?: CacheAffinityResolver[];
+  };
+
   /** Diagnostic hook. Must never receive keys, credentials or prompt bodies. */
   trace?: (trace: TranslationTrace) => void;
 }
@@ -71,4 +84,6 @@ export interface TranslationTrace {
   /** Worst fidelity observed across warnings (EXACT if none). */
   fidelity: Fidelity;
   warnings: TranslationWarning[];
+  /** Cache affinity summary (when `cache` is enabled on the factory). */
+  cache?: CacheTranslationReport;
 }

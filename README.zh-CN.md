@@ -246,6 +246,11 @@ npm run build           # 构建 dist/
 npm run compat -- --offline-only   # 离线兼容性矩阵
 ```
 
+## 发布
+
+- **npmjs（公共源）**：用 `npm version <patch|minor|major>` 升版本，推送 `v*` tag 后由 GitHub Actions（`publish-npm.yml`，Trusted Publishing）发布。
+- **本地源**：`npm run publish:local` 先自动 bump patch 版本（`npm version patch --no-git-tag-version`，不提交、不打 tag）再发布到本地 registry `http://localhost:9007`（鉴权 token 取自 `~/.npmrc`）。
+
 ## 里程碑状态
 
 M0–M6 全部完成：

@@ -246,6 +246,11 @@ npm run build           # build dist/
 npm run compat -- --offline-only   # offline compatibility matrix
 ```
 
+## Publishing
+
+- **npmjs (public)**: bump with `npm version <patch|minor|major>`, push the `v*` tag, and the GitHub Actions workflow (`publish-npm.yml`) publishes via Trusted Publishing.
+- **Local registry**: `npm run publish:local` bumps the patch version (`npm version patch --no-git-tag-version`, no commit / no tag) and publishes to the local registry at `http://localhost:9007` (auth token comes from `~/.npmrc`).
+
 ## Milestone status
 
 M0–M6 all complete:

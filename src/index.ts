@@ -52,3 +52,29 @@ export { createAnthropicAdapter, anthropicDefaultProfile } from "./codecs/anthro
 export { createOpenAiChatAdapter, openaiChatDefaultProfile } from "./codecs/openai-chat/index.js";
 export type { CanonicalStreamEvent } from "./streams/types.js";
 export { createSSEParser, createCanonicalValidator } from "./streams/index.js";
+
+// Prompt-cache affinity (Anthropic cache_control -> OpenAI Chat prompt_cache_key).
+export type {
+  CacheAffinity,
+  CacheAffinitySource,
+  CacheAnchor,
+  CacheTranslationReport,
+  CacheTranslationWarning,
+  CacheTranslationWarningCode,
+} from "./cache/types.js";
+export type { CacheAffinityResolver } from "./cache/resolver.js";
+export {
+  resolveCacheAffinity,
+  composeCacheResolvers,
+  explicitCacheKeyResolver,
+  DEFAULT_CACHE_RESOLVERS,
+} from "./cache/resolver.js";
+export {
+  anthropicCacheControlResolver,
+  extractAnthropicCacheAnchors,
+  deriveAnthropicCacheKey,
+} from "./cache/anthropic/cache-control.js";
+export {
+  applyOpenAIChatCacheAffinity,
+  type CacheApplication,
+} from "./cache/openai-chat/apply-cache-affinity.js";

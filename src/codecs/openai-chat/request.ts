@@ -55,6 +55,13 @@ const EXTENSION_FIELDS = [
 const EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
 type ReasoningEffort = (typeof EFFORT_VALUES)[number];
 
+/**
+ * Anthropic 私有计费标记（Claude Code 注入的 `x-anthropic-billing-header`）。
+ * OpenAI Chat 目标端不理解它，渲染时丢弃并警告，避免污染 system 前缀和
+ * 计入 OpenAI token 计费（无静默降级）。
+ */
+const ANTHROPIC_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+
 function parseEffort(value: unknown): ReasoningEffort | undefined {
   if (typeof value === "string" && (EFFORT_VALUES as readonly string[]).includes(value)) {
     return value as ReasoningEffort;
@@ -446,23 +453,39 @@ function renderMessages(
 ): unknown[] {
   const out: unknown[] = [];
   if (canonical.system?.length) {
-    out.push({ role: "system", content: renderUserContent(canonical.system, ctx) });
+    const system = stripAnthropicBillingHeaders(canonical.system, ctx);
+    if (system.length) {
+      out.push({ role: "system", content: renderUserContent(system, ctx) });
+    }
   }
   for (const m of canonical.messages) {
     if (m.role === "system") {
-      out.push({ role: "system", content: renderUserContent(m.content, ctx) });
+      const system = stripAnthropicBillingHeaders(m.content, ctx);
+      if (system.length) {
+        out.push({ role: "system", content: renderUserContent(system, ctx) });
+      }
       continue;
     }
     if (m.role === "assistant") {
       out.push(renderAssistantMessage(m, reasoningField, signatureField));
       continue;
     }
-    // user or tool messages: split text parts and tool_result parts
+    // user or tool messages: split text parts and tool_result parts. OpenAI
+    // requires the tool messages to IMMEDIATELY follow the assistant tool_calls
+    // message (no user/system turn in between), so emit tool_result messages
+    // first and push any same-turn text after them.
     const textParts = m.content.filter(
       (p) => p.type === "text" || p.type === "image",
     );
     const toolParts = m.content.filter((p) => p.type === "tool_result");
     const reasoningParts = m.content.filter((p) => p.type === "reasoning");
+    for (const tp of toolParts) {
+      out.push({
+        role: "tool",
+        tool_call_id: tp.toolCallId,
+        content: renderUserContent(tp.content, ctx),
+      });
+    }
     if (textParts.length) {
       const rendered = renderUserContent(textParts, ctx);
       const isEmpty =
@@ -476,15 +499,27 @@ function renderMessages(
         content: reasoningParts.map((r) => r.text ?? "").join(""),
       });
     }
-    for (const tp of toolParts) {
-      out.push({
-        role: "tool",
-        tool_call_id: tp.toolCallId,
-        content: renderUserContent(tp.content, ctx),
-      });
-    }
   }
   return out;
+}
+
+/** Drop Anthropic billing-header text blocks from a system part list for the OpenAI target. */
+function stripAnthropicBillingHeaders(
+  parts: ContentPart[],
+  ctx: CodecContext,
+): ContentPart[] {
+  return parts.filter((p) => {
+    if (p.type === "text" && p.text.trimStart().toLowerCase().startsWith(ANTHROPIC_BILLING_HEADER_PREFIX)) {
+      ctx.warnings.push({
+        code: "anthropic_billing_header_dropped",
+        message: "Anthropic billing header dropped for OpenAI Chat target",
+        fidelity: "LOSSY",
+        field: "system.content.text",
+      });
+      return false;
+    }
+    return true;
+  });
 }
 
 function renderUserContent(parts: ContentPart[], ctx: CodecContext): string | unknown[] {

@@ -23,6 +23,8 @@ import type { TranslationTrace, TranslateOptions, ForwardTranslator } from "./ty
 import { createSSEParser, createCanonicalValidator, withAnthropicKeepAlive } from "../streams/index.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
+import { resolveCacheAffinity, DEFAULT_CACHE_RESOLVERS } from "../cache/resolver.js";
+import { applyOpenAIChatCacheAffinity } from "../cache/openai-chat/apply-cache-affinity.js";
 
 async function readErrorPayload(response: Response): Promise<unknown> {
   try {
@@ -113,6 +115,20 @@ export function translate<
     const streaming = source.request.detectStreaming(sourcePayload);
     const canonicalRequest = source.request.parseRequest(sourcePayload, ctx);
 
+    // Prompt-cache affinity (Anthropic cache_control -> OpenAI Chat
+    // prompt_cache_key). Derive the identity from the *source* body and the
+    // raw request, never by scanning the converted target request. Only
+    // meaningful when the target is OpenAI Chat.
+    const cacheEnabled = options.cache !== undefined && target.format === "openai-chat";
+    const cacheAffinity = cacheEnabled
+      ? await resolveCacheAffinity(
+          options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
+          request,
+          sourcePayload,
+          canonicalRequest,
+        )
+      : undefined;
+
     const targetUrl = target.endpoint.fromCanonical(endpoint, sourceUrl);
     const credential = source.headers.parseCredential(request.headers);
     const targetHeaders = target.headers.renderTargetHeaders(
@@ -124,6 +140,15 @@ export function translate<
       streaming,
       ctx,
     );
+    const cacheApplication = cacheEnabled
+      ? applyOpenAIChatCacheAffinity(
+          targetPayload,
+          cacheAffinity,
+          target.profile,
+          ctx,
+        )
+      : undefined;
+    const outboundPayload = cacheApplication?.body ?? targetPayload;
 
     const upstreamSignal =
       timeoutMs !== undefined
@@ -133,7 +158,7 @@ export function translate<
     const targetRequest = new Request(targetUrl, {
       method: request.method,
       headers: targetHeaders,
-      body: JSON.stringify(targetPayload),
+      body: JSON.stringify(outboundPayload),
       signal: upstreamSignal,
     });
 
@@ -147,6 +172,7 @@ export function translate<
       targetEndpoint: targetUrl.pathname,
       passthrough: false,
       warnings: ctx.warnings,
+      ...(cacheApplication ? { cache: cacheApplication.report } : {}),
     };
 
     let targetResponse: Response;

@@ -33,6 +33,7 @@ export function createAnthropicAdapter(
 ): ProtocolAdapter {
   return {
     format: profile.protocol,
+    profile,
     endpoint: anthropicEndpoint,
     headers: createAnthropicHeaders(profile),
     request: anthropicRequestCodec,
