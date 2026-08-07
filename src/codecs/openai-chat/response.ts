@@ -208,23 +208,27 @@ function parseUsage(
   if (!usage || typeof usage !== "object") return undefined;
   const u = usage as Record<string, unknown>;
   const parsed: CanonicalUsage = {};
-  if (typeof u.prompt_tokens === "number") parsed.inputTokens = u.prompt_tokens;
+  // Canonical inputTokens is pure input, EXCLUDING cache tokens. OpenAI's
+  // prompt_tokens includes cached tokens, so split them out when the details
+  // are reported (keeps the IR additive across protocols and round-trips).
+  const promptTokens = u.prompt_tokens;
+  if (typeof promptTokens === "number") {
+    const promptDetails = u.prompt_tokens_details as
+      | { cached_tokens?: unknown }
+      | undefined;
+    const cached =
+      promptDetails && typeof promptDetails.cached_tokens === "number"
+        ? promptDetails.cached_tokens
+        : 0;
+    parsed.inputTokens = Math.max(0, promptTokens - cached);
+    if (cached > 0) parsed.cacheReadTokens = cached;
+  }
   if (typeof u.completion_tokens === "number") {
     parsed.outputTokens = u.completion_tokens;
-  }
-  if (typeof u.total_tokens === "number") parsed.totalTokens = u.total_tokens;
-  if (parsed.inputTokens !== undefined && parsed.outputTokens !== undefined) {
-    parsed.totalTokens = parsed.inputTokens + parsed.outputTokens;
   }
   const details: Record<string, unknown> = {};
   for (const key of ["prompt_tokens_details", "completion_tokens_details", "prompt_tokens_details_breakdown"]) {
     if (u[key] !== undefined) details[key] = u[key];
-  }
-  const promptDetails = u.prompt_tokens_details as
-    | { cached_tokens?: unknown }
-    | undefined;
-  if (promptDetails && typeof promptDetails.cached_tokens === "number") {
-    parsed.cacheReadTokens = promptDetails.cached_tokens;
   }
   // Compatible providers may report cache write/creation under other names
   // (tech-v2.md §13.2). Only read them when the profile declares the dialect.
@@ -242,14 +246,24 @@ function parseUsage(
   if (completionDetails && typeof completionDetails.reasoning_tokens === "number") {
     parsed.reasoningTokens = completionDetails.reasoning_tokens;
   }
+  // totalTokens is the additive whole: pure input + cache + output.
+  if (parsed.inputTokens !== undefined && parsed.outputTokens !== undefined) {
+    parsed.totalTokens =
+      parsed.inputTokens +
+      (parsed.cacheReadTokens ?? 0) +
+      (parsed.cacheCreationTokens ?? 0) +
+      parsed.outputTokens;
+  } else if (typeof u.total_tokens === "number") {
+    parsed.totalTokens = u.total_tokens;
+  }
   if (Object.keys(details).length) parsed.providerDetails = details;
   return Object.keys(parsed).length ? parsed : undefined;
 }
 
 /**
  * Render canonical usage to OpenAI token counts (P1-1 / 13.4).
- * Anthropic reports cache tokens separately; OpenAI's `prompt_tokens` includes
- * them, so compose when cache fields are present.
+ * Canonical inputTokens excludes cache; OpenAI's `prompt_tokens` includes it,
+ * so compose when cache fields are present.
  */
 function renderUsage(usage: CanonicalUsage, ctx: CodecContext): Record<string, unknown> {
   const cacheTotal =

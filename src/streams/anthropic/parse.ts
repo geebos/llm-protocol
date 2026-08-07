@@ -36,8 +36,13 @@ export function parseAnthropicUsage(usage: unknown): CanonicalUsage | undefined 
   if (typeof u.cache_creation_input_tokens === "number") {
     parsed.cacheCreationTokens = u.cache_creation_input_tokens;
   }
+  // totalTokens is the additive whole: pure input + cache + output.
   if (parsed.inputTokens !== undefined && parsed.outputTokens !== undefined) {
-    parsed.totalTokens = parsed.inputTokens + parsed.outputTokens;
+    parsed.totalTokens =
+      parsed.inputTokens +
+      (parsed.cacheReadTokens ?? 0) +
+      (parsed.cacheCreationTokens ?? 0) +
+      parsed.outputTokens;
   }
   return Object.keys(parsed).length ? parsed : undefined;
 }

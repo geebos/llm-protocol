@@ -246,8 +246,10 @@ describe("NONSTREAM-005 cache usage semantics", () => {
     expect(ctx.warnings.some((w) => w.code === "cache_usage_approximation")).toBe(true);
   });
 
-  it("splits OpenAI cached tokens out of Anthropic input_tokens (13.5)", () => {
+  it("passes pure input_tokens straight to Anthropic (no double subtract, P1-1 fix)", () => {
     const ctx = newCodecContext();
+    // canonical inputTokens is already pure (cache split at parse time), so
+    // the Anthropic render must NOT subtract cache again.
     const body = anthropic.response.renderResponse(
       {
         id: "chatcmpl_1",
@@ -255,7 +257,7 @@ describe("NONSTREAM-005 cache usage semantics", () => {
         content: [{ type: "text", text: "ok" }],
         finishReason: "end_turn",
         usage: {
-          inputTokens: 16,
+          inputTokens: 12,
           outputTokens: 5,
           cacheReadTokens: 4,
         },
@@ -264,10 +266,10 @@ describe("NONSTREAM-005 cache usage semantics", () => {
     ) as Record<string, unknown>;
     expect((body.usage as Record<string, unknown>).input_tokens).toBe(12);
     expect((body.usage as Record<string, unknown>).cache_read_input_tokens).toBe(4);
-    expect(ctx.warnings.some((w) => w.code === "cache_usage_approximation")).toBe(true);
+    expect(ctx.warnings.some((w) => w.code === "cache_usage_approximation")).toBe(false);
   });
 
-  it("clamps Anthropic input_tokens at zero", () => {
+  it("keeps a small pure input_tokens without clamping (no split anymore)", () => {
     const ctx = newCodecContext();
     const body = anthropic.response.renderResponse(
       {
@@ -277,7 +279,9 @@ describe("NONSTREAM-005 cache usage semantics", () => {
       },
       ctx,
     ) as Record<string, unknown>;
-    expect((body.usage as Record<string, unknown>).input_tokens).toBe(0);
+    // inputTokens is pure input; cache is reported separately, so 3 stays 3.
+    expect((body.usage as Record<string, unknown>).input_tokens).toBe(3);
+    expect((body.usage as Record<string, unknown>).cache_read_input_tokens).toBe(5);
   });
 
   it("parses OpenAI cached_tokens details into canonical cacheReadTokens", () => {
@@ -328,5 +332,36 @@ describe("NONSTREAM-005 cache usage semantics", () => {
     // default profile (no dialect) must NOT read the provider-specific field
     const plain = openai.response.parseResponse(payload, ctx);
     expect(plain.usage?.cacheCreationTokens).toBeUndefined();
+  });
+
+  it("regression: OpenAI->OpenAI round trip keeps prompt_tokens (no double cache)", () => {
+    // prompt_tokens=16 includes cached_tokens=4; after parse->render the
+    // value must stay 16 (canonical inputTokens is pure input = 12).
+    const ctx = newCodecContext();
+    const canonical = openai.response.parseResponse(
+      {
+        id: "chatcmpl_1",
+        object: "chat.completion",
+        model: "gpt-4o",
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 16,
+          completion_tokens: 5,
+          total_tokens: 21,
+          prompt_tokens_details: { cached_tokens: 4 },
+        },
+      },
+      ctx,
+    );
+    // canonical is additive: pure input + cache + output = total
+    expect(canonical.usage).toMatchObject({
+      inputTokens: 12,
+      cacheReadTokens: 4,
+      outputTokens: 5,
+      totalTokens: 21,
+    });
+    const rendered = openai.response.renderResponse(canonical, ctx) as Record<string, unknown>;
+    expect((rendered.usage as Record<string, unknown>).prompt_tokens).toBe(16);
+    expect((rendered.usage as Record<string, unknown>).total_tokens).toBe(21);
   });
 });

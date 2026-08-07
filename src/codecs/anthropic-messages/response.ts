@@ -93,32 +93,26 @@ function parseUsage(usage: unknown): CanonicalUsage | undefined {
   if (typeof u.cache_creation_input_tokens === "number") {
     parsed.cacheCreationTokens = u.cache_creation_input_tokens;
   }
+  // totalTokens is the additive whole: pure input + cache + output.
   if (parsed.inputTokens !== undefined && parsed.outputTokens !== undefined) {
-    parsed.totalTokens = parsed.inputTokens + parsed.outputTokens;
+    parsed.totalTokens =
+      parsed.inputTokens +
+      (parsed.cacheReadTokens ?? 0) +
+      (parsed.cacheCreationTokens ?? 0) +
+      parsed.outputTokens;
   }
   return parsed;
 }
 
 /**
- * Render canonical usage to Anthropic token counts (P1-1 / 13.5).
- * OpenAI's `prompt_tokens` includes cached tokens; Anthropic reports them
- * separately, so subtract cache and clamp at zero when cache fields are present.
+ * Render canonical usage to Anthropic token counts.
+ * Canonical inputTokens excludes cache tokens; Anthropic reports them
+ * separately, so passthrough is exact (no split needed — P1-1 fix: the split
+ * previously double-subtracted cache on same-protocol round trips).
  */
 function renderUsage(usage: CanonicalUsage, ctx: CodecContext): Record<string, unknown> {
-  const cacheTotal =
-    (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
-  let inputTokens = usage.inputTokens;
-  if (usage.inputTokens !== undefined && cacheTotal > 0) {
-    inputTokens = Math.max(0, usage.inputTokens - cacheTotal);
-    ctx.warnings.push({
-      code: "cache_usage_approximation",
-      message: `Split input_tokens=${inputTokens} from prompt_tokens minus cache tokens for Anthropic`,
-      fidelity: "COMPATIBLE",
-      field: "usage.input_tokens",
-    });
-  }
   return {
-    ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
+    ...(usage.inputTokens !== undefined ? { input_tokens: usage.inputTokens } : {}),
     ...(usage.outputTokens !== undefined ? { output_tokens: usage.outputTokens } : {}),
     ...(usage.cacheReadTokens !== undefined
       ? { cache_read_input_tokens: usage.cacheReadTokens }
