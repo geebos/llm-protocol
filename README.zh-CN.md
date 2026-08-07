@@ -4,6 +4,9 @@
 
 **最新版本：** [`v1.0.2`](https://github.com/geebos/llm-protocol/commit/6fb613f)
 
+[![CI](https://github.com/geebos/llm-protocol/actions/workflows/ci.yml/badge.svg)](https://github.com/geebos/llm-protocol/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgeebos%2Fllm-protocol%2Fbadges%2Fcoverage.json)](https://github.com/geebos/llm-protocol/actions/workflows/ci.yml)
+
 Clean-room 实现的 LLM 协议转换内核（Phase 1）：**Anthropic Messages ↔ OpenAI Chat** 双向请求/响应/流式转换，输入输出均为 Node.js 标准 `Request` / `Response`，可嵌入任何 HTTP 框架（Fastify / Hono / Express / 原生 Fetch）。
 
 - **协议规范**：以 OpenAI / Anthropic 官方 API 与官方 JS SDK 行为为准绳，不依赖任何第三方转换项目。

@@ -4,6 +4,9 @@
 
 **Latest version:** [`v1.0.2`](https://github.com/geebos/llm-protocol/commit/6fb613f)
 
+[![CI](https://github.com/geebos/llm-protocol/actions/workflows/ci.yml/badge.svg)](https://github.com/geebos/llm-protocol/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgeebos%2Fllm-protocol%2Fbadges%2Fcoverage.json)](https://github.com/geebos/llm-protocol/actions/workflows/ci.yml)
+
 A clean-room LLM protocol translation core (Phase 1): **Anthropic Messages ↔ OpenAI Chat** — bidirectional request/response/streaming translation that accepts and returns Node.js standard `Request` / `Response` objects, so it can be embedded into any HTTP framework (Fastify / Hono / Express / native Fetch).
 
 - **Spec-driven**: Behavior follows the official OpenAI / Anthropic APIs and official JS SDKs, with no dependency on third-party translation projects.

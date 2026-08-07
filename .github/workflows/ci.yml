@@ -1,0 +1,193 @@
+name: CI
+
+# 单测 / 类型检查 / 覆盖率统计 / 兼容性矩阵。
+#   - push 到 main 与每个 PR：跑全量单测与覆盖率，并执行覆盖率阈值门禁
+#     （NFR-009：语句覆盖率 ≥85%）。
+#   - push 到 main / 每周定时 / 手动触发：额外跑兼容性矩阵（离线 fixture +
+#     真实上游 live 冒烟，见 testkit）。live 场景纪律：provider 无 key 时自动
+#     skip，绝不 fail；PR 不跑 live（避免从不可信 PR 代码触发真实 API 调用）。
+#
+# main 分支 push 成功后，另将当前覆盖率发布为 shields.io 端点 badge 到
+# `badges` 分支，README 中的 Coverage badge 由此实时刷新。
+#
+# live 配置方式（均为可选项，缺谁就跳过谁的 live 场景）：
+#   API key        -> GitHub secret（secrets.*）
+#   base url/model -> 仓库变量 vars.* 或手动触发的 inputs；导出为环境变量，
+#                     未设置时回落到 testkit/providers.ts 内置默认
+#
+# 注意：compatible-a 需同时配置 COMPAT_A_API_KEY + COMPAT_A_BASE_URL +
+# COMPAT_A_MODEL 三者才会真正跑 live（model/baseUrl 无内置默认）。
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # 每周一 02:00 UTC，防止上游协议变化长期不被发现
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      anthropic_model:
+        description: 覆盖 ANTHROPIC_TEST_MODEL（可选，留空用默认）
+        required: false
+        type: string
+      openai_model:
+        description: 覆盖 OPENAI_TEST_MODEL（可选，留空用默认）
+        required: false
+        type: string
+      compat_a_model:
+        description: 覆盖 COMPAT_A_MODEL（可选，留空用 vars.COMPAT_A_MODEL）
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# 同一 ref 只保留最新一次运行（PR 多次 push 时取消旧 run）。schedule 与 push
+# 到 main 的 github.ref 都是 refs/heads/main，同组互斥，避免重复打真实 API
+# （live 有成本）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Measure coverage
+        run: npm run test:coverage
+
+      - name: Generate coverage badge data
+        run: node scripts/generate-coverage-badge.mjs
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage/coverage-summary.json
+            coverage/coverage-badge.json
+          if-no-files-found: error
+
+  # 兼容性矩阵：离线 fixture + 真实上游 live 冒烟。只在 push 到 main / 定时 /
+  # 手动触发时跑（PR 不跑 live）；依赖 test job 通过，避免在坏构建上浪费 live
+  # 请求。
+  compat-live:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      # API keys 全部来自 GitHub secret，各 provider 独立、均可选。
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      COMPAT_A_API_KEY: ${{ secrets.COMPAT_A_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # base url / model 从 vars.* 或 workflow_dispatch inputs 读取，写回环境
+      # 变量。仅在值非空时才导出：testkit 的 ${VAR:default} 只对「未定义」
+      # 回落，空字符串会覆盖默认，所以不能导出空值。
+      - name: Configure provider base URLs & models
+        env:
+          V_ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+          V_OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          V_COMPAT_A_BASE_URL: ${{ vars.COMPAT_A_BASE_URL }}
+          V_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || vars.ANTHROPIC_TEST_MODEL }}
+          V_OPENAI_MODEL: ${{ inputs.openai_model || vars.OPENAI_TEST_MODEL }}
+          V_COMPAT_A_MODEL: ${{ inputs.compat_a_model || vars.COMPAT_A_MODEL }}
+        run: |
+          set -euo pipefail
+          # 空/未定义时不导出（testkit 的 ${VAR:default} 只对未定义回落，空串会
+          # 覆盖默认）；${!name:-} 保证 set -u 下对未定义变量安全。
+          export_var() {
+            local name="$1" target="$2"
+            if [ -n "${!name:-}" ]; then
+              echo "${target}=${!name:-}" >> "$GITHUB_ENV"
+            fi
+          }
+          export_var V_ANTHROPIC_BASE_URL ANTHROPIC_BASE_URL
+          export_var V_OPENAI_BASE_URL OPENAI_BASE_URL
+          export_var V_COMPAT_A_BASE_URL COMPAT_A_BASE_URL
+          export_var V_ANTHROPIC_MODEL ANTHROPIC_TEST_MODEL
+          export_var V_OPENAI_MODEL OPENAI_TEST_MODEL
+          export_var V_COMPAT_A_MODEL COMPAT_A_MODEL
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (src + testkit + apps)
+        run: npm run typecheck:all
+
+      - name: Unit & integration tests
+        run: npm test
+
+      # 离线 fixture 矩阵 + 真实上游 live 冒烟。budget 用于熔断意外狂发请求。
+      - name: Compatibility matrix (offline + live)
+        run: npm run compat -- --budget 60 --reports-dir reports
+
+      - name: Upload compat reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-reports
+          path: reports/
+          if-no-files-found: ignore
+
+  # 只在 main 分支 push 上刷新 badge（PR 覆盖率以 test job 的阈值门禁为准，
+  # 不刷 badge，避免多 PR 并发互相覆盖）
+  coverage-badge:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report
+
+      - name: Publish coverage badge to `badges` branch
+        run: |
+          set -euo pipefail
+          test -f coverage-report/coverage-badge.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin badges || true
+          if git rev-parse --verify origin/badges >/dev/null 2>&1; then
+            git checkout -B badges origin/badges
+          else
+            git checkout --orphan badges
+          fi
+
+          cp coverage-report/coverage-badge.json coverage.json
+          git add -f coverage.json
+          if git diff --cached --quiet; then
+            echo "coverage unchanged, nothing to commit"
+          else
+            git commit -m "ci: update coverage badge"
+            git push origin badges --force-with-lease
+          fi
