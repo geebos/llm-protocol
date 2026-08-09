@@ -9,3 +9,5 @@ export { createAnthropicStreamParser } from "./anthropic/parse.js";
 export { createAnthropicStreamRenderer, withAnthropicKeepAlive } from "./anthropic/render.js";
 export { createOpenAiChatStreamParser } from "./openai/parse.js";
 export { createOpenAiChatStreamRenderer } from "./openai/render.js";
+export { createResponsesStreamParser } from "./responses/parse.js";
+export { createResponsesStreamRenderer } from "./responses/render.js";

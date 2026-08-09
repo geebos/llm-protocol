@@ -100,6 +100,10 @@ export class ResponseEnvelopeBuilder {
     this.state.usage = usage;
   }
 
+  setModel(model: string): void {
+    this.state.model = model;
+  }
+
   setRequestDerived(value: Record<string, unknown>): void {
     this.state.requestDerived = value;
   }

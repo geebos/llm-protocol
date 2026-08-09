@@ -1,13 +1,14 @@
 /**
  * Pipeline edge-case and error-branch tests (FR-011, TC-023).
  *
- * Covers upstream fetch failures, cancellation, non-JSON bodies, the
- * not-yet-implemented openai-responses adapter, and error codec fallbacks.
+ * Covers upstream fetch failures, cancellation, non-JSON bodies, adapter
+ * selection, and error codec fallbacks.
  */
 import { describe, expect, it } from "vitest";
 import { translate } from "../src/pipeline/translate.js";
 import { TranslationError } from "../src/errors.js";
 import { getAdapter } from "../src/codecs/registry.js";
+import { createOpenAiResponsesAdapter } from "../src/codecs/openai-responses/index.js";
 
 function openaiChatRequest(url = "https://api.anthropic.com/v1/chat/completions"): Request {
   return new Request(url, {
@@ -56,9 +57,12 @@ describe("translate: upstream failures", () => {
   });
 });
 
-describe("translate: openai-responses is P1 scope", () => {
-  it("rejects selecting the not-yet-implemented adapter", () => {
-    expect(() => getAdapter("openai-responses")).toThrow(/P1/);
+describe("translate: openai-responses adapter is registered", () => {
+  it("selects the responses adapter", () => {
+    const adapter = getAdapter("openai-responses");
+    expect(adapter.format).toBe("openai-responses");
+    expect(adapter.request.detectStreaming({ stream: true })).toBe(true);
+    expect(createOpenAiResponsesAdapter().format).toBe("openai-responses");
   });
 });
 

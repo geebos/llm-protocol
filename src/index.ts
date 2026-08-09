@@ -50,6 +50,10 @@ export type {
 
 export { createAnthropicAdapter, anthropicDefaultProfile } from "./codecs/anthropic-messages/index.js";
 export { createOpenAiChatAdapter, openaiChatDefaultProfile } from "./codecs/openai-chat/index.js";
+export {
+  createOpenAiResponsesAdapter,
+  openaiResponsesDefaultProfile,
+} from "./codecs/openai-responses/index.js";
 export type { CanonicalStreamEvent } from "./streams/types.js";
 export { createSSEParser, createCanonicalValidator } from "./streams/index.js";
 

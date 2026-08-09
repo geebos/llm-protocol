@@ -300,9 +300,9 @@ function translateStreamingResponse({
 
   const sourceStream = targetResponse.body
     .pipeThrough(createSSEParser())
-    .pipeThrough(target.stream.createParse(report))
+    .pipeThrough(target.stream.createParse(report, ctx))
     .pipeThrough(createCanonicalValidator())
-    .pipeThrough(source.stream.createRender(report));
+    .pipeThrough(source.stream.createRender(report, ctx));
 
   // The Anthropic client keeps its stream alive on periodic pings; inject them
   // while the upstream is idle so long upstream thinking streams don't look

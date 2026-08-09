@@ -17,6 +17,37 @@ import type { Fidelity } from "../../ir/fidelity.js";
 import type { CodecContext } from "../protocol-adapter.js";
 import type { ValidationResult, ValidationViolation } from "./validate.js";
 
+/** Aggregated remediation flags a renderer can branch on. */
+export interface Remediations {
+  setToolChoiceAuto: boolean;
+  dropSampling: boolean;
+  dropStateful: boolean;
+  dropMaxToolCalls: boolean;
+  dropTruncation: boolean;
+  dropIdentity: boolean;
+  dropEffort: boolean;
+}
+
+export function collectRemediations(plan: FidelityPlan): Remediations {
+  const out: Remediations = {
+    setToolChoiceAuto: false,
+    dropSampling: false,
+    dropStateful: false,
+    dropMaxToolCalls: false,
+    dropTruncation: false,
+    dropIdentity: false,
+    dropEffort: false,
+  };
+  for (const entry of plan.entries) {
+    for (const [key, value] of Object.entries(entry.remediation ?? {})) {
+      if (value === true && key in out) {
+        (out as unknown as Record<string, boolean>)[key] = true;
+      }
+    }
+  }
+  return out;
+}
+
 export interface FidelityPlanEntry {
   code: string;
   message: string;

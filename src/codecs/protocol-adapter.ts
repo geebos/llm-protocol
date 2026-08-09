@@ -84,7 +84,7 @@ export function ensureToolCallRegistry(ctx: CodecContext): ToolCallRegistry {
 
 /** Endpoint identity, protocol-independent enough to route across adapters. */
 export interface CanonicalEndpoint {
-  kind: "messages" | "chat";
+  kind: "messages" | "chat" | "responses";
   query: Record<string, string>;
 }
 
