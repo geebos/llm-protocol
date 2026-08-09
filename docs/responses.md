@@ -1,0 +1,1239 @@
+# OpenAI Responses 端点转换技术设计
+
+**文档版本：** v0.5
+**日期：** 2026-08-10
+**适用仓库：** `llm-protocol`
+**范围：** OpenAI Responses ↔ Anthropic Messages、OpenAI Responses ↔ OpenAI Chat Completions
+**重点：** 请求 / 非流式响应 / 流式响应、工具调用生命周期、Reasoning/Thinking、Usage、多轮历史正规化与兼容性边界
+
+> **依据：** 《OpenAI Responses 协议互转技术设计》v1.0（外部输入，2026-08-10）+ 本项目 Canonical IR 设计（`src/ir`、`src/streams`、`src/codecs`、`src/capabilities`）+ v0.2~v0.5 评审意见（2026-08-10）。
+> **硬约束：** 一切转换经 Canonical IR 与 `CanonicalStreamEvent`，禁止编写 A→B 直接映射（架构边界）；任何 LOSSY/UNSUPPORTED 决策必须产生 `TranslationWarning`（FR-008）；凭据只能作为不透明值在 header codec 内搬运。
+> **需求基线：** 本文对应 `docs/tech.md` 的 FR-012（P1 Responses Adapter）与 TH-005（reasoning item / encrypted content / streaming reasoning events）。`openai-responses` 格式枚举已在 `src/formats.ts` 预留，`src/codecs/registry.ts` 当前对该格式抛出 `unsupportedError`（P1 未实现）。
+
+## 文档控制
+
+| **版本** | **日期**   | **说明**                                                                                                                                                     |
+|----------|------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| v0.1     | 2026-08-10 | 初稿：依据外部技术设计 v1.0，重写为基于本项目 IR 的可落地设计。                                                                                              |
+| v0.2     | 2026-08-10 | 评审修订：terminal status/事件（completed/incomplete/failed）；custom tool 与 function tool 流式分离；SSE item/content 双层生命周期；Synthetic ID；carrier 的 native/managed 双模式；历史正规化移入 target render；tool registry 拆分（定义/调用）；cache usage 计算；authority-order LOSSY；reasoning summary/text 区分。 |
+| v0.3     | 2026-08-10 | 评审修订：`stop_sequence` 改判 completed；refusal 一等 IR 语义（不默认 incomplete）；reasoning summary 多 part 状态机（summary_index、lazy open、reasoning content part 生命周期）；Responses request field audit（含 include/max_tool_calls/truncation 等，stop 移出标准字段）；store/conversationState/responseStorage/promptTemplates 能力拆分；Synthetic ID 作用域收窄（只服务 target response，前缀改为目标形态）；Target Validation Matrix（thinking×tool_choice 等跨字段约束）；thinking generation 能力细化（output_config.effort）；cancelled 降级为按 profile；annotation 挂 output_text part；media relocation 标 LOSSY；流水线冻结为含 Fidelity Plan 的七阶段。 |
+| v0.4     | 2026-08-10 | 评审修订（建议不再扩设计面，集中收尾）：`max_tool_calls` 仅限 built-in tools、禁止映射 function/parallel/round limit；删除 §5.2 outbound synthetic item ID 旧描述并冻结 request/response ID 边界；`pause_turn` 正式加入 CanonicalFinishReason（continuation 语义）；拆分 Responses `stream_options` 源字段与 Chat `include_usage` 目标增强；`safety_identifier`/`user`/`prompt_cache_key` 统一 identity 建模（legacy/safety/cacheAffinity）且默认不 reject；`truncation=auto` 不擅白模拟（移入 Target Validation/Capability）；`include` 建模为 outputIncludes（requested ∪ translator-required）；`response.queued` 移入 response lifecycle（非 terminal）；CanonicalStreamEvent 建立多级 location 索引模型；ToolCall Registry 增 item_id ↔ call_id 双索引；v1 明确 server-side built-in tools 支持边界（client-executed only）；修复 §17.1 stream.ts 的 §14→§13 typo。 |
+| v0.5     | 2026-08-10 | **implementation-freeze 候选（不再做设计级大改版）**：ToolCall 改为 discriminated union（function JSON / custom freeform，不做 JSON.parse 约束）；namespace 从 execution kind 拆出（executionKind 与 nameKind 正交）；新增 Responses Response Envelope Builder + output-item status 生命周期（in_progress/completed）；删除 Responses per-call adjacency 硬约束（仅唯一配对）；`response_state` 事件保留 queued lifecycle（round-trip）；response.status 与 finishReason 彻底解耦（未知 finish reason → completed+warning）；`allowed_tools` 纳入 §3.5；`prompt_cache_key`/`prompt_cache_retention` 拆分（identity 与 cache 分开）；`top_logprobs` 明确 LOSSY/UNSUPPORTED（请求/响应双向）；§11.5 thinking_delta→summary 标 COMPATIBLE/LOSSY；§2.2 合并重复 Reasoning 条目。 |
+
+## 目录
+
+1. [背景与目标](#1-背景与目标)
+2. [语义模型差异与 IR 适配](#2-语义模型差异与-ir-适配)
+3. [请求解析：Responses → Canonical Request](#3-请求解析responses--canonical-request)
+4. [请求渲染：Canonical Request → Anthropic Messages](#4-请求渲染canonical-request--anthropic-messages)
+5. [请求渲染：Canonical Request → Responses（Messages → Responses）](#5-请求渲染canonical-request--responsesmessages--responses)
+6. [请求渲染：Canonical Request → Chat Completions（Responses → Chat）](#6-请求渲染canonical-request--chat-completionsresponses--chat)
+7. [请求解析：Chat → Canonical Request（Chat → Responses）](#7-请求解析chat--canonical-requestchat--responses)
+8. [Anthropic 响应 → Responses 响应（非流式）](#8-anthropic-响应--responses-响应非流式)
+9. [Chat 响应 → Responses 响应（非流式）](#9-chat-响应--responses-响应非流式)
+10. [目标侧校验与多轮历史正规化](#10-目标侧校验与多轮历史正规化)
+11. [Reasoning / Thinking 转换策略](#11-reasoning--thinking-转换策略)
+12. [多模态内容转换](#12-多模态内容转换)
+13. [流式事件状态机](#13-流式事件状态机)
+14. [Usage、缓存与计费](#14-usage缓存与计费)
+15. [不可逆字段与失败策略](#15-不可逆字段与失败策略)
+16. [兼容性测试矩阵](#16-兼容性测试矩阵)
+17. [实现架构与验收标准](#17-实现架构与验收标准)
+18. [附录 A：Responses SSE ↔ Canonical Stream Event 核心映射](#附录-aresponses-sse--canonical-stream-event-核心映射)
+19. [附录 B：转换决策树](#附录-b转换决策树)
+20. [附录 C：常见故障定位](#附录-c常见故障定位)
+21. [附录 D：既有接口变更清单](#附录-d既有接口变更清单)
+
+---
+
+# 1. 背景与目标
+
+## 1.1 背景
+
+`llm-protocol` 已完成 Phase 1 主体能力（Anthropic Messages ↔ OpenAI Chat 双向请求/响应/流式转换、Canonical IR、SSE 状态机、Tool/Thinking 策略、ProviderProfile、多 Provider 测试框架）。`docs/tech.md` 将 OpenAI Responses adapter 列为 P1（FR-012），要求 IR、stream event 与 ProviderProfile 从第一阶段开始预留。
+
+Responses API 是 item/event 模型（`input`/`output` 由独立 item 组成，流式事件细粒度声明 item 与 content part 生命周期），与 Messages 的「消息 + 内容块」模型、Chat 的「消息 + assistant.tool_calls」模型差异显著。转换中出错率最高的不是文本，而是**工具历史**与**推理历史**的配对与重放。
+
+## 1.2 目标
+
+- 以本文作为 `src/codecs/openai-responses/` adapter 的实现依据，覆盖请求、非流式响应、流式响应、工具调用、推理、Usage 与兼容性边界。
+- 全部转换路径显式经过 Canonical IR 与 `CanonicalStreamEvent`，保持「流式与非流式共享同一语义模型」。
+- 不依赖具体网关实现；`translate({ from, to })` 工厂语义不变，`openai-responses` 仅作为新的 `ApiFormat` 参与组合。
+- 将外部技术设计 v1.0 的语义结论落位到本项目现有类型，明确需要的最小接口变更（附录 D）。
+
+## 1.3 设计原则（承接外部设计 §1 + v0.2 评审）
+
+1. **语义优先于字段形状**：先识别「系统指令、用户内容、助手输出、工具调用、工具结果、推理、附件」，再映射目标协议。
+2. **可逆信息必须稳定**：`call_id`、工具名、消息顺序、输出索引与响应 ID 在一次转换链中必须可追踪（TR-002）。
+3. **不可逆信息显式降级**：拒绝、过滤、代理化或旁路承载，禁止假装无损（FR-008，无静默降级）。
+4. **流式与非流式共享语义模型**：非流式结果等价于对同一流式事件序列的最终聚合；两者使用同一 ID 分配器（§8.3）。
+5. **历史合法性优先，但只在目标侧实施**：Canonical parse 尽量保真表示源协议；目标 renderer 才执行目标协议约束下的正规化（§10.3），保证 `Responses → Canonical → Responses` round-trip 稳定。
+6. **Provider 私有密文不跨提供方伪造**：foreign signature/encrypted content 只能在可验证兼容时进入目标原生字段；否则走 translator-private carrier 或丢弃（§11.4）。
+7. **不伪造 provider-originated metadata，但允许生成 translator-owned synthetic identifiers**：为满足目标协议结构（Responses 的 response/item/call ID）由转换器自身生成 ID，稳定、可追踪、不冒充上游原生 ID；**只服务 target Responses response/SSE，outbound request 默认不生成**（§8.3）。
+8. **Fidelity Plan 先于执行（v0.3）**：转换在改动 IR 前先生成目标侧保真计划（EXACT/COMPATIBLE/LOSSY/UNSUPPORTED），再执行 normalization/render，替代「renderer 边转换边 warning」；计划本身可单测（§10.0、FR-008）。
+
+# 2. 语义模型差异与 IR 适配
+
+## 2.1 三种协议维度对比
+
+| **维度**       | **Responses**                                                              | **Anthropic Messages**                              | **Chat Completions**                                    |
+|----------------|----------------------------------------------------------------------------|-----------------------------------------------------|---------------------------------------------------------|
+| 输入模型       | `input` 字符串或 item 数组；item 可表达 message、reasoning、function/custom tool call、tool output | `system` + `messages`；content 为 block 数组         | `messages` 数组；assistant 可带 `tool_calls`；结果为 `role=tool` 消息 |
+| 系统级指令     | `instructions`，以及 input 中 system/developer item                        | 顶层 `system`                                       | system/developer message                               |
+| 工具调用       | `function_call`（JSON arguments）、`custom_tool_call`（自由文本 input）、`tool_search` 等独立 item | assistant content 内 `tool_use`；user content 内 `tool_result` | `assistant.tool_calls` + `role=tool`                     |
+| 推理           | reasoning item；可含 summary、reasoning text、encrypted_content            | thinking / redacted_thinking block，通常带 signature | 无统一标准；常见 reasoning_content / reasoning_tokens 扩展 |
+| 流式           | `response.*` 细粒度事件：item 生命周期（output_item.added/done）+ content 生命周期（content_part.added/done、各类 delta/done）+ 独立 terminal 事件 | message_start、content_block_start/delta/stop、message_delta/stop | `chat.completion.chunk`；delta 承载文本、tool_calls 等 |
+| 状态性         | 可带 `previous_response_id`、`conversation`、prompt/context 管理            | 通常依赖完整 messages 重放                          | 通常依赖完整 messages 重放                              |
+
+## 2.2 与项目 Canonical IR 的对应
+
+外部设计 §3 提出的内部对象（Instruction/Message/ToolDefinition/ToolCall/ToolResult/Reasoning/StreamItemState）在**本项目已有等价物**，不做第二套 IR。对应关系：
+
+| 外部内部对象   | 本项目 IR（`src/ir`）                                        | 说明                                                                 |
+|----------------|--------------------------------------------------------------|----------------------------------------------------------------------|
+| Instruction    | `CanonicalRequest.system: ContentPart[]`                      | authority 统一为高权限；顺序由数组保序。归一化属 LOSSY（§5.1）。      |
+| Message        | `CanonicalMessage { role, content: ContentPart[] }`           | role 为 user/assistant/system/tool；tool 角色在目标渲染前由正规化转换。 |
+| ToolDefinition | `CanonicalTool { name, description, inputSchema, strict }`    | kind/namespace/freeform 通过 **Tool Definition Registry** 记录（§10.4）。 |
+| ToolCall       | `CanonicalToolCall`（**discriminated union，v0.5，P0-1**）：`{ kind: "function"; id; name; argumentsText /* JSON */ }` \| `{ kind: "custom"; id; name; inputText /* freeform */ }` | `call_id` 即跨协议稳定主键。不变量：function → argumentsText 必须可 `JSON.parse` 为 object；custom → **不做 JSON.parse**（自由文本 input）。custom→Chat/Messages 降级时才包装为 `{ input: string }`。`namespace` 是**正交的命名结构维度**，不参与 payload discrimination（v0.5，P0-2）。 |
+| Refusal        | `ContentPart { type: "refusal"; text: string }`（v0.3，P0-2，新增） | refusal 是**输出内容的一种形态**，不等价于 generation failure；正常完成但输出 refusal → status=completed。 |
+| Reasoning（多 part，v0.5 合并条目） | `ContentPart { type: "reasoning"; summary?: SummaryPart[]; text?: ReasoningContentPart[]; signature?; encryptedContent?; reasoningId?; providerMetadata? }` | **summary 与 text 语义分离**（v0.2）：summary ↔ `reasoning.summary` / `reasoning_summary_text.*`；text ↔ `reasoning.text` / `reasoning_text.*`，二者不可互压（§11.5）。summary 是多 part 数组（`summary_index`），reasoning text 走独立 content part 生命周期；两套 index 空间不合并（v0.3，P0-3）。 |
+| ToolResult     | `ContentPart { type: "tool_result"; toolCallId; content; isError }` | 内嵌 `ContentPart[]`，可含文本与媒体。                          |
+| Usage          | `CanonicalUsage`（input/output/total/cache/reasoning + providerDetails） | 缺失值不伪造；cache 计算见 §14.1。                     |
+| StreamItemState| `CanonicalStreamEvent` 的多级 location + Responses 双层状态机（§13） | **item 生命周期与 content 生命周期分离**；index 不再承担所有含义，改用多级 location（§13.1）：`location.output / location.content / location.summary / location.annotation`，分别对应 output_index / content_index / summary_index / annotation_index。 |
+
+## 2.3 IR 缺口（必须随 adapter 一起补齐）
+
+1. **文件/文档内容块**：`ContentPart` 目前只有 text/image；Responses `input_file` 与 Anthropic `document` 无等价表示。需新增 `{ type: "file"; source: ImageSource-like; ... }` 或在 image part 上扩展，见附录 D-2。
+2. **ToolCall discriminated union + namespace 拆出（v0.5，P0-1/P0-2）**：`CanonicalToolCall = function(argumentsText JSON) | custom(inputText freeform)`；namespace 不参与 payload discrimination，registry 用 `executionKind` + `nameKind` 正交表示（§10.4）。ToolCall Registry 增 `sourceItemId` / `targetItemId` 与 `byCallId` / `byItemId` 双索引（v0.4，P1-11，§10.4）。
+3. **refusal 一等表示（v0.3，P0-2）**：`ContentPart` 新增 `{ type: "refusal"; text }`，双向映射 Responses refusal content part / `refusal.delta`/`refusal.done`；目标无 structured refusal 时降级为 assistant text 或 provider extension + `LOSSY_REFUSAL_STRUCTURE` warning。
+4. **reasoning summary / text 分离 + 多 part**：IR `reasoning` part 的 `summary` 与 `text` 语义分离（Responses `reasoning_summary_text.*` vs `reasoning_text.*`）；**summary 是多 part 数组**（`summary_index`），reasoning text 走独立 content part 生命周期（v0.2 中等问题-1 + v0.3 P0-3）。
+5. **请求级双 registry**：Tool Definition Registry（按工具名）+ Tool Call Registry（按 call_id 与 item_id 双索引），挂 `CodecContext`（§10.4，附录 D-3）。
+6. **Responses 专用能力声明**：`ProviderProfile` 需增加 conversationState/responseStorage/promptTemplates、custom tools、namespace tools、reasoning text、thinking generation（mode/effortLocation）、`contextTruncation`、identity（endUser tracking）、server-side tools scope 等能力位，见附录 D-4。
+7. **Synthetic ID Factory**：统一管理 response/item/call ID 生成与来源标记，**只服务 target Responses response/SSE**；request side 按「native preserve / 无则 omit / 必需 call_id 才生成」冻结规则（§5.2A、§8.3、附录 D-8）。
+8. **Target Validation + Fidelity Plan**：独立模块承载跨字段约束校验（§10.1）与保真计划生成（§10.0），附录 D-10/D-11。
+9. **identity 建模（v0.4，P1-5/P1-6）**：`user` → `legacyEndUserId`（deprecated）、`safety_identifier` → `safetyEndUserId`、`prompt_cache_key` → `cacheAffinityKey`，三者用途分化，不混为一个 extension；默认 drop + warning，仅 privacy policy 要求时 reject。
+10. **outputIncludes（v0.4，P1-8）**：`CanonicalRequest.outputIncludes = requestedIncludes ∪ translatorRequiredIncludes`；Fidelity Plan 不覆盖客户端 include。
+11. **多级 location 索引模型（v0.4，P1-10）**：`CanonicalStreamEvent` 用 `location.output/content/summary/annotation` 取代平级 optional indexes。
+12. **server-side built-in tools 边界（v0.4，P1-12）**：v1 的 `ToolCall.kind` 只抽象 **client-executed** function/custom tools；built-in/server-side（web_search、MCP、code interpreter）作为 `provider_tool` opaque/provider extension 或 UNSUPPORTED，不强行塞进普通 tool_call。
+13. **Response Envelope + item status（v0.5，P0-3）**：新增 Target Responses Envelope Builder（§13.1.2）：`ResponseEnvelopeState`（id/object=response/createdAt/status/output/usage/error/incompleteDetails）+ `OutputItemState.status: in_progress | completed | incomplete`。`output_item.added` → in_progress，`output_item.done` → completed/incomplete；terminal output[] 必须与 done items 一致；`created_at` 全程只分配一次；Anthropic 缺时间戳时生成 translator-owned structural timestamp（trace 标来源）。
+14. **response_state 事件（v0.5，P1-1）**：新增 additive canonical 事件 `response_state: "created" | "queued" | "in_progress"`（或 `message_start.metadata` 保存 lifecycle sequence），保留 queued round-trip，旧 consumer 忽略新事件（backward-compatible）。
+15. **status 与 finishReason 彻底解耦（v0.5，P1-2）**：`CanonicalResponseStatus = completed | incomplete | failed | …` 与 `CanonicalFinishReason` 是两条独立轴；**只有明确知道被截断时才制造 incomplete**，未知 finish reason + 成功返回 → `status=completed, finishReason=unknown` + warning。
+
+# 3. 请求解析：Responses → Canonical Request
+
+本节实现 `RequestCodec.parseRequest`（`src/codecs/openai-responses/request.ts`）。
+
+## 3.1 顶层参数与 request field audit（v0.3，P1-5）
+
+### 3.1.1 一等字段（canonicalize）
+
+| Responses 字段        | CanonicalRequest 目标       | 规则                                                                 |
+|-----------------------|-----------------------------|----------------------------------------------------------------------|
+| `model`               | `model`                     | 直传。                                                               |
+| `max_output_tokens`   | `generation.maxTokens`      | 目标必填时由目标协议 profile 提供默认值，不建议盲目固定超大值。       |
+| `temperature`/`top_p` | `generation.temperature/topP` | 目标 reasoning 模型禁止采样参数时在能力层过滤（LOSSY warning）。     |
+| `reasoning.effort`    | `thinking`（§11.1）          | 按目标能力映射为 adaptive effort 或 budget。                          |
+| `parallel_tool_calls` | `parallelToolCalls`         | 目标不支持并行时按策略拒绝或串行降级（TR-005）。                     |
+| `stream`              | `detectStreaming`           | 与现有 codec 一致：`RequestCodec.detectStreaming(payload)`。          |
+| `text.format`         | `extensions.responsesTextFormat` | 结构化输出；渲染 Chat 时转 `response_format`，渲染 Messages 时按能力降级。 |
+| `metadata` / `service_tier` | `extensions` | 目标协议宣称支持时按 allowlist 转发。                     |
+| `user`（legacy）      | `legacyEndUserId`（v0.4，P1-6） | OpenAI 已 deprecated，用途被 `safety_identifier` / `prompt_cache_key` 取代；按 identity 建模处理，不丢进普通 extensions。 |
+
+> **`stop` 不是 Responses 标准顶层字段（v0.3，P1-5）**：官方 Responses create 参数中不存在 `stop`。若目标是兼容第三方 Responses-like provider，把 `stop` 放 `ProviderProfile.responsesExtensions.stop`（能力声明后按 allowlist 转发），不写进标准映射表。`generation.stopSequences` 仅在源为 Chat/Messages 时由 openai-chat/anthropic-messages parse 自然产生。
+
+### 3.1.2 完整 field audit（逐个表态，v0.3，P1-5）
+
+> 以下字段**不一定都进 CanonicalRequest 一等字段**，但每个都必须有明确策略（canonicalize / preserve extension / reject / target capability mapping），不得靠「未知字段默认 preserve_extension」糊进 extension。
+
+| Responses 字段            | 策略                     | 说明                                                                 |
+|---------------------------|--------------------------|----------------------------------------------------------------------|
+| `include`                 | `outputIncludes`（v0.4，P1-8） | **输出扩展选择器**，不是普通透传字段：`requestedIncludes`（客户端偏好）∪ `translatorRequiredIncludes`（如 carrier 回程需要）→ 目标 `include`。Fidelity Plan 区分 semantic requirement 与 client preference，不覆盖客户端 include（§10.0）。 |
+| `max_tool_calls`          | provider-specific（v0.4，P0-1） | **仅限 built-in/server-side tools 总调用次数**，禁止映射为 function 调用数、parallel 数量或 round 数。Responses→Responses 原样保留；→Messages 仅当目标有**等价的 server-side 全局调用限制**才映射（Anthropic per-tool `max_uses` ≠ 全局限制，不可直接等价）；→Chat 通常无等价 → LOSSY/drop 或 reject。function/custom tool **不得受此限制**。 |
+| `truncation`              | Target Validation/Capability（v0.4，P1-7） | `disabled` → 无对应字段的 Chat/Messages 可近似 **COMPATIBLE no-op**（让目标在超 context 时自行报错，保持「不自动删历史」语义）；`auto`（超 context 从开头删 items）→ **LOSSY/UNSUPPORTED**，除非 ProviderProfile 声明 `contextTruncation.auto=true` 且实现具备 tokenizer/context window/item-aware truncator/tool-call atomicity/system prefix preservation。 |
+| `top_logprobs`            | LOSSY/UNSUPPORTED（v0.5，P1-5） | **请求/响应双向**：request 映射到 Chat `logprobs` 仅是半支持（response 的 token logprob 信息没有回程 IR）。v1 若不为 logprobs 建 IR，则 `top_logprobs` 整体标 **LOSSY/UNSUPPORTED**，不做单向半支持；目标能力白名单丢弃 + warning。 |
+| `safety_identifier`       | identity 建模（v0.4，P1-5） | 稳定终端用户标识（abuse detection），**不是安全策略规则**；→ `safetyEndUserId`。同协议 preserve；目标有类似 end-user tracking 字段（如 Anthropic `metadata.user_id`）→ map；没有 → drop + warning。**仅 privacy/data-transfer policy 要求时才 reject**，默认不因存在该字段而失败。 |
+| `prompt_cache_key` / `prompt_cache_retention` | canonicalize（**v0.5，P1-4 拆分**） | **两个字段语义不同**：`prompt_cache_key` = cache affinity key；`prompt_cache_retention` = retention policy（如 extended caching）。且 cache key **不属于 identity**——`CanonicalRequest.cache = { affinityKey?, retention? }` 与 `CanonicalRequest.identity` 分开（§3.1.4）。复用项目既有 cache affinity 机制（`src/cache`）；目标不声明时按能力丢弃 + warning。 |
+| `stream_options`          | 源字段 preserve（v0.4，P1-4） | **源 `stream_options` 按源协议自己解析/preserve**；不因两个协议都叫 `stream_options` 就语义同构。Chat `stream_options.include_usage=true` 是**目标侧增强**（Fidelity/Target Normalize 阶段设置，§14.2），不是源字段映射。 |
+| `background`              | preserve extension        | 无状态后端目标不支持时拒绝或 warning；profile 声明支持才转发。         |
+| `text.verbosity`          | preserve extension        | 仅同协议目标可承载；跨协议丢弃 + warning。                            |
+| 其余未知字段              | 按 `TranslationPolicies.unsupportedField` | 默认 preserve_extension；可审计。                        |
+
+### 3.1.3 状态性字段能力拆分（v0.3，P1-6）
+
+`store` / `previous_response_id` / `conversation` / `prompt` **不再统一 reject**，按三个能力位拆分：
+
+| 字段             | 能力位             | 策略                                                                 |
+|------------------|--------------------|----------------------------------------------------------------------|
+| `previous_response_id` / `conversation` | `conversationState` | 真正的 server-side state dependency；目标无状态且未声明该能力 → **拒绝**（不可同时使用二者）。 |
+| `store`          | `responseStorage`   | `store=false` → 无状态 backend 天然满足，**安全 no-op**；`store=true` 且目标无存储能力 → LOSSY warning 或拒绝。 |
+| `prompt`         | `promptTemplates`   | prompt-template reference 能力；目标未声明 → 拒绝或网关自行实现。      |
+
+### 3.1.4 identity 与 cache 建模（v0.4 P1-5/P1-6 + v0.5 P1-4 拆分）
+
+`user` 与 `safety_identifier` 用途已分化；**cache key/retention 与 identity 也分开**：
+
+```ts
+interface RequestIdentity {
+  /** legacy `user`（OpenAI deprecated），作用由 safety_identifier/prompt_cache_key 取代。 */
+  legacyEndUserId?: string;
+  /** `safety_identifier`：稳定终端用户标识，用于 abuse detection；不是安全策略规则。 */
+  safetyEndUserId?: string;
+}
+
+interface RequestCache {
+  /** `prompt_cache_key`：cache affinity key。 */
+  affinityKey?: string;
+  /** `prompt_cache_retention`：retention policy（如 extended caching）。 */
+  retention?: unknown;
+}
+```
+
+- 同协议 → 各自 preserve；
+- 目标有类似 end-user tracking 字段（如 Anthropic `metadata.user_id`）→ 按能力 map；
+- 目标没有 → drop + warning（默认）；**仅 privacy/data-transfer policy 要求时 reject**；
+- 冲突优先级：`user` 与 `safety_identifier` 同时存在时**不自动覆盖**——source preserve 都保留；cross-protocol 时按目标 capability 独立处理。
+
+详见附录 D-4（ProviderProfile identity/cache 能力位）与 §15.1。
+
+## 3.2 System、developer 与 instructions
+
+`instructions` 与 input 中 role=system/developer 全部视为**高权限指令**，映射为 `CanonicalRequest.system: ContentPart[]`，绝不降级为普通 user 消息。
+
+1. 先加入 `instructions`（拆为 text parts，保留多段边界与空白语义，跳过纯空白段）。
+2. 再按 input 原始顺序收集 system/developer item 的文本内容，追加到 system parts。
+3. **authority-order 归一化是有损的（v0.2，P1-9）**：若 input 存在中途插入的 system/developer（如 `developer → user → developer`），归并到前缀会改变时序，必须产生 LOSSY warning（`authority_order_normalized`），或按策略 reject。不要把「developer 只能出现在第一条」当作 Responses 的协议事实——那是本 adapter 的归一化策略，不是上游 schema 约束。
+4. system 中的媒体或未知 block：显式失败或给出明确不兼容错误（LOSSY/UNSUPPORTED warning），禁止静默丢弃高权限内容。
+5. 若源带 cache 前缀意图（`prompt_cache_key` 等扩展），保留在对应 text part 的扩展位上，供 Messages 渲染 `cache_control` 或 Chat 渲染 cache 字段。
+
+## 3.3 input → messages（保真解析，不在此处正规化）
+
+- `input` 为字符串 → 单条 `{ role: "user", content: [text part] }`。
+- `input` 为 item 数组 → 顺序遍历，**尽量保真**表示源 item 序列（v0.2，P1-6）：历史正规化（删除 orphan/dangling、合并、移动 tool_result）**不在 parse 阶段执行**，由目标 renderer 按目标协议约束执行（§10.3）。理由：`Responses → Canonical → Responses` 必须保持 round-trip 稳定（可逆信息必须稳定）。
+
+| Responses item / part           | CanonicalMessage / ContentPart                              |
+|---------------------------------|-------------------------------------------------------------|
+| message/user + input_text       | user 消息 + text part（保留空白语义，跳过纯空白）            |
+| message/user + input_image      | user 消息 + image part（data URI 解析 MIME/base64；URL 保留） |
+| message/user + input_file       | user 消息 + file part（IR 扩展，见附录 D-2）                 |
+| message/assistant + output_text | assistant 消息 + text part                                  |
+| message/* + refusal             | assistant 消息 + **refusal part**（v0.3，P0-2，一等 IR 语义）  |
+| function_call                   | 挂入待合并的 assistant 消息 + `CanonicalToolCall(kind=function)`（argumentsText JSON） |
+| custom_tool_call                | 同上，`CanonicalToolCall(kind=custom)`（inputText freeform，**不做 JSON.parse**）；name 按 **Tool Definition Registry** 记录（§10.4） |
+| function_call_output            | user 消息 + tool_result part（按 call_id 配对）              |
+| custom_tool_call_output         | 同上；**Tool Call Registry** 中为 custom 时回程恢复 custom 语义 |
+| reasoning                       | 缓冲，预置到后续 assistant 消息的 reasoning part（TH-006 保序） |
+
+- 连续同 role item 合并为同一 `CanonicalMessage`（一个消息可同时承载文本与 tool_use，或 tool_result 与用户文本）。
+- `call_id` 缺省时由 Synthetic ID Factory 生成可追踪 ID 并记录 warning（TR-002，`generateMissingIds` 策略；§8.3）。
+- reasoning part 的 summary 与 text 分开记录（§11.5）。
+
+## 3.4 工具定义（Tool Definition Registry）
+
+| Responses 工具            | CanonicalTool                              | 规则                                                                 |
+|---------------------------|--------------------------------------------|----------------------------------------------------------------------|
+| function 工具             | `{ name, description, inputSchema }`       | `parameters` → `inputSchema`；缺 type/properties 时补成合法 object schema。 |
+| custom/freeform 工具      | 降级为 function 风格 object schema（单一字符串输入字段，如 `{ type: "object", properties: { input: { type: "string" } } }`） | **Tool Definition Registry** 记录原始 kind/freeform；回程按 §10.4 恢复。 |
+| namespace 工具            | name flatten 为唯一函数名（如 `ns__child`） | registry 保存反向表；撞名**拒绝**，不产生歧义路由。                  |
+| 服务端工具（web search 等）| 仅当目标端有等价能力才映射                 | 否则过滤，并同步修正 toolChoice（防「空列表 + 指定工具」的 400）。     |
+
+- **定义阶段没有 call_id**（v0.2，P1-7）：工具定义信息按 **normalizedToolName** 建索引（Tool Definition Registry），与按 **call_id** 建索引的 Tool Call Registry 分离（§10.4）。
+- 如果工具列表最终为空，不得继续发送指定某工具/`required` 的 toolChoice。
+
+## 3.5 tool_choice（外部设计 §4.7 + v0.5，P1-3 allowed_tools）
+
+| Responses | CanonicalToolChoice | 说明                              |
+|-----------|---------------------|-----------------------------------|
+| auto      | `{ type: "auto" }`  |                                   |
+| required  | `{ type: "required" }` | 至少调用一个工具。              |
+| none      | `{ type: "none" }`  |                                   |
+| 指定 function/custom | `{ type: "tool"; name }` | name 先经 namespace/custom 映射为 normalized name。 |
+| `allowed_tools`（v0.5，P1-3） | 视内容而定 | **Responses 正式形态**：指定工具子集 + auto/required 控制是否必须调用，可引用 function、built-in、MCP 等。**仅含 client function/custom** → 生成 effective tool subset + toolChoice auto/required，Definition Registry 保留完整原定义（≈COMPATIBLE）；**含 built-in/MCP/provider tool** → 按 server-side tool boundary（§15.1）走 `provider_tool`/UNSUPPORTED。不得落进「未知字段」。 |
+
+# 4. 请求渲染：Canonical Request → Anthropic Messages
+
+> 方向：Responses（from）→ Messages（to）。**无需新写渲染器**：`parseRequest`（§3）产出 `CanonicalRequest` 后，直接复用 `anthropic-messages` codec 的 `renderRequest`，包括 `normalizeAnthropicTurns`（tool_result 提前、连续同角色合并）与 thinking 配置渲染。本节只列 Responses 特有信息在 Messages 端的落位与检查点。
+
+1. `system` → 顶层 `system`（多个 text part 保留 block 边界，不必拼字符串；cache_control 尽量保留在对应 block）。
+2. `generation.maxTokens` → `max_tokens`（目标必填；缺省由 Messages profile 提供默认）。
+3. `thinking`（§11）→ `thinking` block：`mode/adaptive` → `{ type: "adaptive" }`；`mode/enabled` → budget_tokens；`effort` 按目标能力映射。
+4. `parallelToolCalls` → `tool_choice.disable_parallel_tool_use` 或直传（按 profile）。
+5. `CanonicalToolCall`（discriminated union，v0.5，P0-1）→ `tool_use`：
+   - kind=function → `argumentsText` 必须是合法 JSON object（`JSON.parse` 为 object）；
+   - kind=custom → `inputText` 为自由文本，**不做 JSON.parse**；custom freeform 包装为固定单字段对象（如 `{ input: inputText }`）再发给 Messages（Messages 的 `input` 必须是 object）。
+6. tool_result part → user turn 内 `tool_result`（顺序由 `normalizeAnthropicTurns` 保证，TR-004 保留 is_error）。
+7. image part → `image` block（base64 校验 MIME；URL 目标支持时直传，否则需先解析/下载，失败则报错）；file part → `document` block（按目标能力）。
+8. 历史 reasoning part → 按 §11.4 决策：provider-compatible signature 才恢复 thinking block，否则丢弃并 warning。
+
+> **正规化位置（v0.2，P1-6）**：Messages 的 user/assistant 交替、tool_result 邻接等约束由 `normalizeAnthropicTurns` 在**目标渲染阶段**施加；§3.3 的 parse 产物保持源顺序。
+
+**检查点**：输出请求必须满足 Messages 的 user/assistant 交替与 tool_result 邻接硬约束；任何无法承载的系统指令不得静默降级（§15.2）。
+
+# 5. 请求渲染：Canonical Request → Responses（Messages → Responses）
+
+> 方向：Messages（from）→ Responses（to）。实现 `openai-responses` 的 `renderRequest`。目标是让 Messages 客户端访问只提供 Responses 的上游，重点是**把消息内容拆成独立 Responses item**，同时保留 provider thinking signature。
+
+## 5.1 系统指令策略
+
+`CanonicalRequest.system` 有两个可选落位，必须固定一种稳定策略：
+
+- **默认：developer message 作为 input 第一个 item**。理由：与完整对话重放、缓存前缀一致；把归一化的高权限指令集中到请求前缀，天然保序。
+- 备选：`instructions` 顶层字段（更直接表达「当前请求的系统指令」）。
+
+> **回程稳定性与有损声明（v0.2，P1-9）**：源 `instructions` 与 developer item 在 IR 中合并为一个 `system`，渲染回 Responses 时统一为 developer message，round-trip 会归一化（COMPATIBLE，记录 info）。**若源（Chat/Messages 历史）存在中途插入的 system/developer，归并到前缀改变时序 → LOSSY warning（`authority_order_normalized`），或按策略 reject**。若调用方要求严格保持「源是 instructions 就回 instructions」，需在 `extensions` 保存来源标记——不建议默认开启。
+
+## 5.2 消息与工具 item 拆分
+
+| CanonicalMessage / ContentPart | Responses input item                                  |
+|--------------------------------|-------------------------------------------------------|
+| user 消息（文本）              | `{ type: "message", role: "user", content: [input_text] }` |
+| user 消息（image）             | input_image（base64 → data URI；URL 保持）            |
+| user 消息（file）              | input_file（按 Responses 支持的 file_data/URL 形式）   |
+| assistant 消息（文本）         | `{ type: "message", role: "assistant", content: [output_text] }` |
+| assistant 消息（tool_call）    | **拆出**独立 `function_call` / `custom_tool_call` item（按 `CanonicalToolCall.kind`；id → call_id；function → `arguments`（JSON 字符串）；custom → `input`（自由文本）） |
+| tool_result                   | 独立 `function_call_output` / `custom_tool_call_output` item（toolCallId → call_id；kind 按 Tool Call Registry） |
+| reasoning part                | 独立 `reasoning` item：summary → summary；text → reasoning text；signature/encryptedContent → carrier（§11.4） |
+
+**item 顺序与配对规则（v0.5，P0-4）**：保留源 item 顺序；Responses target **不要求 call/result 邻接**，不为满足 Chat/Messages 的 adjacency 而额外重排。call/result 通过 `call_id` **唯一配对**（而非 per-call adjacency）：并行 calls 可连续出现，其 outputs 随后按 `call_id` 关联（call A → call B → result A → result B 合法）。Chat/Messages 的严格 adjacency 继续留在 Target Normalize 层（§10.3）。
+
+**ID 边界（v0.4，P0-2）**：Messages 源没有 Responses 的 message/reasoning/tool item ID，但 **outbound request 默认不生成**（§5.2A 冻结规则）；仅工具结果关联所必需的 `call_id` 缺失时按策略生成。
+
+## 5.3 参数与默认
+
+- `generation.maxTokens` → `max_output_tokens`（尊重目标最小值）。
+- `thinking` → `reasoning`（effort 等按 §11.1 映射）。
+- `parallelToolCalls` → `parallel_tool_calls`（默认开启，除非目标 profile 明确不支持）。
+- 目标 reasoning 模型不接受 temperature/top_p 时删除这些采样参数（能力层过滤）。
+- 若期望后续多轮可回放 reasoning，请求 `include` 应请求返回 reasoning 的 opaque carrier（保持透传，§11.4）。
+
+## 5.2A ID 边界冻结规则（v0.4，P0-2）
+
+> **Request side 与 Response side 分开，不再有例外**：
+
+```text
+Request side（outbound /v1/responses 请求）
+  ├─ native ID → preserve
+  ├─ 无 native ID → omit（不默认生成）
+  └─ 缺少 call_id 且必须建立 tool/result 关联 → synthetic call_id（generateMissingIds 策略，trace 标记 synthetic）
+
+Response side（target Responses response/SSE）
+  └─ 缺少 response/item ID → Synthetic ID Factory 生成（§8.3）
+```
+
+- `/v1/responses` 请求里的 item ID 多数是「由平台返回时 populated 的 server identity」，官方 schema 不要求客户端预填；
+- native mode 下不要把 synthetic reasoning/item ID 当作真实 OpenAI provider identity 发回 upstream。
+
+# 6. 请求渲染：Canonical Request → Chat Completions（Responses → Chat）
+
+> 方向：Responses（from）→ Chat（to）。`parseRequest`（§3）产出 `CanonicalRequest` 后，**复用 openai-chat 的 `renderRequest`**。本节只列 Responses 特有信息在 Chat 端的落位与缺口。
+
+## 6.1 基础字段
+
+| Responses | Chat Completions | 规则 |
+|-----------|------------------|------|
+| `model` | `model` | 直传。 |
+| `max_output_tokens` | `max_completion_tokens`（或 `max_tokens`） | 优先目标推荐的新字段。 |
+| `text.format` | `response_format` | json_schema 等结构转换；`json_object` 退化为等价格式。 |
+| `reasoning.effort` | `reasoning_effort` 扩展 | 仅发送给**声明支持**的 profile（TH-003）。 |
+| `parallel_tool_calls` | `parallel_tool_calls` | 支持时直传。 |
+| `service_tier` / `metadata` / `user` / cache 扩展 | 目标扩展字段 | 只有 profile 宣称支持时才转发。 |
+| `stream` | `stream` | 直传；见 §14.2 强制 include_usage。 |
+
+## 6.2 消息与角色
+
+- `system` → 第一条 system message（developer 语义保持高权限，不降级为 user）。
+- user/assistant 消息 → Chat messages；纯文本场景合并为字符串，含图片时 user content 用多模态 part 数组。
+- assistant 历史输出文本 → assistant content。
+
+## 6.3 工具调用序列化
+
+Chat 要求「一条 assistant 消息可携带多个 tool_calls」：openai-chat renderer 已有的 IR→Chat 渲染把 tool_call parts 缓冲为 assistant message + `role=tool` 消息，直接复用。**补两点**：
+
+1. **Deep reasoning 兼容**：部分 Chat-compatible reasoning 模型要求产生 tool_calls 的 assistant 历史同时携带 `reasoning_content`。把紧邻 tool_call 之前的 reasoning part 的 **summary** 暂存，渲染 assistant.tool_calls 时挂到 `reasoning_content`；目标未声明该扩展则删除。
+2. **custom/freeform 降级**：parse 阶段已把 custom 降级为普通 function（单字段 object schema），Chat 渲染无需感知；回程在 Responses parse 时恢复（§10.4）。
+
+## 6.4 namespace 与工具选择
+
+- namespace flatten 与撞名拒绝在 parse 阶段完成（§3.4），Chat 渲染只见唯一函数名。
+- tool-choice 的指定 function 经映射后输出。
+
+# 7. 请求解析：Chat → Canonical Request（Chat → Responses）
+
+> 方向：Chat（from）→ Responses（to）。`parseRequest` 由 openai-chat codec 已有实现产出 `CanonicalRequest`；本节列 Responses 渲染前需要保留/补充的信息。
+
+| Chat 字段           | CanonicalRequest / ContentPart                            | 说明                                                            |
+|---------------------|-----------------------------------------------------------|-----------------------------------------------------------------|
+| system/developer    | `system`                                                   | 选一种稳定策略；需要缓存前缀时优先 developer item（§5.1）。      |
+| user（文本/图片）   | user 消息 + text/image parts                               | 保留多模态 part。                                               |
+| assistant content   | assistant 消息 + text parts                                | 历史助手输出。                                                  |
+| assistant.tool_calls | assistant 消息 + 多个 tool_call parts（拆开）               | 一条 assistant 多个 tool_calls → 多个独立 part，渲染时再拆 item。|
+| role=tool           | user 消息 + tool_result parts（tool_call_id → toolCallId） | 连续 tool 消息合并。                                            |
+| assistant.reasoning_content | reasoning part（summary 写入，**不伪造 encrypted_content**） | 建议写入 summary_text；不确定来源的内容不进入 text（§11.5）。    |
+| `response_format`   | `extensions.responsesTextFormat`                           | 渲染 Responses 时转 `text.format`。                              |
+| tools/function      | `CanonicalTool[]`                                          | legacy functions 统一转换成 tools。                             |
+| tool_choice         | `CanonicalToolChoice`                                      | auto/none/required/指定 function 对称映射。                      |
+
+> **strict 语义**：Chat 未提供 strict 时，采用目标 API 的预期默认值（如 `text.format: json_schema` 的 strict 层级），避免目标端把「省略」解释成严格模式。
+
+# 8. Anthropic 响应 → Responses 响应（非流式）
+
+> 方向：Messages（from）→ Responses（to）或 Responses（from）→ Messages（to）中的 **Messages 响应 → Responses 响应**。实现 `parseResponse`（anthropic 侧，已有）+ `renderResponse`（openai-responses 侧，新增）。
+
+构造标准 Responses response：对每类 content block 生成一个或多个 output item。
+
+## 8.1 block → output item
+
+| Anthropic 响应块 | Responses output item                    | 规则                                                            |
+|------------------|------------------------------------------|-----------------------------------------------------------------|
+| text             | `message` item + `output_text` part      | 同一 assistant 消息的多个 text block 聚合到同一 message item 的多个 part。 |
+| tool_use         | `function_call` / `custom_tool_call`     | 是否恢复 custom 取决于原请求 **Tool Definition Registry**（§10.4）。 |
+| refusal（如 Anthropic 未来支持 / provider extension） | `message` item + **refusal part**（v0.3，P0-2） | 保持 refusal 结构；目标 Responses 原生支持。                     |
+| thinking         | `reasoning` item                         | summary → `summary`；text → reasoning text；signature → carrier（§11.4，**不进入公开 encrypted_content**）。 |
+| redacted_thinking| `reasoning` item（carrier 标记）          | 通过 translator-private carrier 标记保存原始数据，不冒充普通 reasoning text。 |
+| citations        | `output_text.annotations`                | 按目标 annotation 结构转换。                                    |
+
+## 8.2 结构字段（terminal status，v0.2，P0-1）
+
+Responses `response.status` 枚举为：`queued` / `in_progress` / `completed` / `incomplete` / `failed` / `cancelled`（**不是 `complete`**）。
+
+- `status` 由 `CanonicalFinishReason` 推导（**v0.3，P0-1 修正**）：
+
+| CanonicalFinishReason | Responses status | 说明                                                             |
+|-----------------------|------------------|------------------------------------------------------------------|
+| `end_turn`            | `completed`      | 正常完成。                                                       |
+| `tool_call`           | `completed`      | 正常完成（等待工具执行）。                                       |
+| `stop_sequence`       | `completed`      | **成功停止原因，不是截断**（v0.3，P0-1）；保留在 provider details 中，不因 Responses 无 stop_sequence finish reason 而降 incomplete。 |
+| `max_tokens`          | `incomplete`     | 真正截断：输出因 token 上限被截断，可附 `incomplete_details`。    |
+| `content_filter`      | `incomplete`     | 或按 profile 映射为 `failed`；可附 error 信息。                 |
+| `refusal`             | `completed`      | **refusal 是输出内容形态，不是失败**（v0.3，P0-2）：上游正常完成但输出 refusal → status=completed，message content 含 refusal part。 |
+| `pause_turn`           | `completed`      | **正式加入 `CanonicalFinishReason`（v0.4，P0-3）**，不再走 unknown+preserve_extension。pause_turn 是成功 stop reason（非 API error），但语义是**需要 continuation**：下一轮须重放当前 assistant content 继续 server tool workflow。Translated Responses 仍 `status=completed`，但内部必须保留 `finishReason=pause_turn`，否则网关没有机会实施自动 continuation。 |
+| 其它 / 缺失            | `completed` + `finishReason=unknown` + warning（v0.5，P1-2） | **status 与 finishReason 是两条独立轴**：只有明确知道被截断（max_tokens）时才制造 `incomplete`；未知 finish reason + 成功返回 → `status=completed`，不猜测「未知 ⇒ 未完成」。 |
+
+> **语义原则（v0.5，P1-2）**：Responses `status` 表达的是 **response 是否完整完成**，与 `CanonicalFinishReason`（源 provider 为什么停止）是**两条独立轴**：`CanonicalResponseStatus = completed | incomplete | failed | …` 与 `CanonicalFinishReason = end_turn | tool_call | stop_sequence | max_tokens | pause_turn | refusal | content_filter | unknown`。stop_sequence/refusal/pause_turn 都属于「正常停下的完成」→ completed；只有真正截断（max_tokens）才 incomplete；未知 reason → completed + unknown + warning。
+
+- `id` / `model`：provider 提供则透传；**从 Chat/Messages 转换时源没有 Responses 的 response/item ID，由 Synthetic ID Factory 生成（§8.3），不冒充上游原生 ID**（v0.2，P0-4）。
+- `output_index`：message、reasoning、function/custom tool call **共享同一递增序列**；完成事件中的 `output` 按 output_index 排序重建。
+- `usage`：见 §14。
+- `created_at`、`incomplete_details` 等：由 `extensions` 透传（存在时）。
+
+## 8.3 Synthetic ID Factory（v0.2 P0-4 + v0.3 P1-6 修订）
+
+**问题**：`Messages/Chat 响应 → Responses 响应` 方向，源响应有 response/message ID，但没有 Responses 的 item ID（message/reasoning/tool item 的 `id`）；Responses SSE 又要求事件持续引用稳定的 `item_id`。把「缺失不伪造」用在协议结构 ID 上会导致输出无法构造。
+
+**原则**：不伪造 provider-originated metadata（usage、reasoning 内容等缺失值不编造，FR-010）；但允许为满足**目标协议结构**生成 translator-owned synthetic identifiers。
+
+**作用域（v0.3 收窄）**：
+
+- **只服务 target Responses response/SSE**（response.id、output item id、SSE added/delta/done 的 item_id）；
+- **outbound `/v1/responses` request 默认不生成**（native ID 保留，无则 omit；仅 call_id 缺失时按策略生成，见 §5.2A）；
+- native mode 下 synthetic ID 不得冒充真实 OpenAI provider identity 发回 upstream。
+
+```ts
+interface SyntheticIdFactory {
+  responseId(): string;        // response.id（目标形态：resp_*）
+  itemId(kind: "message" | "reasoning" | "function" | "custom"): string; // msg_*/rs_*/fc_*/ctc_*
+  callId(): string;            // 仅当源 call_id 缺失且关联必需时（generateMissingIds 策略）
+  mark(origin: "native" | "synthetic"): void;  // 来源只写 trace，不写 ID 本身
+}
+```
+
+**前缀（v0.3）**：对外生成**目标形态兼容**的前缀（`resp_*` / `msg_*` / `rs_*` / `fc_*` / `ctc_*`），不用统一 `tr_`——依赖前缀做 debug/telemetry 的客户端更友好；synthetic 来源只在 trace 中标记（`origin: synthetic`）。
+
+约束（对应验收标准 §17.2）：
+
+1. 一次 response 生命周期内稳定：同一 ID 在 added/delta/done 及 terminal 事件的 output 数组中一致。
+2. SSE 聚合后与非流式响应的 ID 一致（流式/非流式共享同一分配器，原则 4）。
+3. 不冒充 upstream 原生 ID：来源标记只进 trace（AGENTS.md：trace 不含 key/敏感正文，ID 来源标记允许）。
+4. outbound request 的 omit 语义：没有 native ID 就不发，而不是乱造（§5.2A）。
+
+# 9. Chat 响应 → Responses 响应（非流式）
+
+> 方向：Chat（from）→ Responses（to）中的 **Chat 响应 → Responses 响应**。实现 `parseResponse`（openai-chat，已有）+ `renderResponse`（openai-responses，新增）。
+
+1. **choice 策略**：默认只接受 `choices[0]`；`n > 1` 时按策略拒绝或记录 LOSSY warning（避免静默丢 choice）。
+2. `assistant.content` → `message` item + `output_text` parts。
+3. `assistant.tool_calls` → `function_call`/`custom_tool_call` items（按 call_id 排序；kind 按 Tool Call Registry）。
+4. `reasoning_content` → `reasoning` item 的 `summary`；**不声称拥有 `encrypted_content`**（跨 provider 不可重放，§11.4）。
+5. `finish_reason` → `status`（枚举见 §8.2）：`stop` → `completed`；`tool_calls` → `completed`（以实际 output items 完成情况构造，不直接映射状态）；`length` → `incomplete`；`content_filter` → `incomplete`/`failed`。
+6. **Chat 顶层 `refusal` 字段（v0.3，P0-2）** → canonical `refusal` part（不是降级 text）；目标 Responses 原生支持。反之 `Responses → Chat` 时目标无 structured refusal → 降级 assistant text 或 provider extension + `LOSSY_REFUSAL_STRUCTURE` warning。
+7. `usage` → §14.1。
+8. 所有 output item ID 由 Synthetic ID Factory 分配（§8.3）。
+
+# 10. 目标侧校验与多轮历史正规化
+
+> 这是最容易造成 400、上下文损坏或「模型不继续执行」的部分。**不要假设源历史天然满足目标协议约束**（外部设计 §10）。本节先把目标侧流水线冻结，再集中跨字段校验，最后才是历史正规化与 registry。
+
+## 10.0 目标侧转换流水线（v0.3 架构冻结：Fidelity Plan 独立成层）
+
+评审建议把流水线正式冻结为七阶段：
+
+```text
+Source Parse（保真） → Canonical Validate → Capability Resolve → Target Validate → Fidelity Plan → Target Normalize → Render
+```
+
+| 阶段 | 职责 | 说明 |
+|------|------|------|
+| Source Parse | 协议保真解析 | §3.3 / §7，尽量保真，不做删除/移动/合并。 |
+| Canonical Validate | IR 内不变量 | tool_call 参数可解析、call/result 基础配对、required 字段存在。 |
+| Capability Resolve | 按 ProviderProfile 解析目标能力 | thinking generation、stateful、custom/namespace tools、reasoning text、carrier 模式等（附录 D-4）。 |
+| **Target Validate** | 跨字段组合约束（§10.1） | **只验证不修改**，产出 violations。 |
+| **Fidelity Plan** | 生成保真计划 + 解析 outputIncludes | 在改动 IR 前，对每条 LOSSY/UNSUPPORTED 决策产出 `plan entry`（EXACT/COMPATIBLE/LOSSY/UNSUPPORTED + warning code + 涉及字段 + 修正动作）；一次转换一个 plan，可单测、可 trace（FR-008）。**同时区分 `requestedIncludes`（客户端偏好）与 `translatorRequiredIncludes`（如 carrier 回程需要），目标 `include = requested ∪ required`，不覆盖客户端（v0.4，P1-8）。** |
+| Target Normalize | 目标协议约束下的正规化 | §10.3（Messages adjacency / Chat adjacency / Responses 最小调整）。 |
+| Render | 编码为目标协议 | 请求/响应/SSE。 |
+
+> **落地说明**：现有 `src/pipeline/translate.ts` 的 renderRequest 内嵌了部分这些步骤；Responses adapter 落地时把 Target Validate 与 Fidelity Plan 抽成显式模块（`validate.ts` / `fidelity-plan.ts`，附录 D-10/D-11），共享 `CodecContext`，仍保持 per-request 状态。
+
+## 10.1 Target Validation Matrix（v0.3，P1-7）
+
+跨字段组合约束**集中在此处**，不散落在各 renderer；每个检查固定默认行为（reject / 降级 + LOSSY warning / 关闭某项 + LOSSY warning），不靠 renderer 猜模型代际。
+
+| 组合 | 约束 | 默认策略 |
+|------|------|----------|
+| thinking × toolChoice | Anthropic extended thinking 下 tool_choice 只兼容 `auto`/`none`；`required`/指定工具不受支持（官方文档）。 | 默认：toolChoice → `auto` + LOSSY warning（`thinking_tool_choice_limited`）；可配 reject，或关闭 thinking + LOSSY warning。策略固定，不可两边各自渲染。 |
+| thinking × maxTokens | budget（enabled 模式）必须 < max_tokens 且符合模型限制。 | 超限 → clamp 到模型上限 + warning，或 reject。 |
+| thinking × temperature/top_p | reasoning 模型常禁止采样参数。 | 能力层过滤 + LOSSY warning。 |
+| `truncation=auto` × capability | 自动删历史需 tokenizer/context window/item-aware truncator/tool-call atomicity/system prefix preservation；缺一不可。 | **默认 UNSUPPORTED**（`context_truncation_unsupported`），除非 profile 声明 `contextTruncation.auto=true`；`disabled` → COMPATIBLE no-op（v0.4，P1-7）。 |
+| `max_tool_calls` × capability | 仅 built-in/server-side tools 全局限制；目标无等价 server-side 限制（Anthropic per-tool `max_uses` 不可直接等价）。 | 无等价 → LOSSY/drop 或 reject；**绝不映射为 function/parallel/round limit**（v0.4，P0-1）。 |
+| identity（user/safety_identifier）× target | 目标无 end-user tracking 字段。 | drop + warning（默认）；仅 privacy/data-transfer policy 要求时 reject（v0.4，P1-5）。 |
+| tools 空 × toolChoice=required/指定 | 空工具列表 + 强制指定工具 = upstream 400。 | toolChoice → `auto` + warning（§3.4）。 |
+| parallel=false × target capability | 目标不支持并行工具。 | 串行降级 + warning（TR-005）。 |
+| structured output × target capability | `text.format` / `response_format` 目标不支持。 | 降级或 reject（按 `TranslationPolicies.unsupportedField`）。 |
+| stateful 字段 × target capability | `previous_response_id`/`conversation`/`store=true`/`prompt`。 | 按 §3.1.3 能力位（conversationState/responseStorage/promptTemplates）拒绝或 no-op。 |
+| custom/namespace tool × target | 目标无等价表示。 | 降级 function(input)（§10.4 registry）或 reject。 |
+| reasoning effort × target | 目标无 thinking 能力。 | drop_with_warning / reject（TH-004）。 |
+
+实现要点：`validate.ts` 接收 `CanonicalRequest + target ProviderProfile + TranslationPolicies` → 产出 `ValidationResult`（violations + 修正建议）；Fidelity Plan 阶段消费该结果生成 plan entries。
+
+## 10.2 必须维护的三个不变量
+
+1. 每个 tool result 必须能唯一关联到 `call_id`。
+2. 需要严格邻接的协议（Messages、Chat 的 role=tool）中，assistant tool call 与对应 tool result 之间不能夹普通消息。
+3. 并行调用保持调用顺序与结果配对；不得把多个并行 call 拆成互相穿插的 assistant/user 轮次。
+
+## 10.3 正规化只在目标渲染阶段执行（v0.2，P1-6）
+
+- **parse 阶段**（§3.3、§7）：尽量保真表示源协议实际内容，不做删除/移动/合并（v0.2，P1-6；保真流水线见 §10.0）。
+- **渲染 Messages 时**：应用 Messages adjacency（复用 `normalizeAnthropicTurns`：tool_result 提前、连续同角色合并）。
+- **渲染 Chat 时**：应用 Chat tool-message adjacency（openai-chat renderer 的 assistant.tool_calls + role=tool 序列化）。
+- **渲染 Responses 时**：原则上不做无必要重排（Responses 本身不要求 call/result 邻接），仅做合法化必需的最小调整。
+
+**正规化算法**（目标侧执行，产物为合法目标协议请求）：
+
+```text
+1. 索引所有 tool_result：call_id → result；重复 ID 采用「最后一个」或直接拒绝，策略必须固定。
+2. 遍历 assistant tool_call：
+   - 历史回放：只保留有结果的 answered call；
+   - 当前实时请求（等待工具执行）：保留全部，不能剔除。
+3. answered calls 合并到一条 assistant 消息（多个 tool_call parts）。
+4. 立即生成按 call 顺序排列的 tool_result parts（合并进紧邻的 user 消息）。
+5. 原位置出现的这些 tool_result 不再重复输出（去重）。
+6. orphan result（没有宣布 call）默认丢弃或报错。
+7. dangling call（历史中永远没有 result）在回放历史时可剔除；当前输出中不能剔除。
+8. 区分「历史」与「当前输出」两种上下文，分别处理。
+```
+
+## 10.4 双 registry：定义与调用分离（v0.2，P1-7）
+
+v0.1 把 registry 建成单一 `call_id → kind`，但**工具定义出现时还没有 call_id**（call_id 是模型实际调用时才产生）。拆成两个：
+
+```ts
+/** 工具定义阶段：请求解析时按 normalized 名建索引。 */
+interface ToolDefinitionRegistry {
+  map: Map<string, ToolDefEntry>;   // normalizedToolName →
+}
+interface ToolDefEntry {
+  /** payload/execution 语义（v0.5，P0-2）：与命名结构正交。 */
+  executionKind: "function" | "custom";
+  /** 命名结构：plain | namespaced（正交维度，不参与 payload discrimination）。 */
+  nameKind: "plain" | "namespaced";
+  originalName: string;             // namespace 场景为 namespace.child 原形
+  namespace?: string;
+  normalizedName: string;           // flatten 后名称
+  schema?: Record<string, unknown>;
+}
+
+/** 工具调用阶段：call_id 与 item_id 双索引（v0.4，P1-11）。 */
+interface ToolCallRegistry {
+  byCallId: Map<string, ToolCallEntry>;   // call_id →
+  byItemId: Map<string, ToolCallEntry>;   // item_id →（Responses item 生命周期引用）
+}
+interface ToolCallEntry {
+  normalizedToolName: string;
+  originalName: string;
+  /** payload 语义：function → argumentsText JSON；custom → inputText freeform（v0.5，P0-1/P0-2）。 */
+  executionKind: "function" | "custom";
+  nameKind?: "plain" | "namespaced";
+  /** 源协议 item id（Responses：output item id）。 */
+  sourceItemId?: string;
+  /** 目标协议 item id（Responses：output item id）。 */
+  targetItemId?: string;
+}
+```
+
+> **namespace 拆出说明（v0.5，P0-2）**：`executionKind`（function/custom，决定输出 arguments 还是 input）与 `nameKind`（plain/namespaced，决定名称是否需 flatten/还原）是**两个正交维度**。一个 namespace 下的工具最终仍是 function semantics；renderer 遇 `executionKind=function` 输出 `arguments`，遇 `custom` 输出 `input`，不因 namespaced 而改变 payload 形状。
+
+- **为什么需要双索引（v0.4，P1-11）**：Responses 中一个 function call 同时有 item id（SSE item lifecycle 引用）与 call_id（`function_call_output` 关联），语义不同。流式状态机维护 item_id、registry 维护 call_id，两套结构靠双索引关联；否则 debug「这个 `function_call_output` 对应哪个 output_item？」无从下手。`byCallId` 与 `byItemId` 指向同一 `ToolCallEntry`。
+
+- 挂载位置：`CodecContext`（扩展，附录 D-3）。`parseRequest` 写入 Definition registry；第一次遇到 call（解析 input 中的 function_call / 解析响应中的 tool_use/tool_calls）写入 Call registry。render 阶段按 call_id 反查 kind/原名——**定义 → 上游调用 → 返回 → 恢复**的完整链路由此闭合。
+- 撞名（两个 namespace 工具 flatten 后同名）在定义阶段**拒绝**，不产生歧义路由。
+
+# 11. Reasoning / Thinking 转换策略
+
+## 11.1 控制参数（effort / budget）映射与 thinking generation 能力（v0.3，P1-8）
+
+当前请求的 `reasoning.effort` 是**控制参数**，可以跨协议映射。但**不要靠 renderer 猜模型代际**：Anthropic 已明确 manual `thinking.type=enabled + budget_tokens` 在较新模型 deprecated（更高版本直接 400），adaptive thinking 用 `thinking.type=adaptive` + `output_config.effort` 控制深度。ProviderProfile 必须显式声明以下维度（附录 D-4）：
+
+```ts
+interface ThinkingGenerationCapabilities {
+  /** 模型支持的 thinking 模式。 */
+  mode: "none" | "manual" | "adaptive";
+  /** effort 放置位置：adaptive 模型为 output_config；旧 manual 模型无 effort。 */
+  effortLocation?: "output_config" | "none";
+  /** manual budget_tokens 是否仍被支持（false = deprecated/400，须拒绝或转 adaptive）。 */
+  manualBudgetSupported: boolean;
+  /** 是否支持与工具调用交错（interleaving）。 */
+  interleaving: boolean;
+  /** thinking block 是否必须位于消息开头。 */
+  requiresLeadingBlock: boolean;
+}
+```
+
+| 目标模型能力                    | 映射                                                                 |
+|---------------------------------|----------------------------------------------------------------------|
+| adaptive（mode=adaptive）       | `none` → disabled；`auto` → adaptive + `output_config.effort`；其它 effort 归一化后放入 `CanonicalThinkingConfig.effort` 并渲染到 `output_config.effort`。 |
+| manual 且 `manualBudgetSupported` | low/medium/high 等映射为 budget；预算必须 < max_tokens（Target Validation，§10.1）且符合模型限制。 |
+| manual 且 `manualBudgetSupported=false` | 收到 enabled+budget → reject（或按策略转 adaptive + LOSSY warning），不发送会 400 的旧字段。 |
+| 无 thinking 能力                | 按 `TranslationPolicies.reasoning` 处理（默认 drop_with_warning，TH-004）。 |
+| `interleaving=false` 或 `requiresLeadingBlock` | 历史 reasoning 重放与工具调用交错时按能力约束重排或降级（§10.1）。 |
+
+## 11.2 信息类型与跨协议可移植性
+
+| 信息类型          | 可否跨协议 | 推荐处理                                                             |
+|-------------------|-----------|----------------------------------------------------------------------|
+| reasoning summary | 部分可     | 作为目标 summary / reasoning_content；不等价于私有 chain-of-thought。 |
+| reasoning text    | 部分可     | 仅映射到目标显式支持 reasoning text 的字段（Responses `reasoning.text`）；目标只有 summary 时降级并 warning。 |
+| encrypted_content / signature | 仅同 provider / 兼容 carrier | native 字段仅放同 provider 数据；否则 translator-private carrier（§11.4）。 |
+| Anthropic thinking signature | 仅重放到兼容 Anthropic upstream | 进入 translator-private carrier，**不冒充 OpenAI encrypted_content**。 |
+| redacted thinking  | 仅原样重放 | 使用独立 carrier 标记，避免与普通 signature 混淆。                   |
+| reasoning tokens   | 可         | 映射到 output token details（§14）。                                  |
+
+## 11.3 控制参数与历史重放彻底分离
+
+「控制模型是否思考」（effort/预算，§11.1）与「历史思考内容能否重放」（完整性/签名，§11.4）是两个独立问题：前者是参数映射，后者是 provider 签名边界。
+
+## 11.4 carrier 双模式：Native vs Managed Round-trip（v0.2，P0-5）
+
+> **背景**：OpenAI 的 `reasoning.encrypted_content` 语义是 **Responses reasoning item 自身产生的 encrypted reasoning content**（通常通过 `include` 请求返回）。把 Anthropic signature 塞进去，等于把一个 foreign provider 密文冒充成 OpenAI 的 encrypted blob；若后续转发给真实 OpenAI Responses upstream，就是跨 provider 伪造——违反本文原则 6。
+
+**Native mode（默认）**：只输出目标协议真正认可的数据。
+
+- `signature`/`encrypted_content` **不进入公开的 Responses `reasoning.encrypted_content`**，除非 carrier 可验证由同一 provider 签发（如 Responses → Responses 直通）。
+- Anthropic thinking signature → Responses：`summary`/text 正常映射；signature 降级为丢弃（warning）或进入 managed carrier。
+- Chat `reasoning_content` → Responses：只写 `summary`，绝不伪造 encrypted_content。
+
+**Managed round-trip mode（网关自行管理 opaque carrier）**：用于「网关自己维护的多轮会话」场景。
+
+- carrier 保存在内部 `CodecContext` / request·session registry / `providerMetadata`，或封装为**带 namespace + version 的 translator-private envelope**（如 `{ "__llm_protocol_carrier__": { ns, version, provider, payload } }`）。
+- **硬约束：该 carrier 不得被原样发给真实 OpenAI upstream**（也不得进入 Responses 公开的 `encrypted_content`）；仅在转换器内部往返、或回传同 provider 的 Anthropic upstream 时恢复 thinking block。
+- 跨 provider 丢弃时产生 warning（TH-004）。
+
+**决策入口**：按目标 provider 与能力声明（附录 D-4 `carrierMode`）选择 native / managed / 丢弃。
+
+## 11.5 summary 与 reasoning text 分离（v0.2，中等问题-1）
+
+Responses 流式把推理拆成两套事件：`response.reasoning_summary_text.*`（公开摘要）与 `response.reasoning_text.*`（推理正文）。**不得互相压制**：
+
+- `reasoning_summary_text.*` ↔ Canonical `reasoning.summary` ↔ Messages thinking summary / Chat `reasoning_content`。
+- `reasoning_text.*` ↔ Canonical `reasoning.text` ↔ 目标显式支持时透传（如 Responses → Responses）；目标只有 summary 时按策略降级（warning）。
+- Anthropic `thinking_delta` 默认映射为 summary 侧（公开可见部分）——**标为 COMPATIBLE/LOSSY（v0.5，清理-1）**：Anthropic thinking block 与 Responses 的 `summary`/`reasoning_text` 不是同一种协议语义，provider 可能返回经处理的 thinking；可作为兼容策略但**不标 EXACT**。`signature_delta` 归入 carrier（§11.4），不并入 text。
+
+## 11.6 各方向具体规则
+
+- **Responses → Messages**：历史 reasoning item 若 carrier 可确认由目标 provider 签发，才恢复 thinking block；否则默认丢弃该 reasoning history（warning），不构造无签名 thinking。
+- **Messages → Responses**：带有效 signature 的 thinking block → reasoning item（summary/text → summary/text；signature → managed carrier，§11.4）。无 signature 的 thinking 不作为普通用户可见文本输入，可丢弃或仅用于日志。来自其它 provider 的密文必须带 provider 标签，避免错误重放到不同 upstream。
+- **Chat → Responses**：`reasoning_content` → reasoning item 的 summary；不伪造 encrypted_content。
+- 任何降级必须产生 `TranslationWarning`（TH-004，无静默丢弃）。
+
+# 12. 多模态内容转换
+
+| 内容          | Responses ↔ Messages      | Responses ↔ Chat              | 推荐策略                                                    |
+|---------------|---------------------------|-------------------------------|-------------------------------------------------------------|
+| 文本          | 高保真                    | 高保真                        | 保持 part 顺序。                                            |
+| 图片 data URI | ↔ base64 image            | ↔ image_url data URI          | 验证 MIME/base64；无效 data URI 拒绝或跳过。                |
+| 图片 URL      | 目标支持 URL 时直传，否则解析为 base64 | image_url              | 网络解析要有大小/超时限制（NFR-006）。                      |
+| PDF/文件      | document / file           | file 或降级文本/外部处理      | 新增 file part（附录 D-2）；不能把未知二进制当 text。       |
+| tool result 图片 | Messages 可在 tool_result 内承载 | Chat 常需移到后续 user 多模态消息 | 保留 call attribution（来源 call_id）。                    |
+| 音频/视频     | 目标支持时映射            | 依 Chat upstream 扩展能力      | 无能力时显式不支持（UNSUPPORTED）。                         |
+
+**tool result 媒体迁移规则（Responses → Chat）**：`role=tool` 消息不支持图片/文件时，tool 消息保留文本并放置「媒体已移至后续用户消息」标记；随后追加一条 user 多模态消息承载媒体并标明来源 call_id。满足 tool/result 邻接，同时让模型最终看到媒体。
+
+# 13. 流式事件状态机
+
+> 实现一个统一 `ResponsesStreamState`（每请求实例，对应现有 per-call TransformStream factory 模式，TC-021），**禁止逐 chunk 无状态改写**（SR-002/7.2 不变量）。
+
+## 13.1 双层生命周期模型（v0.2，P0-3 + v0.4 P1-10 多级 location）
+
+Responses SSE 存在两个独立生命周期，**必须分别建模**：
+
+- **Item lifecycle**：`response.output_item.added` → （item 内活动）→ `response.output_item.done`。一个 item 有稳定的 `item_id` 与 `output_index`。
+- **Content lifecycle**：`response.content_part.added` → `response.<kind>_part.delta` / `response.<kind>.delta` → `response.content_part.done`。一个 message item 内可有多个 content part，各自有 `content_index`。
+
+**推论**：`output_item.added(message)` 只说明 message item 被创建，**不能立即发 `text_start`**；文本内容始于 `content_part.added(text)`（或首个 `output_text.delta` 时补开 part）。v0.1 的 `output_item.added(message) → text_start` 映射作废。
+
+### 13.1.1 多级 location 索引模型（v0.4，P1-10）
+
+单一 `index` 同时承担 output_index / content_index / summary_index / annotation_index / tool index 已开始泄漏。**不再继续加平级 optional indexes**，改为多级 location：
+
+```ts
+type StreamLocation =
+  | { kind: "output"; outputIndex: number }        // 对应 Responses output_index
+  | { kind: "content"; outputIndex: number; contentIndex: number }   // content_part
+  | { kind: "summary"; outputIndex: number; summaryIndex: number }   // reasoning summary part
+  | { kind: "annotation"; outputIndex: number; contentIndex: number; annotationIndex: number }  // output_text annotation
+  | { kind: "tool"; outputIndex: number; toolIndex: number };        // Chat tool_call index
+```
+
+- 现有 `CanonicalStreamEvent` 的 `index` 字段保留为**兼容别名**（= `location.output.outputIndex`），新增事件/扩展一律走 `location`；
+- 后续 server-side tools 事件引入时，在 `location` 上加 `providerTool` 维度，不再污染平级字段。
+
+### 13.1.2 Response Envelope Builder + output-item status（v0.5，P0-3）
+
+> Translated Responses 的 SSE snapshot（`response.created` / `output_item.added` / terminal）承载完整 Response 结构，不是只有 ID。文档必须冻结生成规则，否则 SDK smoke 会在 snapshot 上暴露问题。
+
+```ts
+interface ResponseEnvelopeState {
+  id: string;                 // Synthetic ID Factory（§8.3），全程稳定
+  object: "response";
+  createdAt: number;          // 整个 stream 生命周期只分配一次；Anthropic 缺时间戳时生成 translator-owned structural timestamp（trace 标 origin=structural）
+  completedAt?: number;
+  status: ResponsesStatus;    // queued/in_progress/completed/incomplete/failed/cancelled
+  model?: string;
+  error?: unknown;
+  incompleteDetails?: unknown;
+  output: OutputItemState[];  // 按 output_index 排序；terminal 时与 done items 完全一致
+  usage?: CanonicalUsage;
+  /** 回填请求侧仍有意义的配置字段：instructions、reasoning、tool_choice、tools、parallel_tool_calls、temperature/top_p、metadata、service_tier 等。 */
+  requestDerived?: Record<string, unknown>;
+}
+
+interface OutputItemState {
+  id: string;                 // item id（synthetic 或 native）
+  type: "message" | "reasoning" | "function_call" | "custom_tool_call";
+  /** item 级状态生命周期（v0.5，P0-3）。 */
+  status: "in_progress" | "completed" | "incomplete";
+  outputIndex: number;
+  payload?: unknown;          // message parts / reasoning / call 参数
+}
+```
+
+规则：
+
+1. `output_item.added` → 创建 `OutputItemState` 且 `status=in_progress`（snapshot 随事件输出）；
+2. `output_item.done` → `status=completed`（或被截断的 `incomplete`），final snapshot 与 terminal `output[]` 一致；
+3. terminal response 的 `output[]` 必须与所有 done items 完全相同（顺序、ID、内容）；
+4. `created_at` 全程只分配一次，SSE 与最终 completed response 一致；
+5. `response.created` 事件的 payload 是**完整 envelope snapshot**（含 object/created_at/status/output 等），不是只带 response_id。
+
+### 13.1.3 Response lifecycle（v0.4，P1-9 + v0.5，P1-1 round-trip）
+
+`response.queued` 是**中间状态**，不是 terminal：
+
+```text
+response.created → [response.queued]? → response.in_progress → output events → terminal
+```
+
+- `message_start` → `response.created` → `[response.queued]?` → `response.in_progress`（profile/state driven，v0.3 写死两连发需放宽）；
+- queued 表示 response 已入队等待处理；仅当目标 Responses profile 明确声明支持 queued SSE 事件时才输出。
+
+**round-trip 保留（v0.5，P1-1）**：解析表不能再把 created/queued/in_progress 全部压成一个 `message_start`（否则多个事件会 emit 多个 message_start，且 A→IR→A 丢失 queued）。新增 additive canonical 事件：
+
+```ts
+{ type: "response_state"; state: "created" | "queued" | "in_progress"; metadata?: unknown }
+```
+
+- `message_start` 仅由首个 lifecycle 事件触发；后续 `response_state(queued/in_progress)` 单独产出；
+- 旧 consumer 忽略新事件（backward-compatible）；不愿扩事件集时至少把 lifecycle sequence 存入 `message_start.metadata`，但**推荐正式事件**。
+
+```ts
+interface ResponsesStreamState {
+  responseId?: string;
+  createdAt?: number;
+  /** Responses SSE 全局事件序号（每个 SSE 事件 +1）。 */
+  sequenceNumber: number;
+  /** 下一个 output item 的 output_index（message/reasoning/function/custom 共享）。 */
+  nextOutputIndex: number;
+  /** 当前打开的 item 缓冲（按 item_id 索引）。 */
+  items: Map<string, ItemBuffer>;
+  /** 按 output_index 缓存已完成 item，用于 terminal event 的 output 数组重建。 */
+  completedItems: Map<number, CompletedItem>;
+  /** response lifecycle 阶段：created | queued? | in_progress（v0.4，P1-9）。 */
+  lifecycle: "created" | "queued" | "in_progress";
+  /** terminal 状态：completed | incomplete | failed | cancelled（唯一一次，queued 不属于此）。 */
+  terminal?: { status: ResponsesStatus; reason?: CanonicalFinishReason };
+  usage: CanonicalUsage;
+}
+
+interface ItemBuffer {
+  itemId: string;
+  outputIndex: number;
+  type: "message" | "reasoning" | "function" | "custom";
+  /** item 级状态（v0.5，P0-3）：added → in_progress，done → completed/incomplete。 */
+  status: "in_progress" | "completed" | "incomplete";
+  /** message item 内已打开的 content parts（按 content_index）。 */
+  parts: Map<number, ContentPartBuffer>;
+  /** function: JSON arguments 缓冲；custom: 自由文本 input 缓冲。 */
+  argumentsText?: string;
+  /** reasoning summary 是多 part 数组（summary_index 空间，v0.3，P0-3）。 */
+  summaryParts: Map<number, SummaryPartBuffer>;
+  /** reasoning text 走独立 content part 生命周期（content_index 空间，与 summary 不合并）。 */
+  reasoningContentParts: Map<number, ReasoningContentPartBuffer>;
+  /** translator-private carrier（§11.4），不输出为公开 reasoning 字段。 */
+  carrier?: unknown;
+}
+
+interface ContentPartBuffer {
+  contentIndex: number;
+  kind: "output_text" | "refusal";
+  text: string;
+}
+
+/** output_text part 的 annotation 是 part 的 metadata child（annotation_index），不是独立 part（v0.3，P2-1）。 */
+interface OutputTextPartBuffer extends ContentPartBuffer {
+  annotations: Map<number, unknown>;  // annotation_index → annotation
+}
+
+/** reasoning summary part：summary_index 空间，lazy open（v0.3，P0-3）。 */
+interface SummaryPartBuffer {
+  summaryIndex: number;
+  text: string;
+}
+
+/** reasoning text content part：content_index 空间，独立生命周期（v0.3，P0-3）。 */
+interface ReasoningContentPartBuffer {
+  contentIndex: number;
+  text: string;
+}
+```
+
+**lazy open 规则（v0.3，P0-3）**：不要 `reasoning_start` 就无条件制造 `reasoning_summary_part.added`——只有 reasoning text、没有 summary 的响应会被伪造出空 summary part。
+
+- 首个 `reasoning_delta(kind=summary)` → 打开 summary part（`reasoning_summary_part.added`），随 delta 累计，`reasoning_summary_text.done` + `reasoning_summary_part.done` 关闭；
+- 首个 `reasoning_delta(kind=text)` → 打开 reasoning content part（`content_part.added(reasoning_text)`），随 delta 累计，`reasoning_text.done` + `content_part.done` 关闭；
+- 两个都未出现 → 不输出任何 summary/text part。
+
+**reasoning 完整生命周期（渲染方向，v0.3）**：
+
+```text
+reasoning_start → output_item.added(reasoning)
+  ├─ [首个 summary delta] → reasoning_summary_part.added → reasoning_summary_text.delta* → reasoning_summary_text.done → reasoning_summary_part.done
+  └─ [首个 reasoning text delta] → content_part.added(reasoning_text) → reasoning_text.delta* → reasoning_text.done → content_part.done
+→ output_item.done
+```
+
+- canonical `index` 采用**目标端 output item 的 output_index**；content_index 由渲染器在 message item 内管理，不直接当作 Responses output_index（一个 message 的多个 text block 聚合进同一 message item，而 tool/reasoning 又需要独立 item）。
+- `sequence_number` 对每个发出的 SSE 事件全局递增，与 item 无关。
+
+## 13.2 Anthropic SSE → Responses SSE（渲染方向）
+
+| CanonicalStreamEvent          | Responses SSE 事件序列                                                                 |
+|-------------------------------|----------------------------------------------------------------------------------------|
+| `message_start`               | `response.created` → `[response.queued]?` → `response.in_progress`（首包即发，SR-009；queued 仅 profile 声明时，v0.4，P1-9）                          |
+| `text_start`                  | `response.output_item.added(message)` → `response.content_part.added(text)`               |
+| `text_delta`                  | `response.output_text.delta`                                                            |
+| `text_end`                    | `response.output_text.done` → `response.content_part.done` → `response.output_item.done` |
+| `tool_start`（kind=function） | `response.output_item.added(function_call, id, name, arguments)`                          |
+| `tool_start`（kind=custom）   | `response.output_item.added(custom_tool_call, id, name, input)`（v0.2，P0-2）             |
+| `tool_arguments_delta`（function） | `response.function_call_arguments.delta`                                            |
+| `tool_arguments_delta`（custom）  | `response.custom_tool_call_input.delta`（v0.2，P0-2）                                |
+| `tool_end`（function）        | `response.function_call_arguments.done`（参数完整）→ `response.output_item.done`          |
+| `tool_end`（custom）          | `response.custom_tool_call_input.done` → `response.output_item.done`（v0.2，P0-2）        |
+| `reasoning_start`             | `response.output_item.added(reasoning)`（**不制造 summary part**，lazy open，v0.3，P0-3）                     |
+| `reasoning_delta` (kind=summary) | 首个 → `response.reasoning_summary_part.added`；随后 `response.reasoning_summary_text.delta`              |
+| `reasoning_delta` (kind=text) | 首个 → `response.content_part.added(reasoning_text)`；随后 `response.reasoning_text.delta`（v0.3，P0-3）     |
+| `reasoning_delta` (opaque)    | 更新 translator-private carrier（§11.4），**不输出为公开 reasoning 字段**                                 |
+| `reasoning_end`               | 若有 summary：`response.reasoning_summary_text.done` → `response.reasoning_summary_part.done`；若有 reasoning text：`response.reasoning_text.done` → `response.content_part.done`；最后 `response.output_item.done` |
+| refusal part（canonical）     | `response.output_item.added(message)` → `response.content_part.added(refusal)` → `response.refusal.delta*` → `response.refusal.done` → `response.content_part.done` → `response.output_item.done`（v0.3，P0-2） |
+| `usage`                       | 暂存，并入 terminal event（§14.3）                                                       |
+| `message_end`                 | **根据 terminal status 选择 terminal event**（v0.2，P0-1，见 §13.5）                    |
+| `error`                       | 已开始后以 `response.failed` + error 事件终止（SR-006）；未开始则返回错误 JSON            |
+
+**消息聚合策略**：同一 message 生命周期内相邻的多个 text block → 1 个 message item + 多个 text parts；穿插的 tool/reasoning block → 独立 item，紧随其后继续 message item（允许同轮多个 message item，output_index 保证顺序）。
+
+## 13.3 Responses SSE → Anthropic SSE / Chat SSE（解析方向）
+
+| Responses SSE 事件            | CanonicalStreamEvent                                              |
+|-------------------------------|-------------------------------------------------------------------|
+| `response.created` / `response.queued`? / `response.in_progress` | 首个 lifecycle 事件 → `message_start`；后续 → `response_state(queued/in_progress)`（v0.5，P1-1） | 避免逐事件 emit 多个 message_start；保留 queued round-trip；旧 consumer 忽略 response_state |
+| `response.output_item.added(message)`       | **只建 item 状态，不发 text_start**（等待 content_part.added / 首个 delta，v0.2，P0-3） |
+| `response.content_part.added(text)`         | `text_start(index = output_index)`                                  |
+| `response.output_text.delta`               | `text_delta`                                            |
+| `response.output_text.done` / `content_part.done` | 关闭 part；`output_item.done` 时发 `text_end`               |
+| `response.refusal.delta` / `refusal.done`  | `text_start/text_delta/text_end` 携带 `kind="refusal"`（canonical 最小扩展，附录 D-9）；目标无 refusal 语义时降级 text + warning（v0.3，P0-2） |
+| `response.output_text.annotation.added`    | 累加至 **output_text part 的 `annotations`（annotation_index）**，不建立独立 part（v0.3，P2-1）；目标不支持则按策略丢弃并 warning |
+| `response.output_item.added(function_call)` | `tool_start(index, id = call_id, name, kind = "function")`          |
+| `response.function_call_arguments.delta`    | `tool_arguments_delta`                                  |
+| `response.function_call_arguments.done`     | 参数缓冲完整；`tool_end` 在 `output_item.done` 时发出    |
+| `response.output_item.added(custom_tool_call)` | `tool_start(index, id, name, kind = "custom")`（v0.2，P0-2）   |
+| `response.custom_tool_call_input.delta`     | `tool_arguments_delta`（buffer 为自由文本 input，v0.2，P0-2） |
+| `response.custom_tool_call_input.done`      | input 完整；`tool_end` 在 `output_item.done` 时发出（v0.2，P0-2） |
+| `response.output_item.added(reasoning)`     | `reasoning_start(index, metadata = { carrier })`         |
+| `response.reasoning_summary_part.added`     | 开 summary part（记录 `summary_index`，v0.3，P0-3）       |
+| `response.reasoning_summary_text.delta`     | `reasoning_delta(kind = "summary", text, summaryIndex)`（v0.2 中等问题-1 + v0.3 P0-3） |
+| `response.reasoning_summary_text.done`      | 关 summary part（缓冲完）                                |
+| `response.reasoning_summary_part.done`      | 关闭 summary part（v0.3，P0-3，此前缺失）                |
+| `response.content_part.added(reasoning_text)` | 开 reasoning content part（记录 content_index，v0.3，P0-3） |
+| `response.reasoning_text.delta`             | `reasoning_delta(kind = "text", text)`（v0.2，中等问题-1） |
+| `response.reasoning_text.done` / `response.content_part.done` | 关闭 reasoning content part（v0.3，P0-3）     |
+| `response.reasoning_summary_text.done` / `reasoning_text.done` / `output_item.done` | `reasoning_end(index, metadata)` |
+| `response.completed`                        | `usage`（含 token details）→ `message_end(finishReason = completed → end_turn/tool_call 等)` |
+| `response.incomplete`                       | `usage` → `message_end(finishReason = max_tokens)`（v0.2，P0-1；**stop_sequence 不再由此进入**，v0.3） |
+| `response.failed`                           | `error`（upstream generation failure）                          |
+| 未知事件（`response.*` 未来新增）           | `unknown`（按 `unknownStreamEvent` 策略，SR-005）        |
+
+> **`response.cancelled` 降级为按 profile（v0.3，P1-9）**：`cancelled` 是合法 Response status（非流式对象），且作为 **webhook event** 明确存在；但当前 streaming reference 没有同样明确的 `response.cancelled` SSE。策略：若目标 Responses streaming profile **明确声明**存在对应 SSE 事件 → 输出；否则按 `unknown`/extension 处理或安全结束 transport，**不自行发明事件**。
+
+Chat SSE → Responses SSE 无需单独实现：`openai-chat` 已有 SSE → canonical parse，复用 + 上述 canonical → Responses render 即可（外部设计 §9.2 的 delta 状态机收敛到 canonical 层）。
+
+## 13.4 事件完整性要求（SR-002 / 外部设计 §13.1）
+
+1. 任何 added 最终都有对应 done；客户端可能依赖 done 事件释放状态。
+2. 不只发 `output_text.delta` 而省略 `content_part.added/done` 与 `output_item.added/done`。
+3. 工具参数既有 delta，也有 done / 最终完整 arguments（function）或 input（custom）。
+4. 流结束时主动 flush 未关闭的 message/tool/reasoning item。
+5. upstream error 用目标协议 error 形态终止，不在已开始 SSE 后突然返回普通 JSON body（SR-006）。
+6. **terminal event 唯一**：completed / incomplete / failed / cancelled 四者只发一次（terminal flag），类型由状态决定，不得统一伪装成 `response.completed`（v0.2，P0-1）。
+
+## 13.5 Terminal event 选择（v0.2，P0-1）
+
+| 场景                              | Responses status | Terminal SSE 事件       |
+|-----------------------------------|------------------|-------------------------|
+| 正常结束（end_turn / tool_call / stop_sequence / refusal / pause_turn） | `completed`      | `response.completed`    |
+| token/context 等真正截断（max_tokens） | `incomplete`     | `response.incomplete`   |
+| upstream generation failure       | `failed`         | `response.failed`       |
+| transport / protocol error        | —                | `error` 事件（目标协议 error 形态） |
+| queued（**不是 terminal**，v0.4，P1-9） | —（lifecycle 中间态，见 §13.1.3） | 并入 `response.created` → `in_progress` 生命周期；不参与 terminal 选择 |
+| cancelled（**仅 profile 明确声明存在 SSE 事件时**，v0.3，P1-9） | `cancelled` | 否则按 unknown/extension 或安全结束 transport，不自行发明 |
+
+- `message_end`（canonical）→ **根据 Canonical terminal status 选择 terminal event**，不再固定映射为 `response.completed`。
+- 非流式响应中的 `status` 与流式 terminal event 使用同一推导表（§8.2），保证聚合一致性。
+
+# 14. Usage、缓存与计费
+
+## 14.1 映射与 cache 计算（v0.2，P1-8）
+
+> **关键差异**：Anthropic 的 total input = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`（cache read/write 都计入总 input）；OpenAI 的 `cached_tokens` 是 `input_tokens` **子集**，不是额外叠加。
+
+| Anthropic → IR                 | Chat → IR                         | IR → Responses                         |
+|--------------------------------|-----------------------------------|----------------------------------------|
+| `input_tokens`                 | `prompt_tokens`                   | `input_tokens`（见下方汇总）           |
+| `output_tokens`                | `completion_tokens`               | `output_tokens`                        |
+| `cache_read_input_tokens`      | `prompt_tokens_details.cached_tokens` | `input_tokens_details.cached_tokens` |
+| `cache_creation_input_tokens`  | —（如有扩展）                     | 计入 `input_tokens` 汇总；内部 `CanonicalUsage.cacheCreationTokens` 单独保留 |
+| —（reasoning tokens，若返回）  | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` |
+| —                               | —                                 | `total_tokens`：上游已给 total 以 upstream 为主；否则 input + output。 |
+
+**Anthropic → Responses 汇总规则（显式写清）**：
+
+```text
+responses.input_tokens                  = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+responses.input_tokens_details.cached_tokens = cache_read_input_tokens
+```
+
+- `CanonicalUsage` 内部**单独保存** `uncached` / `cacheWrite` / `cacheRead` 三个分量（v0.2，P1-8），`inputTokens` 语义与 Anthropic 一致（含 cache 全量）；渲染 Responses 时按上表展开，渲染 Chat/Messages 时按各自口径拆分。
+- `CanonicalUsage.totalTokens` 仅在 input+output 齐备时推导（FR-010），缺失不伪造。
+- `providerDetails` 保留各协议原生 detail 字段（opaque）。
+
+## 14.2 流式 Chat usage（目标侧增强，v0.4，P1-4）
+
+> **与源字段 `stream_options` 拆分**：源 `stream_options` 按源协议解析/preserve（§3.1.2）；此处是 translator 为保证 usage fidelity 主动修改 **target request**——两个协议同名 `stream_options` 不语义同构。
+
+- **Target Normalize 阶段**：Responses → Chat 且 `stream=true` 且需要 upstream usage（`requireUpstreamUsage`）→ 主动设置 Chat `stream_options.include_usage = true`（profile 声明支持时）。
+- 已声明 `usage.usageAfterFinish` 的 provider 允许 late usage（GAP-014 既有能力）。
+- 仅当 upstream 无法提供 Usage 时才本地估算，并在内部标记 `usage_source = "estimated"`，避免与真实计费混淆；该标记只进诊断，不冒充真实值。
+
+## 14.3 Responses 流式 usage
+
+Responses 流式 usage 在 terminal 事件中返回（`response.completed` / `response.incomplete` 均带 `usage` 字段与 token details），聚合进 canonical `usage` 事件后再分发到目标协议（避免重复计数，SR-010）。`response.failed` 是否带 usage 由 profile 决定。
+
+# 15. 不可逆字段与失败策略
+
+## 15.1 不可逆字段表
+
+| Responses 能力                  | Messages   | Chat       | 推荐策略                                                     |
+|---------------------------------|------------|------------|--------------------------------------------------------------|
+| `previous_response_id`          | 无直接等价 | 无直接等价 | 属 `conversationState` 能力（§3.1.3）；目标未声明 → **显式拒绝**，不能静默忽略。 |
+| `conversation`                  | 无直接等价 | 无直接等价 | 同上；与 `previous_response_id` 不可同时使用。               |
+| `store`                         | 无直接等价 | 无直接等价 | 属 `responseStorage` 能力（§3.1.3）：`false` → no-op；`true` 无能力 → LOSSY warning 或拒绝。 |
+| `prompt` / `context_management` | 通常无     | 通常无     | 属 `promptTemplates` 能力（§3.1.3）；未声明 → 拒绝或网关自行实现。 |
+| custom grammar tool             | 不能完整表达 grammar | 不能完整表达 | 降级为字符串 function（§10.4 registry），或拒绝严格 grammar 语义。 |
+| namespace tool                  | 无原生 namespace | 无原生 namespace | flatten + reversible map；撞名拒绝。                     |
+| provider reasoning ciphertext   | 仅同 provider 可重放 | 通常无 | **native 字段不放 foreign 密文**；走 managed carrier 或丢弃（§11.4）。 |
+| server-side built-in tools      | 视 provider 能力 | 视 upstream 能力 | v1 边界：**只 canonicalize client-executed function/custom tools**；built-in/server-side（web_search、MCP、code interpreter）作为 `provider_tool` opaque/provider extension 或 UNSUPPORTED，不强行塞进普通 tool_call（v0.4，P1-12）。 |
+| `max_tool_calls`                | 通常无等价 | 通常无等价 | 仅 built-in tools 全局限制；无等价 server-side 限制 → LOSSY/drop 或 reject；**禁止映射 function/parallel/round limit**（v0.4，P0-1）。 |
+| `truncation=auto`               | 无等价 | 无等价 | 默认 UNSUPPORTED（除非 profile 声明 `contextTruncation.auto`）；`disabled` → COMPATIBLE no-op（v0.4，P1-7）。 |
+| identity（user / safety_identifier） | 目标常无 end-user tracking 字段 | 同左 | 默认 drop + warning；仅 privacy/data-transfer policy 要求时 reject（v0.4，P1-5）。 |
+| refusal 结构（structured refusal） | 通常无 | 通常无 | Responses 原生保留；目标无 structured refusal → 降级 assistant text / provider extension + `LOSSY_REFUSAL_STRUCTURE` warning（v0.3，P0-2）。 |
+| tool result 多模态              | 通常支持    | 支持不一致 | 必要时移动到后续 user message（§13）；**LOSSY（`tool_result_media_relocated`）**，marker 文本由 policy 控制（v0.3，P2-2）。 |
+
+## 15.2 失败优先级
+
+1. **改变权限层级的丢失**（system/developer 被静默降成 user）→ 严重错误，UNSUPPORTED。
+2. **工具路由歧义**（namespace 撞名、重复 call_id）→ 拒绝。
+3. **目标 schema 无法承载且可能被 upstream 400 的字段** → 转换前过滤或拒绝。
+4. **authority-order 重排**（中途插入的 system/developer 归并到前缀）→ LOSSY warning 或 reject（§3.2、§5.1）。
+5. **仅影响非关键 metadata 的字段** → 按能力白名单静默删除，但记录转换诊断（warning）。
+
+# 16. 兼容性测试矩阵
+
+> 测试组织遵循项目规范（`tests/**/*.test.ts`，走公开 `translate()` API；离线 fixture 优先；live 只进 testkit）。建议新增文件：`tests/codecs-responses.test.ts`（请求/响应 codec）、`tests/streams-responses.test.ts`（SSE 状态机）、`tests/responses-e2e.test.ts`（端到端）、`tests/testkit/scenarios/` 追加 responses 场景、`tests/sdk-smoke.test.ts` 追加 Responses 官方 SDK smoke。
+
+| 场景                       | Responses↔Messages | Responses↔Chat | 验收点                                                                 |
+|----------------------------|--------------------|----------------|------------------------------------------------------------------------|
+| 纯文本非流式               | 必须               | 必须           | 文本、model、usage、status=completed 正确。                             |
+| 纯文本流式                 | 必须               | 必须           | 完整 added/content_part/delta/done 序列，sequence_number 递增，terminal 事件唯一且类型正确。 |
+| **terminal：completed**    | 必须               | 必须           | 正常结束 → `response.completed` 单次（v0.2，中等问题-2）。              |
+| **terminal：incomplete**   | 必须               | 必须           | **真正截断（max_tokens）** → `response.incomplete` 单次，非 completed（v0.2，中等问题-2）。 |
+| **terminal：failed**       | 必须               | 必须           | upstream generation failure → `response.failed`（v0.2，中等问题-2）。  |
+| **stop_sequence 语义**     | 必须               | 应测试         | `stop_sequence` → status=completed，**不是 incomplete**（v0.3，P0-1）；provider details 保留原始 reason。 |
+| **refusal 双向**           | 必须               | 必须           | canonical refusal part ↔ Responses refusal part/SSE（refusal.delta/done）；正常完成但输出 refusal → completed；目标无 structured refusal → `LOSSY_REFUSAL_STRUCTURE`（v0.3，P0-2）。 |
+| **reasoning 多 summary part** | 应测试           | 应测试         | `summary_index` 递增、`reasoning_summary_part.added/done` 配对；无 summary 的响应不伪造空 summary part（lazy open）（v0.3，P0-3）。 |
+| **reasoning content part** | 应测试           | 应测试         | reasoning text 走 `content_part.added(reasoning_text)` → `reasoning_text.delta/done` → `content_part.done`（v0.3，P0-3）。 |
+| **Target Validation**      | 必须               | 必须           | thinking × toolChoice（extended thinking 只兼容 auto/none）默认降级 auto + warning；空 tools × required 拒绝/降级（v0.3，P1-7）。 |
+| **request field audit**    | 应测试             | 应测试         | include/max_tool_calls/truncation 等按 §3.1.2 策略落位；`stop` 不按标准字段处理（v0.3，P1-5）。 |
+| **outbound request ID**    | 应测试             | 应测试         | Messages→Responses 请求不默认生成 item ID；native ID 保留、无则 omit（§5.2A、v0.3，P1-6）。 |
+| **cancelled 按 profile**   | 应测试             | 应测试         | 仅 profile 声明存在 SSE 事件才输出；否则不自行发明（v0.3，P1-9）。     |
+| **annotation 挂载**        | 应测试             | 应测试         | `output_text.annotation.added` 挂 output_text part（annotation_index），非独立 part（v0.3，P2-1）。 |
+| system + developer + user  | 必须               | 必须           | 权限和顺序保持；中途 system/developer 重排产生 LOSSY warning。          |
+| 单 function call           | 必须               | 必须           | call_id、name、arguments（可 JSON.parse，TR-003）。                    |
+| **custom tool 非流式**     | 应有降级测试       | 必须           | 自由文本包装 / 回程还原（双 registry，§10.4）。                        |
+| **custom freeform 流式**  | 应有降级测试       | 必须           | custom inputText 自由文本不做 JSON.parse；`custom_tool_call_input.delta/done` 事件正确（v0.5，P0-1）。 |
+| **namespace 正交**        | 应测试             | 应测试         | executionKind（function/custom）与 nameKind（plain/namespaced）独立；namespaced+function 输出 arguments 不因命名改变 payload（v0.5，P0-2）。 |
+| **Envelope/item status**  | 必须               | 必须           | added→in_progress、done→completed/incomplete；terminal output[] 与 done items 一致；created_at 单次（v0.5，P0-3）。 |
+| **adjacency 放宽**        | 必须               | 必须           | 并行 calls（A,B → A,B results）合法，call_id 唯一配对而非 per-call 邻接；保留源顺序（v0.5，P0-4）。 |
+| **queued round-trip**     | 应测试             | 应测试         | response_state 事件保留；不产生多个 message_start（v0.5，P1-1）。 |
+| **status/finishReason 解耦** | 必须            | 必须           | 未知 finish reason + 成功返回 → completed+unknown+warning；仅明确截断才 incomplete（v0.5，P1-2）。 |
+| **allowed_tools**         | 应测试             | 应测试         | 仅 client function/custom → effective subset + auto/required；含 built-in/MCP → provider_tool/UNSUPPORTED（v0.5，P1-3）。 |
+| **cache key/retention**   | 应测试             | 应测试         | affinityKey 与 retention 分开；cache ≠ identity（v0.5，P1-4）。 |
+| **top_logprobs 双向**     | 应测试             | 应测试         | 请求/响应双向未建模 → LOSSY/UNSUPPORTED，不做单向半支持（v0.5，P1-5）。 |
+| 并行 function calls        | 必须               | 必须           | 合并/拆分与顺序；index 不串线。                                        |
+| tool result 后续对话       | 必须               | 必须           | 邻接与历史合法性。                                                     |
+| dangling/orphan 历史       | 必须               | 必须           | 正规化只在目标渲染阶段发生；Responses→Responses round-trip 保序。       |
+| **Synthetic ID**           | 必须               | 必须           | 流式聚合后与非流式 ID 一致；added/delta/done 同一 item_id；origin=synthetic 可查（v0.2，P0-4）。 |
+| namespace tool             | 应测试             | 应测试         | flatten、反向映射、撞名失败。                                          |
+| reasoning effort           | 必须               | 应测试         | budget/effort 映射。                                                   |
+| **reasoning summary/text** | 应测试             | 应测试         | summary 与 reasoning text 不互压；`reasoning_text.*` 事件正确（v0.2，中等问题-1）。 |
+| **carrier 边界**           | 必须               | 必须           | foreign signature 不进入公开 encrypted_content；managed carrier 不发给真实 OpenAI upstream（v0.2，P0-5）。 |
+| **max_tool_calls 边界**  | 必须               | 必须           | 仅 built-in tools 限制；不映射 function/parallel/round limit；→Chat 无等价 → LOSSY/drop 或 reject（v0.4，P0-1）。 |
+| **truncation=auto**      | 应测试             | 应测试         | 默认 UNSUPPORTED；`disabled` → COMPATIBLE no-op；profile 声明 `contextTruncation.auto` 才允许（v0.4，P1-7）。 |
+| **identity（user/safety_identifier）** | 应测试 | 应测试 | `user`→legacy、`safety_identifier`→safety、`prompt_cache_key`→cacheAffinity 分化；默认 drop+warning，非 reject；同时存在不互相覆盖（v0.4，P1-5/P1-6）。 |
+| **include 合并**          | 应测试             | 应测试         | target include = requested ∪ translator-required；translator 不覆盖客户端 include（v0.4，P1-8）。 |
+| **response.queued**       | 应测试             | 应测试         | 中间态并入 lifecycle；不作为 terminal 事件（v0.4，P1-9）。 |
+| **pause_turn continuation** | 应测试           | 应测试         | `pause_turn` ∈ CanonicalFinishReason；status=completed 但保留 finishReason；Fidelity Plan 决定 EXACT/COMPATIBLE/LOSSY（v0.4，P0-3）。 |
+| **server-side tools 边界** | 应测试            | 应测试         | v1 只 canonicalize client-executed tools；provider_tool 走 opaque/UNSUPPORTED（v0.4，P1-12）。 |
+| 图片输入                   | 必须               | 必须           | URL/data URI/base64。                                                  |
+| tool result 图片           | 必须               | 重点           | Messages 内嵌 / Chat relocation + call attribution；**LOSSY warning（`tool_result_media_relocated`），marker 文本由 policy 控制、默认最小结构化 attribution**（v0.3，P2-2）。 |
+| 缓存 usage                 | 必须               | 应测试         | Anthropic 口径 input = uncached + cacheWrite + cacheRead（v0.2，P1-8）。|
+| stream usage               | 必须               | 必须           | include_usage 与最终 usage 单次聚合（SR-010）。                        |
+| stateful Responses 字段    | 必须               | 必须           | 明确拒绝或网关自行实现。                                               |
+
+**断言纪律**（承接项目 AGENTS.md）：流式用 `createSSEParser` 聚合帧断言 item/content 双层配对与 terminal 事件单次（completed/incomplete/failed 三选一）；任何 lossy 转换断言 trace 中有对应 warning；trace/报告序列化后不得包含 API key、Authorization、完整 prompt。
+
+# 17. 实现架构与验收标准
+
+## 17.1 落位（现有分层不变）
+
+```text
+src/codecs/openai-responses/
+├── endpoint.ts   # /v1/responses ↔ /v1/messages、/v1/chat/completions
+├── headers.ts    # Authorization Bearer 搬运（不透明凭据，FR-005B）
+├── request.ts    # §3 parseRequest + §5/§6 renderRequest（经 IR）
+├── response.ts   # §8/§9 parseResponse/renderResponse
+├── error.ts      # Responses error object ↔ CanonicalError（FR-011）
+├── normalize.ts  # §10.3 目标侧历史正规化 + §10.4 双 registry 读写
+├── validate.ts   # §10.1 Target Validation Matrix（跨字段约束，v0.3，P1-7）
+├── fidelity-plan.ts # §10.0 Fidelity Plan + outputIncludes 合并（requested ∪ required，v0.3/v0.4）
+├── ids.ts        # §8.3 Synthetic ID Factory（只服务 target response/SSE；request side 按 §5.2A 冻结规则）
+├── envelope.ts   # §13.1.2 Response Envelope Builder（ResponseEnvelopeState + OutputItemState.status，v0.5，P0-3）
+└── stream.ts     # §13 双层状态机（多级 location，§13.1.1 + response_state，§13.1.3）parse/render TransformStream
+```
+
+- `src/codecs/registry.ts`：注册 `openai-responses` adapter（当前为 throw P1）。
+- `src/streams/`：新增 `responses/` parse/render；事件经 `CanonicalStreamEvent` 与既有 anthropic/openai 方向自由组合。
+- `src/capabilities/provider-profile.ts`：新增能力位（附录 D-4）。
+
+## 17.2 最低验收标准
+
+1. 纯文本、工具调用、reasoning、多模态四类输入至少各覆盖一次**双向 round-trip**（A→IR→A 等价 + A→IR→B）。
+2. 流式转换聚合结果与非流式转换结果语义等价，**且 ID 一致**（共享 Synthetic ID Factory，§8.3）。
+3. `call_id` 在一轮和多轮历史中稳定，不因转换方向改变。
+4. 无 orphan/dangling 历史导致目标 upstream schema 400；正规化只在目标渲染阶段发生，`Responses→Responses` 不产生无必要重排。
+5. 跨 provider reasoning 不被当作可重放 signature；foreign 密文不进入公开 `encrypted_content`（§11.4）。
+6. **所有 Responses SSE added 都有 done；terminal event 唯一且类型正确**——正常（含 stop_sequence/refusal/pause_turn）= `response.completed`，真正截断（max_tokens）= `response.incomplete`，generation failure = `response.failed`，不得统一伪装成 completed（v0.2 P0-1 + v0.3 P0-1）。
+6a. **Envelope 一致性（v0.5，P0-3）**：`output_item.added` → item snapshot `status=in_progress`，`output_item.done` → completed/incomplete；terminal `output[]` 与所有 done items 完全一致；`created_at` 全程只分配一次；官方 Responses SDK 能解析 `response.created`/terminal snapshot（sdk-smoke）。
+6b. **ToolCall 不变量（v0.5，P0-1）**：function → argumentsText 可 `JSON.parse` 为 object；custom → inputText 自由文本不做 JSON.parse；custom→Chat/Messages 降级时才包装 `{ input: string }`。
+6c. **queued round-trip（v0.5，P1-1）**：A→IR→A 保留 queued lifecycle（`response_state` 事件）；不产生多个 message_start。
+7. **Fidelity Plan 先行**：每次转换在改动 IR 前生成保真计划；LOSSY/UNSUPPORTED 决策在 plan 中可枚举、可单测，不等 renderer 边转换边补 warning（v0.3）。
+8. **Target Validation 生效**：thinking × toolChoice 等跨字段约束有固定默认行为（§10.1），不产生 upstream 400。
+9. Usage 优先 upstream 真实值；Anthropic 口径 input 含 cache 全量（§14.1）；本地估算有 `usage_source` 标记。
+10. stateful 字段或无法无歧义转换的工具，**不允许静默生成「看似成功但语义错误」的请求**。
+11. 官方 OpenAI Responses / Anthropic / OpenAI Chat SDK 能解析 `translate()` 输出（sdk-smoke）。
+12. 提交前 `npm run typecheck:all` + `npm test` + `npm run compat -- --offline-only` 通过；覆盖率不下降。
+
+## 17.3 推荐默认策略摘要
+
+| 问题                          | 默认策略                                                               |
+|-------------------------------|------------------------------------------------------------------------|
+| developer role                | 保持高权限：Messages → system，Chat → system，Responses → developer item；中途插入产生 LOSSY warning。 |
+| OpenAI reasoning history → Anthropic | 仅确认 provider-compatible signature 才重放，否则丢弃（warning）。  |
+| Anthropic thinking → Responses | summary/text 正常映射；signature 走 managed carrier，**不进入公开 encrypted_content**。 |
+| custom tool → Chat            | 降级为 function(input)，记录 Tool Definition/Call Registry 回程映射；**custom inputText 不做 JSON.parse，降级时才包装**（v0.5，P0-1）。  |
+| namespace → Chat/Messages     | flatten + 映射表，撞名拒绝；**executionKind 与 nameKind 正交，namespaced 不改 payload 形状**（v0.5，P0-2）。                                           |
+| dangling 历史 tool call       | 历史回放时剔除；当前等待执行的 call 保留；只在目标渲染阶段执行。        |
+| tool result 图片 → Chat       | 移至紧随 tool results 的 user 多模态消息；**标 LOSSY（`tool_result_media_relocated`）**；marker 文本由 TranslationPolicy 决定，默认最小结构化 attribution，不注入自然语言说明（v0.3，P2-2）。 |
+| Responses stateful 字段 → 无状态协议 | 按能力位（conversationState/responseStorage/promptTemplates）：conversation → 拒绝；store=false → no-op；store=true 无能力 → LOSSY/拒绝（v0.3，P1-6）。 |
+| streaming Chat usage          | **Target Normalize 阶段主动设置 Chat `stream_options.include_usage=true`**（`requireUpstreamUsage`，profile 支持时）；与源 `stream_options` 字段拆分（v0.4，P1-4）。 |
+| terminal event                | 按 §13.5 选择 completed / incomplete / failed / error；stop_sequence/refusal/pause_turn 归 completed，不统一伪装（v0.3，P0-1）；queued 是中间态非 terminal（v0.4，P1-9）。     |
+| 未知 content/tool type        | 能力白名单过滤或显式报错，不原样透传；server-side built-in tools 走 `provider_tool` opaque/UNSUPPORTED（v0.4，P1-12）。                                  |
+| Responses call/result 顺序    | **不要求 per-call 邻接**，仅 call_id 唯一配对；保留源顺序不重排；Chat/Messages adjacency 留在 Target Normalize（v0.5，P0-4）。 |
+| Translated SSE envelope      | 由 Envelope Builder 生成：item in_progress→completed、terminal output[] 与 done items 一致、created_at 单次（v0.5，P0-3）。 |
+| 缺失的协议结构 ID             | 只对 target response/SSE 生成（Synthetic ID Factory，origin=synthetic，§8.3）；outbound request 按 native preserve / omit / 必需 call_id 生成（§5.2A）。 |
+| 跨字段冲突（thinking × toolChoice 等） | Target Validation 统一决策（默认降级 + LOSSY warning），不散落 renderer（§10.1）。 |
+| `max_tool_calls`              | 仅 built-in tools 全局限制；无等价 → LOSSY/drop 或 reject，**不映射 function/parallel/round**（v0.4，P0-1）。 |
+| identity（user/safety_identifier） | 默认 drop + warning；仅 privacy policy 要求时 reject（v0.4，P1-5）。 |
+| `pause_turn`                  | 正式 CanonicalFinishReason；status=completed 但保留 finishReason 供 continuation（v0.4，P0-3）。 |
+
+---
+
+# 附录 A：Responses SSE ↔ Canonical Stream Event 核心映射
+
+> **范围声明（v0.2 P0-3 + v0.3 更新）**：本附录是**核心映射（v1 覆盖范围）**，不是官方事件集的完整枚举。Responses 官方流式 API 仍在演进（server-side tool 事件等持续新增）；未列入的事件一律按 `unknownStreamEvent` 策略处理（SR-005），或经能力声明走 preserve_extension，**不得静默丢弃也不得猜测语义**。refusal / annotation / reasoning_text / summary part 生命周期已纳入 v1 核心（v0.3，P0-2/P0-3）。
+
+## A.1 Item lifecycle（output_item 级）
+
+| Responses SSE 事件 | Canonical 事件（解析） | Canonical 事件（渲染） | Responses SSE 事件 |
+|---|---|---|---|
+| `response.created` + `[response.queued]?` + `response.in_progress` | `message_start`（首个）→ `response_state(queued/in_progress)`（后续，v0.5，P1-1） | `message_start`（首个）→ `response_state` | `response.created` → `[response.queued]?` → `response.in_progress` |
+| `response.output_item.added(message)` | **不产出**（开 item 状态） | `text_start` | `response.output_item.added(message)` → `response.content_part.added(text)` |
+| `response.output_item.added(function_call)` | `tool_start(kind=function)` | `tool_start(kind=function)` | `response.output_item.added(function_call)` |
+| `response.output_item.added(custom_tool_call)` | `tool_start(kind=custom)` | `tool_start(kind=custom)` | `response.output_item.added(custom_tool_call)` |
+| `response.output_item.added(reasoning)` | `reasoning_start` | `reasoning_start` | `response.output_item.added(reasoning)`（**不制造 summary part**，lazy open，v0.3，P0-3） |
+| `response.output_item.done` | 关闭 item（发对应 `*_end`） | 关闭 item（发 `*_done` + `output_item.done`） | `response.output_item.done` |
+
+## A.2 Content lifecycle（part 级）
+
+| Responses SSE 事件 | Canonical 事件（解析） | Canonical 事件（渲染） | Responses SSE 事件 |
+|---|---|---|---|
+| `response.content_part.added(text)` | `text_start` | —（由 `text_start` 触发） | `response.content_part.added(text)` |
+| `response.output_text.delta` | `text_delta` | `text_delta` | `response.output_text.delta` |
+| `response.output_text.done` + `content_part.done` | `text_end`（在 `output_item.done`） | `text_end` | `response.output_text.done` + `response.content_part.done` + `response.output_item.done` |
+| `response.function_call_arguments.delta` | `tool_arguments_delta`（arguments buffer） | `tool_arguments_delta` | `response.function_call_arguments.delta` |
+| `response.function_call_arguments.done` | 参数完整；`tool_end` 在 `output_item.done` | 同左 | `response.function_call_arguments.done` + `output_item.done` |
+| `response.custom_tool_call_input.delta` | `tool_arguments_delta`（input buffer，kind=custom） | 同左 | `response.custom_tool_call_input.delta` |
+| `response.custom_tool_call_input.done` | input 完整；`tool_end` 在 `output_item.done` | 同左 | `response.custom_tool_call_input.done` + `output_item.done` |
+| `response.reasoning_summary_part.added` | 开 summary part（记录 `summary_index`，v0.3，P0-3） | 首个 summary delta 时输出（lazy） | `response.reasoning_summary_part.added` |
+| `response.reasoning_summary_text.delta` | `reasoning_delta(kind=summary, summaryIndex)` | 同左 | `response.reasoning_summary_text.delta` |
+| `response.reasoning_summary_text.done` | 关 summary part（缓冲完） | 同左 | `response.reasoning_summary_text.done` |
+| `response.reasoning_summary_part.done` | 关闭 summary part（v0.3，P0-3） | 同左 | `response.reasoning_summary_part.done` |
+| `response.content_part.added(reasoning_text)` | 开 reasoning content part（记录 content_index，v0.3，P0-3） | 首个 reasoning text delta 时输出（lazy） | `response.content_part.added(reasoning_text)` |
+| `response.reasoning_text.delta` | `reasoning_delta(kind=text)` | 同左 | `response.reasoning_text.delta` |
+| `response.reasoning_text.done` / `response.content_part.done` | 关闭 reasoning content part（v0.3，P0-3） | 同左 | `response.reasoning_text.done` + `response.content_part.done` |
+| carrier 更新（signature 等 opaque） | 更新 reasoning carrier，不单独产出 | `reasoning_delta(opaque)` | 更新 managed carrier，不输出公开字段 |
+| `response.refusal.delta` / `response.refusal.done` | `text_start/text_delta/text_end` 带 `kind="refusal"`（附录 D-9）；目标无 refusal → 降级 text + warning（v0.3，P0-2） | 同左 | `response.content_part.added(refusal)` + `response.refusal.delta*` + `response.refusal.done` + `response.content_part.done` |
+| `response.output_text.annotation.added` | 累加至 output_text part `annotations`（annotation_index，非独立 part，v0.3，P2-1） | 同左 | 目标支持时输出 |
+| `response.reasoning_summary_text.done`/`reasoning_text.done` + `output_item.done` | `reasoning_end` | `reasoning_end` | 同左 |
+
+## A.3 Terminal 事件
+
+| Responses SSE 事件 | Canonical 事件（解析） | Canonical 事件（渲染） | 触发条件 |
+|---|---|---|---|
+| `response.completed` | `usage` + `message_end(finishReason)` | `usage` + `message_end` | 正常结束（end_turn / tool_call / **stop_sequence / refusal / pause_turn**）→ `response.completed`（v0.3 P0-1 + v0.4 P0-3） |
+| `response.incomplete` | `usage` + `message_end(max_tokens)` | 同左 | **真正截断（max_tokens）** → `response.incomplete`（v0.3，P0-1） |
+| `response.failed` | `error` | `error` | generation failure → `response.failed` |
+| `response.cancelled` | terminal（**仅 profile 明确声明存在 SSE 事件时**，v0.3，P1-9） | 同左 | 取消路径；否则按 unknown/extension 或安全结束 transport，不自行发明 |
+| `response.queued` | **非 terminal**：`response_state(queued)`（v0.5，P1-1） | 同左 | 中间态：`created → [queued] → in_progress`，round-trip 保留 |
+| `error`（transport/protocol） | `error` | `error` | 协议/传输错误 |
+
+> **唯一性**：terminal 事件只发一次；`response.completed` 不是默认伪装终点（v0.2，P0-1）。
+
+# 附录 B：转换决策树
+
+```text
+1. 目标协议是否有直接等价语义？
+   ├─ 是 → 直接映射（EXACT）。
+   └─ 否 →
+2. 是否存在无歧义的结构降级？（custom freeform → 单字符串 function）
+   ├─ 是 → 降级并记录 fidelity（COMPATIBLE/LOSSY）。
+   │        └─ 需回程恢复 → 写入 Tool Definition/Call Registry（§10.4）。
+   └─ 否 →
+3. 目标协议是否硬校验历史？（Messages/Chat 的 call/result 邻接）
+   ├─ 是 → 目标渲染阶段执行正规化（§10.3）再编码。
+   └─ 否 → 继续（**Responses 不要求 call/result 邻接**，仅 call_id 唯一配对，v0.5，P0-4）。
+4. 信息是否属于 provider opaque 数据？（signature/encrypted content）
+   ├─ 是 → 同 provider 才进 native 字段；否则 managed carrier 或丢弃（§11.4）。
+   └─ 否 →
+5. 是否存在跨字段约束冲突？（thinking × toolChoice、空 tools × required、stateful × capability）
+   ├─ 是 → Target Validation 统一决策（默认降级 + LOSSY warning 或拒绝，§10.1）。
+   └─ 否 →
+6. 是否缺失目标协议必需的结构 ID？（Responses item/call ID，仅 target response/SSE）
+   ├─ 是 → Synthetic ID Factory 生成（§8.3）；request side 按 native preserve / omit / 必需 call_id 生成（§5.2A）。
+   └─ 否 →
+7. 字段是否属 identity / include / truncation 等需要特殊处理的类别？（v0.4）
+   ├─ identity（user/safety_identifier）→ 默认 drop + warning，仅 privacy policy 要求时 reject（§3.1.4）；
+   ├─ include → outputIncludes 合并（requested ∪ required，§10.0）；
+   ├─ truncation=auto → 默认 UNSUPPORTED（除非 profile 声明，§10.1）；
+   └─ max_tool_calls → 仅 built-in tools，无等价 → LOSSY/drop 或 reject（§3.1.2）。
+8. 仍无法保持安全/权限/路由语义？（stateful 字段、撞名、权限降级）
+   └─ 是 → 拒绝请求（UNSUPPORTED），而不是静默继续。
+```
+
+# 附录 C：常见故障定位
+
+| 症状                         | 最可能原因                                       | 排查方向                                               |
+|------------------------------|--------------------------------------------------|--------------------------------------------------------|
+| 工具执行后一轮 400           | tool_call/tool_result 邻接或配对错误             | 检查 call_id、角色交替、并行 call 是否被拆散（§10.2）。 |
+| 模型忽略系统要求             | developer/system 被降级成 user 或 instructions 丢失 | 检查高权限指令归并顺序与 LOSSY warning（§3.2、§5.1）。 |
+| Codex 工具不执行             | custom/namespace/tool_search 被当普通 function 或名字未恢复 | 检查双 registry 回程链路（§10.4）。       |
+| custom 工具流式事件类型错    | 把 custom input 发成 `function_call_arguments.*` | 检查 kind 分流：custom → `custom_tool_call_input.*`（§13.2/13.3）。 |
+| reasoning 历史导致 400       | 把 foreign encrypted content 当目标 thinking signature | 检查 carrier 双模式边界（§11.4）。          |
+| 流式客户端一直等待           | 缺 content_part.done / output_item.done / summary_part.done，或 terminal 事件缺失/类型错 | 检查状态机 flush 与 terminal 选择（§13.4/13.5）。 |
+| 流式聚合后 ID 与 SDK 不匹配  | synthetic ID 在 added/delta/done 间不一致        | 检查 Synthetic ID Factory 生命周期（§8.3）。          |
+| 计费 token 明显偏低          | 转换后的 Chat stream 未请求 upstream usage，或 Anthropic cache 未计入 input | 检查 include_usage 与 §14.1 cache 汇总。 |
+| 图片工具结果丢失             | role=tool 不支持多模态                           | 检查媒体 relocation（§13）；`tool_result_media_relocated` 是预期 LOSSY。 |
+| 同名工具调用到错误 handler   | namespace flatten 撞名未被拒绝                   | 检查定义阶段撞名检测（§3.4、§10.4）。                 |
+| 客户端收到 `response.completed` 但模型实际截断 | terminal 事件类型未按状态选择，统一伪装成 completed | 检查 §13.5 状态机；改用 `response.incomplete`。 |
+| 模型 stop 被误判 incomplete | 把 `stop_sequence` 当截断处理（v0.3，P0-1）       | `stop_sequence` → completed；仅 `max_tokens` → incomplete。 |
+| refusal 被当成失败           | 把 refusal 输出映射为 failed/incomplete（v0.3，P0-2） | refusal 是内容形态：正常完成 → completed；保留 refusal part。 |
+| reasoning 出现空 summary part | `reasoning_start` 无条件造 `reasoning_summary_part.added`（v0.3，P0-3） | 按 lazy open：首个 delta 才开 part。 |
+| 客户端收到自造的 `response.cancelled` | 把 webhook event 当 SSE 事件发明（v0.3，P1-9） | 仅 profile 声明时输出；否则安全结束 transport。 |
+| 把 `max_tool_calls` 当 function/parallel 限制 | 语义误读（v0.4，P0-1） | 仅限 built-in tools 全局限制；→Chat 无等价 → LOSSY/drop 或 reject。 |
+| 因存在 `safety_identifier` 而请求失败 | 默认 reject 过重（v0.4，P1-5） | identity 默认 drop + warning；仅 privacy policy 要求时 reject。 |
+| 客户端 include 被 translator 覆盖 | outputIncludes 未区分 requested/required（v0.4，P1-8） | target include = requested ∪ translator-required。 |
+| `response.queued` 出现在 terminal 选择 | 把中间态当 terminal（v0.4，P1-9） | queued 并入 lifecycle（created → [queued] → in_progress）。 |
+| pause_turn 丢失 continuation 语义 | 仅映射 status=completed 丢掉 finishReason（v0.4，P0-3） | `pause_turn` ∈ CanonicalFinishReason，status=completed 但内部保留；供自动 continuation。 |
+| custom input 被当非法 JSON 拒绝 | ToolCall 非 discriminated union，统一 JSON.parse 约束（v0.5，P0-1） | function → argumentsText JSON；custom → inputText 自由文本，不做 JSON.parse。 |
+| namespace 工具无法决定输出 arguments 还是 input | `kind` 混入 namespace 维度（v0.5，P0-2） | `executionKind`（function/custom）与 `nameKind`（plain/namespaced）正交。 |
+| SSE snapshot 缺 item status / envelope 字段 | 只分配 ID 未建 envelope（v0.5，P0-3） | `output_item.added` → in_progress；done → completed/incomplete；terminal output[] 与 done items 一致；created_at 只分配一次。 |
+| 并行 calls 的 result 未紧跟 call 被判非法 | 残留 per-call adjacency 约束（v0.5，P0-4） | Responses 仅要求 call_id 唯一配对；保留源顺序，不重排。 |
+
+# 附录 D：既有接口变更清单
+
+实现本文所需的最小变更，均需 migration note（NFR-008）。
+
+| # | 位置 | 变更 | 说明 |
+|---|------|------|------|
+| D-1 | `src/codecs/registry.ts` | 注册 `openai-responses` adapter | 当前对 `"openai-responses"` 抛出 P1 unsupportedError（`tests/pipeline-errors.test.ts` 有对应断言，需同步更新）。 |
+| D-2 | `src/ir/types.ts` | ① 新增 `ContentPart { type: "file" }`（mediaType/data 或 url）；② **ToolCall 改为 discriminated union（v0.5，P0-1）：`CanonicalToolCall = { kind: "function"; id; name; argumentsText /* JSON */ } \| { kind: "custom"; id; name; inputText /* freeform */ }`**；③ **新增 `ContentPart { type: "refusal"; text }`（v0.3，P0-2）** | 支撑 `input_file` ↔ `document` ↔ Chat file 扩展；custom 自由文本 input 不做 JSON.parse（避免把合法 custom input 当非法 JSON 拒绝）；refusal 一等语义与 `LOSSY_REFUSAL_STRUCTURE` 降级。 |
+| D-3 | `src/codecs/protocol-adapter.ts` | `CodecContext` 增加 `toolDefinitions` / `toolCalls` 双 registry（§10.4，**byCallId + byItemId 双索引，v0.4，P1-11**）与 `syntheticIds`；`StreamCodec.createParse/createRender` 增加可选 `ctx` 参数 | registry 用 **`executionKind`（function/custom）+ `nameKind`（plain/namespaced）正交表示（v0.5，P0-2）**；stream 状态机维护 item_id、registry 维护 call_id 靠双索引关联；pipeline（`src/pipeline/translate.ts`）透传 per-request ctx。 |
+| D-4 | `src/capabilities/provider-profile.ts` | 新增能力位：`conversationState` / `responseStorage` / `promptTemplates`（替代单一 `statefulResponses`，v0.3，P1-6）、`customTools`、`namespaceTools`、`structuredOutput`、`reasoningText`（区分 summary/text）、`carrierMode`（native/managed）、`terminalEvents`（queued/cancelled，v0.3，P1-9）、`responsesExtensions.stop`（v0.3，P1-5）、`contextTruncation`（`auto` 声明，v0.4，P1-7）、identity（endUserTracking：legacy/safety 映射位，v0.4，P1-5/P1-6）、`serverSideTools`（v1 边界：client-executed only，v0.4，P1-12）；**新增 `thinking` generation 维度：`mode: none\|manual\|adaptive`、`effortLocation: output_config\|none`、`manualBudgetSupported`、`interleaving`、`requiresLeadingBlock`（v0.3，P1-8）** | 映射决策由能力声明驱动，禁止按模型名猜测（FR-007）。 |
+| D-5 | `src/codecs/protocol-adapter.ts` | `CanonicalEndpoint.kind` 增加 `"responses"` | 端点矩阵增加 `/v1/responses` ↔ `/v1/messages`、`/v1/chat/completions`（9.4）。 |
+| D-6 | `src/formats.ts` | 无需变更 | `openai-responses` 已预留（FR-001）。 |
+| D-7 | `tests/` | 新增 `codecs-responses` / `streams-responses` / `responses-e2e` 测试与 testkit responses 场景 | 见 §16 矩阵；**含 completed/incomplete/failed 三种 terminal fixture + stop_sequence/refusal/pause_turn fixture + summary 多 part（lazy open）fixture + Target Validation fixture + max_tool_calls/truncation/identity/queued fixture**（v0.2 中等问题-2 + v0.3 P0-1/P0-2/P0-3/P1-7 + v0.4 P0-1/P0-3/P1-5/P1-7/P1-9）；先写失败测试再实现（TDD，AGENTS.md）。 |
+| D-8 | `src/codecs/openai-responses/ids.ts` | 新增 Synthetic ID Factory（§8.3） | 管理 response/item/call ID 生成与 `origin: synthetic` 标记；**只服务 target response/SSE；request side 按冻结规则：native preserve / 无则 omit / 必需 call_id 才生成（§5.2A，v0.4，P0-2）**；前缀 `resp_`/`msg_`/`rs_`/`fc_`/`ctc_`。 |
+| D-9 | `src/streams/types.ts` | 扩展：`tool_start` 增加 `kind?: "function" \| "custom"`；`reasoning_delta` 增加 `kind?: "summary" \| "text"` 与 `summaryIndex?`；`text_start/text_delta/text_end` 增加 `kind?: "text" \| "refusal"`；**引入多级 `location`（§13.1.1，v0.4，P1-10），现有 `index` 保留为兼容别名**；**新增 `response_state: "created" \| "queued" \| "in_progress"` additive 事件（v0.5，P1-1）** | 默认值保持向后兼容；refusal 与 reasoning 多 part 生命周期需要这些最小扩展；queued lifecycle round-trip 保留；旧 consumer 忽略 response_state。 |
+| D-10 | `src/codecs/openai-responses/validate.ts` | 新增 Target Validation Matrix 模块（§10.1，v0.3，P1-7） | `CanonicalRequest + target ProviderProfile + policies → ValidationResult`；thinking×toolChoice、空 tools×required 等跨字段约束集中实现。 |
+| D-11 | `src/codecs/openai-responses/fidelity-plan.ts` | 新增 Fidelity Plan 层（§10.0，v0.3） | 转换前生成 EXACT/COMPATIBLE/LOSSY/UNSUPPORTED plan entries；与 `TranslationWarning` 对齐（FR-008），可单测；**同时合并 outputIncludes：target include = requested ∪ translator-required（v0.4，P1-8）**。 |
+| D-12 | `src/ir/finish-reason.ts` | `CanonicalFinishReason` 增加 `pause_turn`（v0.4，P0-3） | continuation 语义：pause_turn 是成功 stop reason 但需重放 assistant content 继续 server tool workflow；Translated Responses status=completed 但内部保留 finishReason。 |
+| D-13 | `src/ir/types.ts` | `CanonicalRequest` 增加 `identity?`（legacyEndUserId / safetyEndUserId，§3.1.4）、**`cache?`（affinityKey / retention，v0.5，P1-4 拆分）**与 `outputIncludes?`（requestedIncludes / translatorRequiredIncludes，§10.0） | v0.4 P1-5/P1-6/P1-8 + v0.5 P1-4（cache key ≠ identity，retention 单独保留）。 |
+| D-14 | `src/streams/anthropic/render.ts`（或 responses 侧 builder） | 新增 **Response Envelope Builder**（§13.1.2，v0.5，P0-3） | 构造 `ResponseEnvelopeState` + `OutputItemState`：added → in_progress，done → completed/incomplete；terminal output[] 与 done items 一致；created_at 全程只分配一次；缺时间戳时生成 translator-owned structural timestamp（trace 标 origin=structural）。 |
+| D-15 | `src/ir/response.ts` | `CanonicalResponse` 增加 `status?: "completed" \| "incomplete" \| "failed" \| "cancelled"`（与 `finishReason` 解耦，v0.5，P1-2） | 未知 finish reason + 成功返回 → completed + unknown + warning；只有明确截断才 incomplete。 |
+
+> **需求基线说明：** 本文是 P1 Responses adapter 的实现依据。IR 扩展（D-2/D-3/D-8/D-9）与能力位（D-4）属于增量演进，不破坏既有 Messages ↔ Chat 路径；`CanonicalStreamEvent` 事件集保持向后兼容，Responses 仅在两端用双层状态机映射该事件集。
