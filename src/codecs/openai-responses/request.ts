@@ -978,27 +978,18 @@ function renderToolCallItem(
   ctx: CodecContext,
 ): unknown {
   const def = resolveDefinitionSafe(ctx, c.name);
-  const entry = resolveCallByCallIdSafe(ctx, c.id);
-  // Custom semantics restored from the definition/call registry; otherwise the
-  // payload kind decides.
-  const isCustom = entry?.executionKind === "custom" || def?.executionKind === "custom";
-  if (c.kind === "custom" || isCustom) {
-    ctx.warnings.push({
-      code: "custom_tool_call_rendered",
-      message: `Custom tool call "${c.name}" rendered with freeform input`,
-      fidelity: "EXACT",
-      field: `input.custom_tool_call.${c.id}`,
-    });
+  const name = def?.originalName ?? c.name;
+  if (c.kind === "custom") {
     return {
       type: "custom_tool_call",
-      name: c.name,
+      name,
       call_id: c.id,
-      input: c.kind === "custom" ? c.inputText : String((c as { inputText?: string }).inputText ?? ""),
+      input: c.inputText,
     };
   }
   return {
     type: "function_call",
-    name: c.name,
+    name,
     call_id: c.id,
     arguments: c.argumentsText,
   };

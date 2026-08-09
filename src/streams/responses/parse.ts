@@ -341,22 +341,13 @@ export function createResponsesStreamParser(
           const partType = (data.part as { type?: unknown })?.type;
           const kind = partType === "refusal" ? "refusal" : "output_text";
           state.parts.set(contentIndex, kind);
-          if (!state.started) {
-            state.started = true;
-            enqueue(controller, {
-              type: kind === "refusal" ? "text_start" : "text_start",
-              index: state.outputIndex,
-              kind: kind === "refusal" ? "refusal" : "text",
-              location: { kind: "content", outputIndex: state.outputIndex, contentIndex },
-            });
-          } else {
-            enqueue(controller, {
-              type: "text_start",
-              index: state.outputIndex,
-              kind: kind === "refusal" ? "refusal" : "text",
-              location: { kind: "content", outputIndex: state.outputIndex, contentIndex },
-            });
-          }
+          state.started = true;
+          enqueue(controller, {
+            type: "text_start",
+            index: state.outputIndex,
+            kind: kind === "refusal" ? "refusal" : "text",
+            location: { kind: "content", outputIndex: state.outputIndex, contentIndex },
+          });
           return;
         }
         case "response.content_part.done": {
