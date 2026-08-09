@@ -13,14 +13,73 @@ import type { CanonicalError } from "../errors.js";
 import type { TranslationWarning } from "../ir/fidelity.js";
 import type { SSEFrame } from "../streams/sse-parser.js";
 import type { CanonicalStreamEvent } from "../streams/types.js";
+import type { SyntheticIdFactory } from "./openai-responses/ids.js";
 
-/** Collector for fidelity warnings produced during a single translation. */
+/**
+ * Tool definition entry (responses.md §10.4, v0.5 P0-2).
+ *
+ * `executionKind` (function/custom, decides payload shape) and `nameKind`
+ * (plain/namespaced, decides name flatten/restore) are orthogonal dimensions.
+ * Definition-time entry: indexed by normalized tool name (no call_id exists
+ * yet when a tool is defined).
+ */
+export interface ToolDefEntry {
+  executionKind: "function" | "custom";
+  nameKind: "plain" | "namespaced";
+  originalName: string;
+  namespace?: string;
+  normalizedName: string;
+  schema?: Record<string, unknown>;
+}
+
+export interface ToolDefinitionRegistry {
+  map: Map<string, ToolDefEntry>;
+}
+
+/**
+ * Tool call entry (responses.md §10.4, v0.4 P1-11).
+ *
+ * Call-time entry: indexed by call_id and item_id (double index); both maps
+ * point to the same entry. `sourceItemId`/`targetItemId` bridge the Responses
+ * output-item lifecycle (SSE item_id) with the call association (call_id).
+ */
+export interface ToolCallEntry {
+  normalizedToolName: string;
+  originalName: string;
+  executionKind: "function" | "custom";
+  nameKind?: "plain" | "namespaced";
+  sourceItemId?: string;
+  targetItemId?: string;
+}
+
+export interface ToolCallRegistry {
+  byCallId: Map<string, ToolCallEntry>;
+  byItemId: Map<string, ToolCallEntry>;
+}
+
+/** Collector for fidelity warnings + per-request tool registries. */
 export interface CodecContext {
   warnings: TranslationWarning[];
+  /** Tool definitions (by normalized tool name). Populated at parse time. */
+  toolDefinitions?: ToolDefinitionRegistry;
+  /** Tool calls (by call_id / item_id). Populated on first call encounter. */
+  toolCalls?: ToolCallRegistry;
+  /** Synthetic ID factory (target Responses response/SSE only, §8.3). */
+  syntheticIds?: SyntheticIdFactory;
 }
 
 export function newCodecContext(): CodecContext {
   return { warnings: [] };
+}
+
+export function ensureToolDefinitionRegistry(ctx: CodecContext): ToolDefinitionRegistry {
+  ctx.toolDefinitions ??= { map: new Map() };
+  return ctx.toolDefinitions;
+}
+
+export function ensureToolCallRegistry(ctx: CodecContext): ToolCallRegistry {
+  ctx.toolCalls ??= { byCallId: new Map(), byItemId: new Map() };
+  return ctx.toolCalls;
 }
 
 /** Endpoint identity, protocol-independent enough to route across adapters. */
@@ -82,9 +141,11 @@ export interface ErrorCodec {
 export interface StreamCodec {
   createParse: (
     report?: (warning: TranslationWarning) => void,
+    ctx?: CodecContext,
   ) => TransformStream<SSEFrame, CanonicalStreamEvent>;
   createRender: (
     report?: (warning: TranslationWarning) => void,
+    ctx?: CodecContext,
   ) => TransformStream<CanonicalStreamEvent, Uint8Array>;
 }
 

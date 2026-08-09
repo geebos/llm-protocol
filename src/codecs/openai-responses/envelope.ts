@@ -1,0 +1,168 @@
+/**
+ * Response Envelope Builder (responses.md §13.1.2, D-14).
+ *
+ * Holds the target Responses envelope state for one response lifecycle:
+ * - `created_at` is allocated exactly once and stays identical across the SSE
+ *   snapshot and the terminal response;
+ * - `output_item.added` -> OutputItemState.status = "in_progress";
+ * - `output_item.done` -> "completed" (or "incomplete" when truncated);
+ * - the terminal `output[]` equals the done items exactly (order, id, payload).
+ *
+ * When the source lacks a timestamp (e.g. Anthropic), the caller passes a
+ * translator-owned structural timestamp; the origin is trace-only.
+ */
+import type { CanonicalUsage } from "../../ir/usage.js";
+
+export type ResponsesStatus =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "incomplete"
+  | "failed"
+  | "cancelled";
+
+export type OutputItemType =
+  | "message"
+  | "reasoning"
+  | "function_call"
+  | "custom_tool_call";
+
+export type OutputItemStatus = "in_progress" | "completed" | "incomplete";
+
+export interface OutputItemState {
+  id: string;
+  type: OutputItemType;
+  status: OutputItemStatus;
+  outputIndex: number;
+  /** Protocol wire payload for the item (parts / reasoning / call params). */
+  payload?: unknown;
+}
+
+export interface ResponseEnvelopeState {
+  id: string;
+  object: "response";
+  createdAt: number;
+  completedAt?: number;
+  status: ResponsesStatus;
+  model?: string;
+  error?: unknown;
+  incompleteDetails?: unknown;
+  output: OutputItemState[];
+  usage?: CanonicalUsage;
+  /** Request-side config the target still echoes back. */
+  requestDerived?: Record<string, unknown>;
+}
+
+export class ResponseEnvelopeBuilder {
+  private readonly state: ResponseEnvelopeState;
+
+  constructor(id: string, createdAt: number, model?: string) {
+    this.state = {
+      id,
+      object: "response",
+      createdAt,
+      status: "in_progress",
+      model,
+      output: [],
+    };
+  }
+
+  /** `output_item.added`: create the item as in_progress, ordered by index. */
+  addItem(item: OutputItemState): void {
+    const existing = this.state.output.find((o) => o.id === item.id);
+    if (existing) {
+      existing.status = item.status;
+      existing.payload = item.payload ?? existing.payload;
+      return;
+    }
+    this.state.output.push({ ...item });
+    this.state.output.sort((a, b) => a.outputIndex - b.outputIndex);
+  }
+
+  /** `output_item.done`: completed, or incomplete when truncated. */
+  completeItem(itemId: string, truncated = false): void {
+    const item = this.state.output.find((o) => o.id === itemId);
+    if (item) item.status = truncated ? "incomplete" : "completed";
+  }
+
+  setStatus(status: ResponsesStatus, details?: { error?: unknown; incompleteDetails?: unknown }): void {
+    this.state.status = status;
+    if (details?.error !== undefined) this.state.error = details.error;
+    if (details?.incompleteDetails !== undefined) {
+      this.state.incompleteDetails = details.incompleteDetails;
+    }
+    if (status === "completed" || status === "incomplete" || status === "failed" || status === "cancelled") {
+      this.state.completedAt ??= Math.floor(Date.now() / 1000);
+    }
+  }
+
+  setUsage(usage: CanonicalUsage): void {
+    this.state.usage = usage;
+  }
+
+  setRequestDerived(value: Record<string, unknown>): void {
+    this.state.requestDerived = value;
+  }
+
+  get id(): string {
+    return this.state.id;
+  }
+
+  get status(): ResponsesStatus {
+    return this.state.status;
+  }
+
+  get output(): OutputItemState[] {
+    return this.state.output;
+  }
+
+  snapshot(): ResponseEnvelopeState {
+    return JSON.parse(JSON.stringify(this.state)) as ResponseEnvelopeState;
+  }
+}
+
+/** Serialize the envelope to the Responses response wire shape. */
+export function envelopeToWire(
+  envelope: ResponseEnvelopeState,
+): Record<string, unknown> {
+  return {
+    id: envelope.id,
+    object: "response",
+    created_at: envelope.createdAt,
+    ...(envelope.completedAt !== undefined
+      ? { completed_at: envelope.completedAt }
+      : {}),
+    status: envelope.status,
+    error: envelope.error ?? null,
+    incomplete_details: envelope.incompleteDetails ?? null,
+    instructions: envelope.requestDerived?.instructions ?? null,
+    max_output_tokens: envelope.requestDerived?.max_output_tokens ?? null,
+    model: envelope.model ?? null,
+    output: envelope.output.map(itemToWire),
+    parallel_tool_calls: envelope.requestDerived?.parallel_tool_calls ?? true,
+    previous_response_id: envelope.requestDerived?.previous_response_id ?? null,
+    reasoning: envelope.requestDerived?.reasoning ?? null,
+    store: envelope.requestDerived?.store ?? false,
+    temperature: envelope.requestDerived?.temperature ?? null,
+    text: envelope.requestDerived?.text ?? null,
+    tool_choice: envelope.requestDerived?.tool_choice ?? "auto",
+    tools: envelope.requestDerived?.tools ?? [],
+    top_p: envelope.requestDerived?.top_p ?? null,
+    truncation: envelope.requestDerived?.truncation ?? "disabled",
+    usage: envelope.usage ?? null,
+    user: envelope.requestDerived?.user ?? null,
+    metadata: envelope.requestDerived?.metadata ?? {},
+  };
+}
+
+function itemToWire(item: OutputItemState): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    id: item.id,
+    type: item.type,
+    status: item.status,
+  };
+  if (item.payload && typeof item.payload === "object") {
+    return { ...base, ...(item.payload as Record<string, unknown>) };
+  }
+  return base;
+}
