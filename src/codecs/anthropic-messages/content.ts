@@ -65,6 +65,7 @@ export function parseAnthropicContent(
         }
         parts.push({
           type: "tool_call",
+          kind: "function",
           id: b.id,
           name: b.name,
           argumentsText: JSON.stringify(b.input ?? {}),
@@ -110,7 +111,10 @@ export function parseAnthropicContent(
 }
 
 /** Render canonical parts back to Anthropic content blocks. */
-export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
+export function renderAnthropicContent(
+  parts: ContentPart[],
+  ctx: CodecContext = { warnings: [] },
+): unknown[] {
   const blocks: unknown[] = [];
   for (const part of parts) {
     switch (part.type) {
@@ -121,12 +125,31 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
         blocks.push({ type: "image", source: renderImageSource(part.source) });
         break;
       case "tool_call":
-        blocks.push({
-          type: "tool_use",
-          id: part.id,
-          name: part.name,
-          input: safeParseJson(part.argumentsText),
-        });
+        // Anthropic `input` must be an object. Custom freeform payloads are
+        // wrapped in a fixed single-field object; never JSON.parse'd (v0.5,
+        // P0-1). The wrap is lossy and reported so the registry can restore
+        // the custom semantics on the way back (responses.md §10.4).
+        if (part.kind === "custom") {
+          ctx.warnings.push({
+            code: "custom_tool_wrapped",
+            message: `Custom tool "${part.name}" freeform input wrapped as { input } for Anthropic target`,
+            fidelity: "COMPATIBLE",
+            field: `content.tool_call.${part.id}`,
+          });
+          blocks.push({
+            type: "tool_use",
+            id: part.id,
+            name: part.name,
+            input: { input: part.inputText },
+          });
+        } else {
+          blocks.push({
+            type: "tool_use",
+            id: part.id,
+            name: part.name,
+            input: safeParseJson(part.argumentsText),
+          });
+        }
         break;
       case "tool_result":
         blocks.push({

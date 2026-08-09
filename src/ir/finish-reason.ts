@@ -12,4 +12,5 @@ export type CanonicalFinishReason =
   | "stop_sequence"
   | "content_filter"
   | "refusal"
+  | "pause_turn"
   | "unknown";

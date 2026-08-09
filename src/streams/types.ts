@@ -11,17 +11,46 @@ import type { CanonicalUsage } from "../ir/usage.js";
 import type { CanonicalFinishReason } from "../ir/finish-reason.js";
 import type { CanonicalError } from "../errors.js";
 
+/**
+ * Multi-level stream location (responses.md §13.1.1, v0.4 P1-10).
+ *
+ * Replaces flat parallel indexes: output_index / content_index /
+ * summary_index / annotation_index no longer share one `index` field.
+ * Existing `index` on events remains as a compatibility alias equal to
+ * `location.output.outputIndex`; new events/extensions use `location`.
+ */
+export type StreamLocation =
+  | { kind: "output"; outputIndex: number }
+  | { kind: "content"; outputIndex: number; contentIndex: number }
+  | { kind: "summary"; outputIndex: number; summaryIndex: number }
+  | {
+      kind: "annotation";
+      outputIndex: number;
+      contentIndex: number;
+      annotationIndex: number;
+    }
+  | { kind: "tool"; outputIndex: number; toolIndex: number };
+
 export type CanonicalStreamEvent =
   | { type: "message_start"; id?: string; model?: string }
-  | { type: "text_start"; index: number }
-  | { type: "text_delta"; index: number; text: string }
-  | { type: "text_end"; index: number }
-  | { type: "tool_start"; index: number; id: string; name: string }
-  | { type: "tool_arguments_delta"; index: number; partialJson: string }
-  | { type: "tool_end"; index: number }
-  | { type: "reasoning_start"; index: number; metadata?: unknown }
-  | { type: "reasoning_delta"; index: number; text?: string; opaque?: string }
-  | { type: "reasoning_end"; index: number; metadata?: unknown }
+  | { type: "response_state"; state: "created" | "queued" | "in_progress"; metadata?: unknown }
+  | { type: "text_start"; index: number; kind?: "text" | "refusal"; location?: StreamLocation }
+  | { type: "text_delta"; index: number; text: string; kind?: "text" | "refusal"; location?: StreamLocation }
+  | { type: "text_end"; index: number; kind?: "text" | "refusal"; location?: StreamLocation }
+  | { type: "tool_start"; index: number; id: string; name: string; kind?: "function" | "custom"; location?: StreamLocation }
+  | { type: "tool_arguments_delta"; index: number; partialJson: string; location?: StreamLocation }
+  | { type: "tool_end"; index: number; location?: StreamLocation }
+  | { type: "reasoning_start"; index: number; metadata?: unknown; location?: StreamLocation }
+  | {
+      type: "reasoning_delta";
+      index: number;
+      text?: string;
+      opaque?: string;
+      kind?: "summary" | "text";
+      summaryIndex?: number;
+      location?: StreamLocation;
+    }
+  | { type: "reasoning_end"; index: number; metadata?: unknown; location?: StreamLocation }
   | { type: "usage"; usage: CanonicalUsage }
   | { type: "message_end"; finishReason?: CanonicalFinishReason }
   | { type: "error"; error: CanonicalError }

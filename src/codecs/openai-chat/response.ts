@@ -138,11 +138,19 @@ export function createOpenAiChatResponseCodec(
         });
       }
       if (calls.length) {
-        message.tool_calls = calls.map((c) => ({
-          id: c.id,
-          type: "function",
-          function: { name: c.name, arguments: c.argumentsText },
-        }));
+        message.tool_calls = calls.map((c) =>
+          c.kind === "custom"
+            ? {
+                id: c.id,
+                type: "function",
+                function: { name: c.name, arguments: JSON.stringify({ input: c.inputText }) },
+              }
+            : {
+                id: c.id,
+                type: "function",
+                function: { name: c.name, arguments: c.argumentsText },
+              },
+        );
       }
       if (canonical.extensions?.refusal !== undefined) {
         message.refusal = canonical.extensions.refusal;
@@ -191,6 +199,7 @@ function parseContent(
       if (t.function && typeof t.function.name === "string") {
         content.push({
           type: "tool_call",
+          kind: "function",
           id: typeof t.id === "string" ? t.id : `call_${content.length}`,
           name: t.function.name,
           argumentsText: typeof t.function.arguments === "string" ? t.function.arguments : "{}",

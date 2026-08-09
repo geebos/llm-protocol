@@ -397,6 +397,7 @@ function parseAssistantParts(
       if (t.function && typeof t.function.name === "string") {
         parts.push({
           type: "tool_call",
+          kind: "function",
           id: typeof t.id === "string" ? t.id : `call_${parts.length}`,
           name: t.function.name,
           argumentsText: typeof t.function.arguments === "string" ? t.function.arguments : "{}",
@@ -578,11 +579,19 @@ function renderAssistantMessage(
     msg[signatureField] = signature;
   }
   if (calls.length) {
-    msg.tool_calls = calls.map((c) => ({
-      id: c.id,
-      type: "function",
-      function: { name: c.name, arguments: c.argumentsText },
-    }));
+    msg.tool_calls = calls.map((c) =>
+      c.kind === "custom"
+        ? {
+            id: c.id,
+            type: "function",
+            function: { name: c.name, arguments: JSON.stringify({ input: c.inputText }) },
+          }
+        : {
+            id: c.id,
+            type: "function",
+            function: { name: c.name, arguments: c.argumentsText },
+          },
+    );
   }
   return msg;
 }

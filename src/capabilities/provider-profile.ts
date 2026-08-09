@@ -73,6 +73,60 @@ export interface CacheCapabilities {
   promptCacheKey?: boolean;
 }
 
+/**
+ * Thinking generation capabilities (responses.md §11.1, v0.3 P1-8).
+ *
+ * Decides how `reasoning.effort` / budget maps onto the target. Never guess
+ * model generations from names: the profile declares the dialect.
+ */
+export interface ThinkingGenerationCapabilities {
+  /** Thinking modes the model supports. */
+  mode: "none" | "manual" | "adaptive";
+  /** Where effort lives: adaptive models use `output_config`; legacy manual has none. */
+  effortLocation?: "output_config" | "none";
+  /** Whether manual `budget_tokens` is still supported (false = deprecated/400). */
+  manualBudgetSupported: boolean;
+  /** Whether thinking interleaves with tool calls. */
+  interleaving: boolean;
+  /** Whether the thinking block must lead the message. */
+  requiresLeadingBlock: boolean;
+}
+
+/**
+ * Responses-specific capabilities (responses.md §3.1.3 / §15, D-4).
+ *
+ * Stateful Responses fields are gated per capability instead of rejected
+ * wholesale; identity fields are separate from cache affinity.
+ */
+export interface ResponsesCapabilities {
+  /** `previous_response_id` / `conversation` server-side state support. */
+  conversationState?: boolean;
+  /** `store` support (true = server stores the response). */
+  responseStorage?: boolean;
+  /** `prompt` template reference support. */
+  promptTemplates?: boolean;
+  /** Custom/freeform tools (inputText, no JSON.parse). */
+  customTools?: boolean;
+  /** Namespaced tool names (flatten + reversible map). */
+  namespaceTools?: boolean;
+  /** `text.format` structured output support. */
+  structuredOutput?: boolean;
+  /** Provider can carry reasoning text (not just summary). */
+  reasoningText?: boolean;
+  /** Reasoning carrier mode: native fields only, or managed round-trip carrier. */
+  carrierMode?: "native" | "managed";
+  /** Which non-terminal/terminal SSE lifecycle events exist. */
+  terminalEvents?: { queued?: boolean; cancelled?: boolean };
+  /** Non-standard Responses request extensions accepted by the provider. */
+  responsesExtensions?: { stop?: boolean };
+  /** `truncation=auto` support (item-aware truncation). */
+  contextTruncation?: { auto?: boolean };
+  /** End-user tracking field support (legacy `user` / `safety_identifier`). */
+  identity?: { endUserTracking?: { legacy?: boolean; safety?: boolean } };
+  /** v1 boundary: only client-executed function/custom tools are canonicalized. */
+  serverSideTools?: boolean;
+}
+
 export interface ProviderCapabilities {
   tools: boolean;
   parallelTools: boolean;
@@ -88,6 +142,10 @@ export interface ProviderCapabilities {
   stream?: StreamCapabilities;
   /** Prompt-cache dialect. */
   cache?: CacheCapabilities;
+  /** Thinking generation dialect (responses.md §11.1). */
+  thinkingGeneration?: ThinkingGenerationCapabilities;
+  /** Responses-specific capability bits (responses.md, D-4). */
+  responses?: ResponsesCapabilities;
 }
 
 export interface ProviderProfile {

@@ -46,6 +46,13 @@ export class StreamValidator {
         this.messageStarted = true;
         return event;
 
+      case "response_state":
+        // Additive lifecycle event (responses.md v0.5, P1-1): may precede
+        // message_start (created) or follow it (queued/in_progress). Old
+        // consumers ignore it; the validator only rejects duplicates of the
+        // same state after a terminal transition.
+        return event;
+
       case "text_start":
       case "tool_start":
       case "reasoning_start": {
