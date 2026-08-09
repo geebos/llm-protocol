@@ -33,17 +33,18 @@ llm-protocol/
 │   │   ├── types.ts            #   TranslateOptions / TranslationTrace
 │   │   └── translate.ts        #   translate() 透明转换工厂（唯一公开入口）
 │   └── index.ts                # 公共出口
-├── testkit/                    # 多 Provider 测试框架（M5，不随包发布）
-│   ├── types.ts                # ProviderConfig / Scenario / RunResult
-│   ├── providers.ts            # 配置解析 / 内置三类 Provider / key 脱敏
-│   ├── fixtures.ts             # fixture 加载与 mock 上游执行器
-│   ├── assertions.ts           # 语义断言（10.5）
-│   ├── runner.ts               # 矩阵执行器（能力门控 / 预算 / live 两轮）
-│   ├── scenarios/              # 离线 Fixture + live smoke 场景
-│   └── reporters/              # JSON / JUnit / Markdown 报告
-├── apps/compat-runner/         # 兼容性测试 CLI（M5，不随包发布）
-├── fixtures/                   # 离线 fixture 资产（requests/responses/streams）
-├── tests/                      # vitest 测试
+├── tests/                      # 测试资产（不随包发布，`files: ["dist"]`）
+│   ├── cli.ts                  #   兼容性测试 CLI（M5，compat-runner）
+│   ├── testkit/                #   多 Provider 测试框架（M5）
+│   │   ├── types.ts            #     ProviderConfig / Scenario / RunResult
+│   │   ├── providers.ts        #     配置解析 / 内置三类 Provider / key 脱敏
+│   │   ├── fixtures.ts         #     fixture 加载与 mock 上游执行器
+│   │   ├── assertions.ts       #     语义断言（10.5）
+│   │   ├── runner.ts           #     矩阵执行器（能力门控 / 预算 / live 两轮）
+│   │   ├── scenarios/          #     离线 Fixture + live smoke 场景
+│   │   └── reporters/          #     JSON / JUnit / Markdown 报告
+│   ├── fixtures/               #   离线 fixture 资产（requests/responses/streams）
+│   └── *.test.ts               #   vitest 测试
 ├── docs/tech.md                # 需求规格（权威来源）
 ├── .github/workflows/          # publish-npm.yml（Trusted Publishing）
 └── package.json                # private 已移除；publishConfig 固定 npmjs 公共源
@@ -55,7 +56,7 @@ llm-protocol/
 - 流式必须经 canonical event 状态机（start/delta/end 配对、单 terminal），禁止逐 JSON chunk 无状态改写。
 - 无静默降级：任何 LOSSY/UNSUPPORTED 决策必须产生 TranslationReport warning。
 - 映射决策由 `ProviderProfile` 能力声明驱动，禁止按模型名猜测。
-- `src/` 之外的目录（testkit/apps/fixtures）不进入发布包（`files: ["dist"]`）。
+- `src/` 之外的目录（tests/testkit、tests/fixtures、tests/cli.ts 等测试资产）不进入发布包（`files: ["dist"]`）。
 
 ## 单测规范
 
@@ -65,7 +66,7 @@ llm-protocol/
 
 ```bash
 npm run typecheck       # src 严格类型检查
-npm run typecheck:all   # src + testkit + apps 全量
+npm run typecheck:all   # src + tests/testkit + cli 全量
 npm test                # 全部单元/集成/SDK smoke/testkit 测试
 npm run test:coverage   # 语句覆盖率 ≥85%（NFR-009）
 npm run compat -- --offline-only   # 离线 fixture 矩阵（必跑，不打真实 API）
@@ -76,7 +77,7 @@ npm run compat -- --offline-only   # 离线 fixture 矩阵（必跑，不打真�
 1. **走公开 API**：端到端用例必须通过 `translate()` 工厂（输入标准 `Request`，输出标准 `Response`），不绕过主 API 只测底层 codec；底层 codec 单独测试放同目录。
 2. **测试文件命名** `*.test.ts`，按主题划分：`formats / codecs / cross-render / pipeline / pipeline-errors / streams / streams-edge / streaming-e2e / tooling-e2e / policies / hardening / sdk-smoke / testkit`。
 3. **每个里程碑/需求映射到测试**：新增需求时，先写覆盖验收条件的测试（失败）→ 实现 → 通过。离线 fixture 优先（不打真实 API）。
-4. **live 场景纪律**：live 测试只在 `testkit/` 中通过 `compat-runner` 运行，**禁止**放进 `tests/` 的普通单测（会因无 key/网络不可用而破坏 CI）。无 key 时必须 skip 而非 fail。
+4. **live 场景纪律**：live 测试只在 `tests/testkit/` 中通过 `tests/cli.ts`（compat-runner）运行，**禁止**放进 `tests/` 根目录的普通单测（会因无 key/网络不可用而破坏 CI）。无 key 时必须 skip 而非 fail。
 5. **断言纪律**：
    - 流式断言用 `createSSEParser` 聚合帧，断言 start/delta/end 配对、`message_end` 单次、index 一致。
    - 工具参数最终必须可 `JSON.parse`（TR-003）。

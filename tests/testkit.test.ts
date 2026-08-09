@@ -13,8 +13,8 @@ import {
   renderJunitXml,
   renderMarkdownReport,
   type ProviderConfig,
-} from "../testkit/index.js";
-import type { Scenario } from "../testkit/types.js";
+} from "./testkit/index.js";
+import type { Scenario } from "./testkit/types.js";
 
 const anthropicProvider: ProviderConfig = parseProviderConfig({
   id: "test-anthropic",

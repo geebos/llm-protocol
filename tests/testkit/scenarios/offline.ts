@@ -5,8 +5,8 @@
  * source protocol through translate() against a mock upstream replaying a
  * fixture, then asserts semantics on the restored source-protocol output.
  */
-import type { ApiFormat } from "../../src/formats.js";
-import type { ProviderProfile } from "../../src/capabilities/provider-profile.js";
+import type { ApiFormat } from "../../../src/formats.js";
+import type { ProviderProfile } from "../../../src/capabilities/provider-profile.js";
 import type { Scenario, ProviderConfig } from "../types.js";
 import {
   assertFinishReason,

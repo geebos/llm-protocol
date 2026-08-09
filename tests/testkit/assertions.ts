@@ -6,7 +6,7 @@
  * text aggregation, tool identity/arguments, finish reasons, usage.
  */
 import type { AssertionContext } from "./types.js";
-import type { SSEFrame } from "../src/streams/index.js";
+import type { SSEFrame } from "../../src/streams/index.js";
 
 export interface ToolCallView {
   id: string;

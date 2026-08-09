@@ -6,9 +6,9 @@
  * the official SDKs or protocol validators, and emit reports. It never
  * bypasses the main API to test codecs directly (10.1).
  */
-import type { ApiFormat } from "../src/formats.js";
-import type { TranslationTrace } from "../src/pipeline/types.js";
-import type { SSEFrame } from "../src/streams/index.js";
+import type { ApiFormat } from "../../src/formats.js";
+import type { TranslationTrace } from "../../src/pipeline/types.js";
+import type { SSEFrame } from "../../src/streams/index.js";
 
 /** Provider capability tokens (10.2). */
 export type ProviderCapability =

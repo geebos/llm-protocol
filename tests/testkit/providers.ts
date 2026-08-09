@@ -4,8 +4,8 @@
  * Keys come exclusively from environment variables; configs are exported with
  * values masked. Capabilities drive scenario selection, never model names.
  */
-import type { ApiFormat } from "../src/formats.js";
-import { isApiFormat } from "../src/formats.js";
+import type { ApiFormat } from "../../src/formats.js";
+import { isApiFormat } from "../../src/formats.js";
 import type { ProviderCapability, ProviderConfig } from "./types.js";
 
 const CAPABILITIES: ProviderCapability[] = [

@@ -5,7 +5,7 @@
  * official SDKs. They only run when the provider's API key is present and the
  * run is not offline-only (10.6: skipped otherwise, never fails the suite).
  */
-import type { ApiFormat } from "../../src/formats.js";
+import type { ApiFormat } from "../../../src/formats.js";
 import type { Scenario, ProviderConfig } from "../types.js";
 import { assertToolCall, assertParallelToolCalls, assertReasoningThenText } from "../assertions.js";
 import type { ScenarioProfiles } from "./offline.js";

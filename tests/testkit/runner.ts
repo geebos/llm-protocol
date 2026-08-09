@@ -6,11 +6,11 @@
  * or real upstream), runs the scenario assertions, and enforces the request
  * budget. Live scenarios are skipped — never failed — without a key.
  */
-import type { ApiFormat } from "../src/formats.js";
-import type { ProviderProfile } from "../src/capabilities/provider-profile.js";
-import { translate } from "../src/pipeline/translate.js";
-import { createSSEParser, type SSEFrame } from "../src/streams/index.js";
-import type { TranslationTrace } from "../src/pipeline/types.js";
+import type { ApiFormat } from "../../src/formats.js";
+import type { ProviderProfile } from "../../src/capabilities/provider-profile.js";
+import { translate } from "../../src/pipeline/translate.js";
+import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
+import type { TranslationTrace } from "../../src/pipeline/types.js";
 import {
   loadFixtureResponse,
   mockProviderFetch,

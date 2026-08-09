@@ -165,21 +165,21 @@ llm-protocol/
 │   ├── capabilities/
 │   ├── errors/
 │   └── pipeline/
-├── testkit/                        # 多 Provider 测试框架
-│   ├── providers/
-│   ├── scenarios/
-│   ├── assertions/
-│   └── reporters/
+├── tests/
+│   ├── testkit/                    # 多 Provider 测试框架
+│   │   ├── providers/
+│   │   ├── scenarios/
+│   │   ├── assertions/
+│   │   └── reporters/
+│   ├── fixtures/                   # 离线 fixture 资产
+│   │   ├── requests/
+│   │   ├── responses/
+│   │   ├── streams/
+│   │   └── regressions/
+│   └── cli.ts                      # 兼容性测试 CLI
 ├── proxy/                          # 可选内部 sidecar
 │   ├── handler.ts
 │   └── upstream-fetch.ts
-├── fixtures/                       # 离线 fixture 资产
-│   ├── requests/
-│   ├── responses/
-│   ├── streams/
-│   └── regressions/
-└── apps/
-    └── compat-runner/              # 兼容性测试 CLI
 ```
 
 ## 4.2 关键边界
@@ -963,9 +963,9 @@ P0 最小组合：
 ## 13.1 交付物
 
 - `llm-protocol`（单仓单包）：透明 `translate(...)` 工厂、IR、codec、stream codec、pipeline、capabilities、errors。
-- `llm-protocol` 内置 `testkit/`：ProviderAdapter、scenario、assertion、reporter（同仓维护，不单独发布）。
-- `compat-runner`：CLI，可按 Provider/能力/标签运行测试。
-- fixtures：请求、响应、SSE、回归案例，包含来源和预期语义。
+- `llm-protocol` 内置 `tests/testkit/`：ProviderAdapter、scenario、assertion、reporter（同仓维护，不单独发布）。
+- `compat-runner`（`tests/cli.ts`）：CLI，可按 Provider/能力/标签运行测试。
+- fixtures（`tests/fixtures/`）：请求、响应、SSE、回归案例，包含来源和预期语义。
 - 兼容性报告：JSON + JUnit + Markdown/HTML 摘要。
 - 开发文档：新增协议、ProviderProfile、thinking 策略和测试用例指南。
 

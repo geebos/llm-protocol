@@ -10,7 +10,7 @@ import { resolve } from "node:path";
 import type { ProviderConfig } from "./types.js";
 import type { FixtureSpec } from "./types.js";
 
-const FIXTURES_ROOT = resolve(process.cwd(), "fixtures");
+const FIXTURES_ROOT = resolve(process.cwd(), "tests/fixtures");
 
 async function readJson<T>(rel: string): Promise<T> {
   const text = await readFile(resolve(FIXTURES_ROOT, rel), "utf-8");

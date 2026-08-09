@@ -15,14 +15,14 @@
 import "dotenv/config";
 import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { loadBuiltinProviders, describeProvider, hasProviderKey } from "../../testkit/index.js";
-import { offlineScenariosFor } from "../../testkit/scenarios/offline.js";
-import { liveScenariosFor } from "../../testkit/scenarios/live.js";
-import { runMatrix } from "../../testkit/index.js";
-import { renderJsonReport } from "../../testkit/index.js";
-import { renderJunitXml } from "../../testkit/index.js";
-import { renderMarkdownReport } from "../../testkit/index.js";
-import type { ProviderConfig } from "../../testkit/index.js";
+import { loadBuiltinProviders, describeProvider, hasProviderKey } from "./testkit/index.js";
+import { offlineScenariosFor } from "./testkit/scenarios/offline.js";
+import { liveScenariosFor } from "./testkit/scenarios/live.js";
+import { runMatrix } from "./testkit/index.js";
+import { renderJsonReport } from "./testkit/index.js";
+import { renderJunitXml } from "./testkit/index.js";
+import { renderMarkdownReport } from "./testkit/index.js";
+import type { ProviderConfig } from "./testkit/index.js";
 
 interface CliArgs {
   provider?: string;

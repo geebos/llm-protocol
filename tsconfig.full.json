@@ -4,5 +4,5 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src", "testkit", "apps", "vitest.config.ts"]
+  "include": ["src", "tests/testkit", "tests/cli.ts", "vitest.config.ts"]
 }
