@@ -1,0 +1,21 @@
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_s1","object":"response","created_at":1700000000,"status":"queued","model":"gpt-4o-mini","output":[]}}
+
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_s1","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_s1","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+data: {"type":"response.content_part.added","sequence_number":3,"item_id":"msg_s1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_s1","output_index":0,"content_index":0,"delta":"Hello "}
+
+data: {"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_s1","output_index":0,"content_index":0,"delta":"from the "}
+
+data: {"type":"response.output_text.delta","sequence_number":6,"item_id":"msg_s1","output_index":0,"content_index":0,"delta":"Responses provider"}
+
+data: {"type":"response.output_text.done","sequence_number":7,"item_id":"msg_s1","output_index":0,"content_index":0,"text":"Hello from the Responses provider"}
+
+data: {"type":"response.content_part.done","sequence_number":8,"item_id":"msg_s1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Hello from the Responses provider","annotations":[]}}
+
+data: {"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":{"id":"msg_s1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello from the Responses provider","annotations":[]}]}}
+
+data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_s1","object":"response","created_at":1700000000,"status":"completed","output":[{"id":"msg_s1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello from the Responses provider","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":7,"total_tokens":17}}}

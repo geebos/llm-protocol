@@ -1,0 +1,15 @@
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_s2","object":"response","created_at":1700000001,"status":"queued","model":"gpt-4o-mini","output":[]}}
+
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_s2","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"fc_s1","type":"function_call","status":"in_progress","name":"get_weather","call_id":"call_1","arguments":""}}
+
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_s1","output_index":0,"delta":"{\"city\":"}
+
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_s1","output_index":0,"delta":"\"Paris\"}"}
+
+data: {"type":"response.function_call_arguments.done","sequence_number":5,"item_id":"fc_s1","output_index":0,"arguments":"{\"city\":\"Paris\"}"}
+
+data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"fc_s1","type":"function_call","status":"completed","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"Paris\"}"}}
+
+data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_s2","object":"response","created_at":1700000001,"status":"completed","output":[{"id":"fc_s1","type":"function_call","status":"completed","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28}}}

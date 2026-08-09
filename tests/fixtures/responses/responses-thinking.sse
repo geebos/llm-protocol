@@ -1,0 +1,29 @@
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_s3","object":"response","created_at":1700000002,"status":"queued","model":"gpt-4o-mini","output":[]}}
+
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_s3","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_s1","type":"reasoning","status":"in_progress","summary":[],"content":[]}}
+
+data: {"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"rs_s1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_s1","output_index":0,"summary_index":0,"delta":"thinking about it"}
+
+data: {"type":"response.reasoning_summary_text.done","sequence_number":5,"item_id":"rs_s1","output_index":0,"summary_index":0,"text":"thinking about it"}
+
+data: {"type":"response.reasoning_summary_part.done","sequence_number":6,"item_id":"rs_s1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"thinking about it"}}
+
+data: {"type":"response.output_item.done","sequence_number":7,"output_index":0,"item":{"id":"rs_s1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"thinking about it"}],"content":[]}}
+
+data: {"type":"response.output_item.added","sequence_number":8,"output_index":1,"item":{"id":"msg_s2","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+data: {"type":"response.content_part.added","sequence_number":9,"item_id":"msg_s2","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+data: {"type":"response.output_text.delta","sequence_number":10,"item_id":"msg_s2","output_index":1,"content_index":0,"delta":"The answer."}
+
+data: {"type":"response.output_text.done","sequence_number":11,"item_id":"msg_s2","output_index":1,"content_index":0,"text":"The answer."}
+
+data: {"type":"response.content_part.done","sequence_number":12,"item_id":"msg_s2","output_index":1,"content_index":0,"part":{"type":"output_text","text":"The answer.","annotations":[]}}
+
+data: {"type":"response.output_item.done","sequence_number":13,"output_index":1,"item":{"id":"msg_s2","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"The answer.","annotations":[]}]}}
+
+data: {"type":"response.completed","sequence_number":14,"response":{"id":"resp_s3","object":"response","created_at":1700000002,"status":"completed","output":[{"id":"rs_s1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"thinking about it"}],"content":[]},{"id":"msg_s2","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"The answer.","annotations":[]}]}],"usage":{"input_tokens":30,"output_tokens":10,"total_tokens":40}}}

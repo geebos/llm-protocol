@@ -101,6 +101,14 @@ export const BUILTIN_PROVIDERS: RawProviderConfig[] = [
     model: "${COMPAT_A_MODEL}",
     capabilities: ["stream", "tools", "chat_reasoning_extension"],
   },
+  {
+    id: "responses-native",
+    protocol: "openai-responses",
+    baseUrl: "${RESPONSES_BASE_URL:https://api.openai.com}",
+    apiKeyEnv: "RESPONSES_API_KEY",
+    model: "${RESPONSES_TEST_MODEL:gpt-4o-mini}",
+    capabilities: ["stream", "tools", "parallel_tools", "thinking"],
+  },
 ];
 
 export function loadBuiltinProviders(): ProviderConfig[] {

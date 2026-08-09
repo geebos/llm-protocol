@@ -1,0 +1,25 @@
+{
+  "id": "responses-text-response",
+  "protocol": "openai-responses",
+  "description": "Text non-streaming Responses response",
+  "source": "tests/testkit responses scenarios",
+  "response": {
+    "id": "resp_1",
+    "object": "response",
+    "created_at": 1700000000,
+    "status": "completed",
+    "model": "gpt-4o-mini",
+    "output": [
+      {
+        "id": "msg_1",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [
+          { "type": "output_text", "text": "Hello from the Responses provider", "annotations": [] }
+        ]
+      }
+    ],
+    "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
+  }
+}

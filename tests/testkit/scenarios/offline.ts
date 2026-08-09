@@ -22,43 +22,43 @@ export function converseProtocol(protocol: ApiFormat): ApiFormat {
     ? "anthropic-messages"
     : protocol === "anthropic-messages"
       ? "openai-chat"
-      : protocol;
+      : "anthropic-messages";
 }
 
 const REQ_FILE: Record<ApiFormat, string> = {
   "openai-chat": "requests/openai-text.json",
   "anthropic-messages": "requests/anthropic-text.json",
-  "openai-responses": "requests/openai-text.json",
+  "openai-responses": "requests/anthropic-text.json",
 };
 
 const REQ_TOOL_FILE: Record<ApiFormat, string> = {
   "openai-chat": "requests/openai-tool.json",
   "anthropic-messages": "requests/anthropic-tool.json",
-  "openai-responses": "requests/openai-tool.json",
+  "openai-responses": "requests/anthropic-tool.json",
 };
 
 const RESP_FILE: Record<ApiFormat, string> = {
   "openai-chat": "responses/openai-text.json",
   "anthropic-messages": "responses/anthropic-text.json",
-  "openai-responses": "responses/openai-text.json",
+  "openai-responses": "responses/responses-text.json",
 };
 
 const RESP_TOOL_FILE: Record<ApiFormat, string> = {
   "openai-chat": "responses/openai-tool.json",
   "anthropic-messages": "responses/anthropic-tool.json",
-  "openai-responses": "responses/openai-tool.json",
+  "openai-responses": "responses/responses-tool.json",
 };
 
 const STREAM_FILE: Record<ApiFormat, string> = {
   "openai-chat": "streams/openai-text.sse",
   "anthropic-messages": "streams/anthropic-text.sse",
-  "openai-responses": "streams/openai-text.sse",
+  "openai-responses": "responses/responses-text.sse",
 };
 
 const STREAM_TOOL_FILE: Record<ApiFormat, string> = {
   "openai-chat": "streams/openai-tool.sse",
   "anthropic-messages": "streams/anthropic-tool.sse",
-  "openai-responses": "streams/openai-tool.sse",
+  "openai-responses": "responses/responses-tool.sse",
 };
 
 /** ProviderProfile override a scenario may need (e.g. declared reasoningField). */
@@ -105,11 +105,9 @@ export function offlineScenariosFor(
       assert: (ctx) => {
         assertNonEmptyText(ctx);
         assertStreamEndsCleanly(ctx);
-        if (provider.protocol === "openai-chat") {
-          assertFinishReason(ctx, "end_turn"); // Anthropic source stop_reason
-        } else {
-          assertFinishReason(ctx, "stop"); // OpenAI source finish_reason
-        }
+        // upstream chat/responses -> Anthropic client stop_reason=end_turn;
+        // upstream anthropic -> Chat client finish_reason=stop.
+        assertFinishReason(ctx, from === "openai-chat" ? "stop" : "end_turn");
       },
     },
     {
@@ -128,7 +126,7 @@ export function offlineScenariosFor(
         if ((args as { city?: string }).city !== "Paris") {
           throw new Error("tool arguments mismatch: expected city=Paris");
         }
-        assertFinishReason(ctx, provider.protocol === "openai-chat" ? "tool_use" : "tool_calls");
+        assertFinishReason(ctx, from === "openai-chat" ? "tool_calls" : "tool_use");
       },
     },
     {
@@ -155,15 +153,17 @@ export function offlineScenariosFor(
       title: `Thinking stream (${from} -> ${provider.protocol})`,
       tags: ["offline", "thinking", "stream"],
       requires:
-        provider.protocol === "anthropic-messages"
-          ? ["thinking"]
-          : ["chat_reasoning_extension"],
+        provider.protocol === "openai-chat"
+          ? ["chat_reasoning_extension"]
+          : ["thinking"],
       fixture: {
         requestFile: REQ_FILE[from],
         streamFile:
           provider.protocol === "anthropic-messages"
             ? "streams/anthropic-thinking.sse"
-            : "streams/openai-thinking.sse",
+            : provider.protocol === "openai-responses"
+              ? "responses/responses-thinking.sse"
+              : "streams/openai-thinking.sse",
         streaming: true,
       },
       // Declare the OpenAI reasoning field so the translated stream can carry

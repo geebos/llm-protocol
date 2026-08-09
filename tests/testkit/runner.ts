@@ -237,7 +237,7 @@ function converseFor(protocol: ApiFormat): ApiFormat {
     ? "anthropic-messages"
     : protocol === "anthropic-messages"
       ? "openai-chat"
-      : protocol;
+      : "anthropic-messages";
 }
 
 async function buildSourceRequest(

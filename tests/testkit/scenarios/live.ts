@@ -43,7 +43,7 @@ export function converse(protocol: ApiFormat): ApiFormat {
     ? "anthropic-messages"
     : protocol === "anthropic-messages"
       ? "openai-chat"
-      : protocol;
+      : "anthropic-messages";
 }
 
 export function liveScenariosFor(provider: ProviderConfig): Array<Scenario & ScenarioProfiles> {

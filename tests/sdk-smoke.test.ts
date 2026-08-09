@@ -113,3 +113,72 @@ describe("Anthropic JS SDK parses translate() output (OpenAI upstream)", () => {
     expect(message.usage.output_tokens).toBe(4);
   });
 });
+
+describe("OpenAI Responses JS SDK parses translate() output (Anthropic upstream)", () => {
+  const anthropicTextResponse = {
+    id: "msg_123",
+    type: "message",
+    role: "assistant",
+    model: "claude-sonnet-4-5",
+    content: [{ type: "text", text: "Hello from Claude" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 8, output_tokens: 4 },
+  };
+
+  it("consumes the Responses non-streaming output", async () => {
+    const anthropicFetch = (async () =>
+      new Response(JSON.stringify(anthropicTextResponse), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const forward = translate({ from: "openai-responses", to: "anthropic-messages", fetch: anthropicFetch });
+    const client = new OpenAI({
+      apiKey: "sk-test",
+      baseURL: "https://api.example.com/v1",
+      fetch: (url: RequestInfo | URL, init?: RequestInit) =>
+        forward(new Request(url, init)),
+    });
+
+    const response = await client.responses.create({
+      model: "claude-sonnet-4-5",
+      input: "hi",
+    });
+    expect(response.object).toBe("response");
+    expect(response.status).toBe("completed");
+    const output = response.output as Array<{ type?: string; status?: string }>;
+    expect(output[0]?.type).toBe("message");
+    expect(output[0]?.status).toBe("completed");
+    expect(response.usage?.input_tokens).toBe(8);
+    expect(response.usage?.output_tokens).toBe(4);
+  });
+
+  it("consumes the Responses SSE stream and aggregates the final response (P0-3 envelope)", async () => {
+    const anthropicFetch = (async () =>
+      new Response(bytesStream(anthropicTextStream), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })) as typeof fetch;
+    const forward = translate({ from: "openai-responses", to: "anthropic-messages", fetch: anthropicFetch });
+    const client = new OpenAI({
+      apiKey: "sk-test",
+      baseURL: "https://api.example.com/v1",
+      fetch: (url: RequestInfo | URL, init?: RequestInit) =>
+        forward(new Request(url, init)),
+    });
+
+    const stream = await client.responses.stream({
+      model: "claude-sonnet-4-5",
+      input: "hi",
+      stream: true,
+    });
+    const response = await stream.finalResponse();
+    expect(response.object).toBe("response");
+    expect(response.status).toBe("completed");
+    const output = response.output as Array<{ type?: string; status?: string }>;
+    expect(output[0]?.type).toBe("message");
+    expect(output[0]?.status).toBe("completed");
+    // usage folded into the terminal envelope exactly once (SR-010)
+    expect(response.usage?.input_tokens).toBe(7);
+    expect(response.usage?.output_tokens).toBe(4);
+  });
+});

@@ -1,0 +1,24 @@
+{
+  "id": "responses-tool-response",
+  "protocol": "openai-responses",
+  "description": "function_call output item (tool non-streaming)",
+  "source": "tests/testkit responses scenarios",
+  "response": {
+    "id": "resp_2",
+    "object": "response",
+    "created_at": 1700000001,
+    "status": "completed",
+    "model": "gpt-4o-mini",
+    "output": [
+      {
+        "id": "fc_1",
+        "type": "function_call",
+        "status": "completed",
+        "name": "get_weather",
+        "call_id": "call_1",
+        "arguments": "{\"city\":\"Paris\"}"
+      }
+    ],
+    "usage": { "input_tokens": 20, "output_tokens": 8, "total_tokens": 28 }
+  }
+}
