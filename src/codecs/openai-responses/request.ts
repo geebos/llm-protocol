@@ -89,7 +89,7 @@ export function createOpenAiResponsesRequestCodec(
       const ids = createSyntheticIdFactory();
       ctx.syntheticIds = ids;
 
-      const parsedInput = parseInput(p.input, ctx, policies);
+      const parsedInput = parseInput(p.input, typeof p.instructions === "string" ? p.instructions : undefined, ctx, policies);
       const identity = parseIdentity(p);
       const cache = parseCache(p);
       const outputIncludes = parseIncludes(p);
@@ -252,9 +252,8 @@ export function createOpenAiResponsesRequestCodec(
         stream: streaming,
         input: renderInput(canonical, ctx),
       };
-      if (canonical.system?.length) {
-        body.instructions = renderSystem(canonical.system);
-      }
+      // §5.1 default strategy: system lands as the leading developer message
+      // inside input (not the separate `instructions` top-level field).
 
       if (canonical.generation?.maxTokens !== undefined) {
         body.max_output_tokens = canonical.generation.maxTokens;
@@ -342,6 +341,7 @@ interface ParsedInput {
 
 function parseInput(
   input: unknown,
+  instructions: string | undefined,
   ctx: CodecContext,
   policies: TranslationPolicies,
 ): ParsedInput {
@@ -356,6 +356,11 @@ function parseInput(
   }
 
   const system: ContentPart[] = [];
+  // §3.2: instructions first (whitespace preserved, pure-blank segments skipped),
+  // then system/developer items appended in source order.
+  if (instructions !== undefined && instructions !== "") {
+    system.push({ type: "text", text: instructions });
+  }
   const messages: CanonicalMessage[] = [];
   let pendingAssistant: CanonicalMessage | undefined;
   let pendingReasoning: ContentPart[] = [];
@@ -420,10 +425,13 @@ function parseInput(
       case "custom_tool_call_output": {
         sawNonSystem = true;
         flushAssistant();
-        messages.push({
-          role: "user",
-          content: [parseToolResultItem(it, ctx)],
-        });
+        const part = parseToolResultItem(it, ctx);
+        const last = messages[messages.length - 1];
+        if (last && last.role === "user") {
+          last.content.push(part);
+        } else {
+          messages.push({ role: "user", content: [part] });
+        }
         continue;
       }
       case "reasoning": {
@@ -848,14 +856,6 @@ function parseThinking(reasoning: unknown) {
 /* ------------------------------------------------------------------ */
 /* render: canonical -> Responses request                              */
 /* ------------------------------------------------------------------ */
-
-function renderSystem(parts: ContentPart[]): string {
-  // instructions is a plain string; text parts join, boundaries lost but
-  // whitespace preserved (v0.2 P1-9: COMPATIBLE).
-  return parts
-    .map((p) => (p.type === "text" ? p.text : ""))
-    .join("");
-}
 
 function renderInput(canonical: CanonicalRequest, ctx: CodecContext): unknown[] {
   const items: unknown[] = [];

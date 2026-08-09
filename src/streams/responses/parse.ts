@@ -413,6 +413,12 @@ export function createResponsesStreamParser(
           return;
         }
 
+        // Done events mark completion of the part payload; the canonical
+        // *end event fires on content_part.done / output_item.done.
+        case "response.output_text.done":
+        case "response.refusal.done":
+          return;
+
         case "response.reasoning_summary_part.added": {
           const itemId = typeof data.item_id === "string" ? data.item_id : undefined;
           const state = itemId ? items.get(itemId) : undefined;
@@ -483,6 +489,11 @@ export function createResponsesStreamParser(
           });
           return;
         }
+
+        // Arguments/input complete; tool_end fires on output_item.done.
+        case "response.function_call_arguments.done":
+        case "response.custom_tool_call_input.done":
+          return;
 
         case "response.completed": {
           terminal(controller, hasToolItems(items) ? "tool_call" : "end_turn");

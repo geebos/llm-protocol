@@ -183,8 +183,8 @@ export function createResponsesStreamRenderer(
     if (lifecycleSent) return;
     lifecycleSent = true;
     const env = ensureEnvelope();
-    const createdWire = envelopeToWire(env.snapshot());
-    send(controller, { type: "response.created", response: createdWire });
+    env.setStatus("queued");
+    send(controller, { type: "response.created", response: envelopeToWire(env.snapshot()) });
     // queued only when the profile declares the SSE event (v0.4 P1-9).
     if (profile.capabilities.responses?.terminalEvents?.queued) {
       send(controller, {
@@ -376,9 +376,8 @@ export function createResponsesStreamRenderer(
           if (messageStarted) return;
           messageStarted = true;
           const env = ensureEnvelope();
-          if (event.model) {
-            env.setModel(event.model);
-          }
+          if (event.id) env.setId(event.id);
+          if (event.model) env.setModel(event.model);
           sendLifecycle(controller);
           return;
         }

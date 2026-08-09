@@ -61,7 +61,7 @@ export class ResponseEnvelopeBuilder {
       id,
       object: "response",
       createdAt,
-      status: "in_progress",
+      status: "queued",
       model,
       output: [],
     };
@@ -102,6 +102,10 @@ export class ResponseEnvelopeBuilder {
 
   setModel(model: string): void {
     this.state.model = model;
+  }
+
+  setId(id: string): void {
+    this.state.id = id;
   }
 
   setRequestDerived(value: Record<string, unknown>): void {
@@ -153,9 +157,35 @@ export function envelopeToWire(
     tools: envelope.requestDerived?.tools ?? [],
     top_p: envelope.requestDerived?.top_p ?? null,
     truncation: envelope.requestDerived?.truncation ?? "disabled",
-    usage: envelope.usage ?? null,
+    usage: envelope.usage ? usageToWire(envelope.usage) : null,
     user: envelope.requestDerived?.user ?? null,
     metadata: envelope.requestDerived?.metadata ?? {},
+  };
+}
+
+/** Canonical usage -> Responses usage wire shape (§14.1). */
+function usageToWire(usage: CanonicalUsage): Record<string, unknown> {
+  const cacheTotal =
+    (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+  const inputTokens =
+    usage.inputTokens !== undefined && cacheTotal > 0
+      ? usage.inputTokens + cacheTotal
+      : usage.inputTokens;
+  const inputDetails: Record<string, unknown> = {};
+  if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
+    inputDetails.cached_tokens = usage.cacheReadTokens;
+  }
+  const outputDetails: Record<string, unknown> = {};
+  if (usage.reasoningTokens !== undefined) {
+    outputDetails.reasoning_tokens = usage.reasoningTokens;
+  }
+  return {
+    ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
+    ...(usage.outputTokens !== undefined ? { output_tokens: usage.outputTokens } : {}),
+    ...(usage.totalTokens !== undefined ? { total_tokens: usage.totalTokens } : {}),
+    ...(Object.keys(inputDetails).length ? { input_tokens_details: inputDetails } : {}),
+    ...(Object.keys(outputDetails).length ? { output_tokens_details: outputDetails } : {}),
+    ...(usage.providerDetails ?? {}),
   };
 }
 

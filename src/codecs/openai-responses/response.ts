@@ -215,8 +215,8 @@ function parseOutputItems(
         break;
       }
       case "reasoning": {
-        const summaryParts = parseSubParts(it.summary);
-        const textParts = parseSubParts(it.content);
+        const summaryParts = parseSubParts(it.summary, true);
+        const textParts = parseSubParts(it.content, false);
         const part: ContentPart = {
           type: "reasoning",
           ...(summaryParts.length === 1 ? { summary: summaryParts[0].text } : {}),
@@ -277,6 +277,7 @@ function parseOutputItems(
 
 function parseSubParts(
   raw: unknown,
+  summary: boolean,
 ): Array<{ text: string; summaryIndex?: number; contentIndex?: number }> {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -284,7 +285,7 @@ function parseSubParts(
       (s): s is Record<string, unknown> =>
         !!s && typeof s === "object" && typeof (s as { text?: unknown }).text === "string",
     )
-    .map((s, i) => ({ text: s.text as string, summaryIndex: i, contentIndex: i }));
+    .map((s, i) => (summary ? { text: s.text as string, summaryIndex: i } : { text: s.text as string, contentIndex: i }));
 }
 
 function renderOutputItems(content: ContentPart[], ctx: CodecContext): unknown[] {
