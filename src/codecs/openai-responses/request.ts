@@ -319,10 +319,6 @@ export function createOpenAiResponsesRequestCodec(
       if (ext.stop !== undefined && profile.capabilities.responses?.responsesExtensions?.stop) {
         body.stop = ext.stop;
       }
-      if (ext.topLogprobs !== undefined) {
-        // v0.5 P1-5: no token-logprob IR -> not forwarded, warning already on parse.
-        body.top_logprobs = undefined;
-      }
 
       return body;
     },

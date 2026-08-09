@@ -21,6 +21,7 @@ import type { CodecContext, ResponseCodec, ToolCallEntry } from "../protocol-ada
 import { ensureToolCallRegistry } from "../protocol-adapter.js";
 import { registerToolCall } from "./normalize.js";
 import { createSyntheticIdFactory } from "./ids.js";
+import { usageToWire } from "./envelope.js";
 
 /** §8.2: CanonicalFinishReason -> Responses status (independent axes). */
 export function finishReasonToStatus(
@@ -417,41 +418,18 @@ function parseUsage(usage: unknown, ctx: CodecContext): CanonicalUsage | undefin
 /**
  * §14.1: IR -> Responses usage. Anthropic-style input (uncached + cacheWrite +
  * cacheRead) expands into `input_tokens`; cached subset reported in details.
+ * Shared wire shape with the stream envelope (envelope.usageToWire).
  */
 function renderUsage(usage: CanonicalUsage, ctx: CodecContext): Record<string, unknown> {
   const cacheTotal =
     (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
-  const inputTokens =
-    usage.inputTokens !== undefined && cacheTotal > 0
-      ? usage.inputTokens + cacheTotal
-      : usage.inputTokens;
   if (usage.inputTokens !== undefined && cacheTotal > 0) {
     ctx.warnings.push({
       code: "cache_usage_composed",
-      message: `Composed Responses input_tokens=${inputTokens} from input_tokens + cache tokens`,
+      message: `Composed Responses input_tokens=${usage.inputTokens + cacheTotal} from input_tokens + cache tokens`,
       fidelity: "COMPATIBLE",
       field: "usage.input_tokens",
     });
   }
-  const inputDetails: Record<string, unknown> = {};
-  if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
-    inputDetails.cached_tokens = usage.cacheReadTokens;
-  }
-  const outputDetails: Record<string, unknown> = {};
-  if (usage.reasoningTokens !== undefined) {
-    outputDetails.reasoning_tokens = usage.reasoningTokens;
-  }
-  const body: Record<string, unknown> = {
-    ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
-    ...(usage.outputTokens !== undefined ? { output_tokens: usage.outputTokens } : {}),
-    ...(usage.totalTokens !== undefined ? { total_tokens: usage.totalTokens } : {}),
-    ...(Object.keys(inputDetails).length
-      ? { input_tokens_details: inputDetails }
-      : {}),
-    ...(Object.keys(outputDetails).length
-      ? { output_tokens_details: outputDetails }
-      : {}),
-    ...(usage.providerDetails ?? {}),
-  };
-  return body;
+  return usageToWire(usage);
 }

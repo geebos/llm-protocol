@@ -11,7 +11,8 @@
 | 目录 | fixture | 用途 |
 | --- | --- | --- |
 | requests/ | anthropic-text / anthropic-tool / openai-text / openai-tool | Fixture Contract 请求侧 |
-| responses/ | anthropic-text / anthropic-tool / openai-text / openai-tool / openai-error | 非流式响应与错误反向转换 |
+| responses/ | anthropic-text / anthropic-tool / openai-text / openai-tool / openai-error / responses-text / responses-tool | 非流式响应与错误反向转换（含 OpenAI Responses 格式） |
 | streams/ | anthropic-text / anthropic-tool / anthropic-thinking / openai-text / openai-tool | 流式 Fixture Contract 与 SDK 解析 |
+| responses/ | responses-text.sse / responses-tool.sse / responses-thinking.sse | Responses 流式 Fixture Contract（testkit responses-native 提供商） |
 
 新增兼容性修复时，先落最小复现 fixture 到 regressions/（尚未建立），再独立修复（技术规范 3「Fixture 资产化」）。

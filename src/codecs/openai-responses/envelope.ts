@@ -164,7 +164,7 @@ export function envelopeToWire(
 }
 
 /** Canonical usage -> Responses usage wire shape (§14.1). */
-function usageToWire(usage: CanonicalUsage): Record<string, unknown> {
+export function usageToWire(usage: CanonicalUsage): Record<string, unknown> {
   const cacheTotal =
     (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
   const inputTokens =
