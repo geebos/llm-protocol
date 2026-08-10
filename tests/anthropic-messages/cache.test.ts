@@ -5,21 +5,21 @@
  * translate() integration with the golden fixture.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../src/pipeline/translate.js";
+import { translate } from "../../src/pipeline/translate.js";
 import {
   deriveAnthropicCacheKey,
   extractAnthropicCacheAnchors,
   anthropicCacheControlResolver,
-} from "../src/cache/anthropic/cache-control.js";
+} from "../../src/cache/anthropic/cache-control.js";
 import {
   composeCacheResolvers,
   explicitCacheKeyResolver,
   resolveCacheAffinity,
-} from "../src/cache/resolver.js";
-import { applyOpenAIChatCacheAffinity } from "../src/cache/openai-chat/apply-cache-affinity.js";
-import type { ProviderProfile } from "../src/capabilities/provider-profile.js";
-import type { CacheAffinityResolver } from "../src/cache/resolver.js";
-import { newCodecContext } from "../src/codecs/protocol-adapter.js";
+} from "../../src/cache/resolver.js";
+import { applyOpenAIChatCacheAffinity } from "../../src/cache/openai-chat/apply-cache-affinity.js";
+import type { ProviderProfile } from "../../src/capabilities/provider-profile.js";
+import type { CacheAffinityResolver } from "../../src/cache/resolver.js";
+import { newCodecContext } from "../../src/codecs/protocol-adapter.js";
 
 const openaiTextResponse = {
   id: "chatcmpl_456",

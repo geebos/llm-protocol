@@ -8,9 +8,9 @@
 import { describe, expect, it } from "vitest";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../src/pipeline/translate.js";
-import { createSSEParser, type SSEFrame } from "../src/streams/index.js";
-import type { TranslationTrace } from "../src/pipeline/types.js";
+import { translate } from "../../src/pipeline/translate.js";
+import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
+import type { TranslationTrace } from "../../src/pipeline/types.js";
 
 const encoder = new TextEncoder();
 

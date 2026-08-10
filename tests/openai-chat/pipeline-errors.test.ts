@@ -5,9 +5,9 @@
  * not-yet-implemented openai-responses adapter, and error codec fallbacks.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../src/pipeline/translate.js";
-import { TranslationError } from "../src/errors.js";
-import { getAdapter } from "../src/codecs/registry.js";
+import { translate } from "../../src/pipeline/translate.js";
+import { TranslationError } from "../../src/errors.js";
+import { getAdapter } from "../../src/codecs/registry.js";
 
 function openaiChatRequest(url = "https://api.anthropic.com/v1/chat/completions"): Request {
   return new Request(url, {

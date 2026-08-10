@@ -13,9 +13,9 @@ import {
   createSSEParser,
   type CanonicalStreamEvent,
   type SSEFrame,
-} from "../src/streams/index.js";
-import { openaiChatDefaultProfile } from "../src/codecs/openai-chat/index.js";
-import type { TranslationWarning } from "../src/ir/fidelity.js";
+} from "../../src/streams/index.js";
+import { openaiChatDefaultProfile } from "../../src/codecs/openai-chat/index.js";
+import type { TranslationWarning } from "../../src/ir/fidelity.js";
 
 async function collect<T>(stream: ReadableStream<T>): Promise<T[]> {
   const out: T[] = [];
@@ -396,7 +396,7 @@ describe("GAP-014 provider dialect declarations", () => {
 // ---- full-pipeline / SDK coverage for the hardened parser (L4/L5) ----
 
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../src/pipeline/translate.js";
+import { translate } from "../../src/pipeline/translate.js";
 
 async function collectFrames(body: ReadableStream<Uint8Array> | null): Promise<SSEFrame[]> {
   if (!body) return [];

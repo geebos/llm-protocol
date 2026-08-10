@@ -1,13 +1,14 @@
 /**
- * M2 end-to-end streaming tests through translate() (TC-002/005/010/012/013/
- * 014/015/016/020, SR-009 first-event latency).
+ * M2 end-to-end streaming tests through translate(), OpenAI Chat ->
+ * Anthropic Messages direction (TC-002/005/010/012/013/014/015/016/020,
+ * SR-009 first-event latency).
  *
  * Every test goes through the public handler: source Request -> target SSE ->
  * canonical pipeline -> source SSE on Response.body.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../src/pipeline/translate.js";
-import { createSSEParser, type SSEFrame } from "../src/streams/index.js";
+import { translate } from "../../src/pipeline/translate.js";
+import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();
 
@@ -32,17 +33,6 @@ async function collectSSEFrames(
     frames.push(value);
   }
   return frames;
-}
-
-async function collectText(body: ReadableStream<Uint8Array> | null): Promise<string> {
-  const reader = body!.getReader();
-  let text = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    text += new TextDecoder().decode(value, { stream: true });
-  }
-  return text;
 }
 
 function anthropicFrame(event: string, data: unknown): string {
@@ -87,19 +77,6 @@ function openaiChatStreamRequest(): Request {
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
       stream: true,
-      messages: [{ role: "user", content: "hi" }],
-    }),
-  });
-}
-
-function anthropicMessagesStreamRequest(): Request {
-  return new Request("https://api.openai.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": "sk-key", "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      stream: true,
-      max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
     }),
   });
@@ -260,57 +237,6 @@ describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
   });
 });
 
-describe("anthropic-messages -> openai-chat streaming", () => {
-  it("returns Anthropic SSE events to the client (TC-020)", async () => {
-    const fetch = (async () =>
-      new Response(bytesStream(openaiTextStream), {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      })) as typeof fetch;
-
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const response = await forward(anthropicMessagesStreamRequest());
-    const frames = await collectSSEFrames(response.body);
-    const events = frames.map((f) => f.event);
-
-    expect(events).toEqual([
-      "message_start",
-      "content_block_start",
-      "content_block_delta",
-      "content_block_delta",
-      "content_block_delta",
-      "content_block_stop",
-      "message_delta",
-      "message_stop",
-    ]);
-
-    const messageStart = JSON.parse(frames[0].data);
-    expect(messageStart.message.role).toBe("assistant");
-    const texts = frames
-      .filter((f) => f.event === "content_block_delta")
-      .map((f) => JSON.parse(f.data).delta.text as string);
-    expect(texts.join("")).toBe("Hello from GPT");
-    const messageDelta = JSON.parse(frames[frames.length - 2].data);
-    expect(messageDelta.delta.stop_reason).toBe("end_turn");
-    expect(messageDelta.usage.input_tokens).toBe(8);
-    expect(messageDelta.usage.output_tokens).toBe(5);
-  });
-
-  it("converts an upstream HTTP error to an Anthropic error response (TC-023)", async () => {
-    const fetch = (async () =>
-      new Response(
-        JSON.stringify({ error: { type: "invalid_request_error", message: "bad model", code: "bad" } }),
-        { status: 400, headers: { "content-type": "application/json" } },
-      )) as typeof fetch;
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const response = await forward(anthropicMessagesStreamRequest());
-    expect(response.status).toBe(400);
-    expect(response.headers.get("content-type")).toContain("application/json");
-    const body = (await response.json()) as Record<string, unknown>;
-    expect((body.error as Record<string, unknown>).type).toBe("invalid_request_error");
-  });
-});
-
 describe("first-event latency and fragmentation (SR-009, TC-016)", () => {
   it("delivers the first translated event before the second upstream event (SR-009)", async () => {
     const head =
@@ -352,53 +278,6 @@ describe("first-event latency and fragmentation (SR-009, TC-016)", () => {
     expect(earlyElapsed).toBeLessThan(200);
     expect(buffer).toContain("early");
     expect(buffer).toContain(" late");
-  });
-
-  it("injects an Anthropic ping while the upstream is idle (GAP-013)", async () => {
-    // OpenAI upstream starts and then stalls (like long thinking); with the
-    // Anthropic source the client must receive a keepalive ping during the
-    // stall, before any further upstream data.
-    const head = openaiFrame({ id: "c", choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] });
-    const tail = openaiFrame({ id: "c", choices: [{ index: 0, delta: { content: "late" }, finish_reason: null }] }) +
-      openaiFrame({ id: "c", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) +
-      openaiFrame("[DONE]");
-    const upstream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        controller.enqueue(encoder.encode(head));
-        await new Promise((r) => setTimeout(r, 150));
-        controller.enqueue(encoder.encode(tail));
-        controller.close();
-      },
-    });
-    const fetch = (async () =>
-      new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
-      fetch,
-      keepAliveIntervalMs: 30,
-    });
-    const response = await forward(anthropicMessagesStreamRequest());
-    const reader = response.body!.getReader();
-    let buffer = "";
-    let sawPing = false;
-    let pingElapsed = -1;
-    const t0 = Date.now();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += new TextDecoder().decode(value);
-      if (!sawPing && buffer.includes('event: ping')) {
-        sawPing = true;
-        pingElapsed = Date.now() - t0;
-      }
-    }
-    // ping must arrive during the 150ms stall, before the tail (late text).
-    expect(sawPing).toBe(true);
-    expect(pingElapsed).toBeGreaterThanOrEqual(0);
-    expect(pingElapsed).toBeLessThan(140);
-    expect(buffer).toContain('text":"late"');
   });
 
   it("survives byte-level fragmentation end to end (TC-016)", async () => {

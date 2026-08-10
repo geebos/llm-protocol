@@ -8,11 +8,11 @@
  * factory; focused round-trips use the codecs directly.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../src/pipeline/translate.js";
-import { createAnthropicAdapter, anthropicDefaultProfile, normalizeAnthropicTurns } from "../src/codecs/anthropic-messages/index.js";
-import { createOpenAiChatAdapter } from "../src/codecs/openai-chat/index.js";
-import { newCodecContext } from "../src/codecs/protocol-adapter.js";
-import type { CanonicalMessage } from "../src/ir/types.js";
+import { translate } from "../../src/pipeline/translate.js";
+import { createAnthropicAdapter, anthropicDefaultProfile, normalizeAnthropicTurns } from "../../src/codecs/anthropic-messages/index.js";
+import { createOpenAiChatAdapter } from "../../src/codecs/openai-chat/index.js";
+import { newCodecContext } from "../../src/codecs/protocol-adapter.js";
+import type { CanonicalMessage } from "../../src/ir/types.js";
 
 const anthropic = createAnthropicAdapter(anthropicDefaultProfile);
 const openai = createOpenAiChatAdapter();
