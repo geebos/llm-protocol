@@ -14,6 +14,9 @@ import { unsupportedError, validationError } from "../../errors.js";
 import type { CodecContext, RequestCodec } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
+import type { Remediations } from "../../pipeline/fidelity-plan.js";
+import { NO_REMEDIATIONS } from "../../pipeline/fidelity-plan.js";
+import { chatResponseFormatFromResponses } from "../text-format.js";
 
 const IR_MAPPED_FIELDS = [
   "model",
@@ -161,7 +164,9 @@ export function createOpenAiChatRequestCodec(
       canonical: CanonicalRequest,
       streaming: boolean,
       ctx: CodecContext = { warnings: [] },
+      remediations?: Remediations,
     ): unknown {
+      const remed = remediations ?? NO_REMEDIATIONS;
       const body: Record<string, unknown> = {
         model: canonical.model,
         stream: streaming,
@@ -183,24 +188,38 @@ export function createOpenAiChatRequestCodec(
           },
         }));
       }
-      if (canonical.toolChoice) body.tool_choice = renderToolChoice(canonical.toolChoice);
-      if (canonical.parallelToolCalls !== undefined) {
-        body.parallel_tool_calls = canonical.parallelToolCalls;
+      if (canonical.toolChoice) {
+        // review round 2: a forced tool_choice degrades to auto (executable
+        // remediation), not just a trace warning.
+        body.tool_choice = remed.setToolChoiceAuto
+          ? "auto"
+          : renderToolChoice(canonical.toolChoice);
+      }
+      if (canonical.parallelToolCalls !== undefined || remed.forceSerialToolCalls) {
+        // review round 2: serial-only target must receive parallel_tool_calls=false.
+        body.parallel_tool_calls = remed.forceSerialToolCalls
+          ? false
+          : canonical.parallelToolCalls;
       }
 
       // reasoning_effort is native to OpenAI Chat; render it from the canonical
       // thinking config regardless of the declared capability gate.
-      if (canonical.thinking?.effort !== undefined) {
+      if (canonical.thinking?.effort !== undefined && !remed.dropEffort) {
         body.reasoning_effort = canonical.thinking.effort;
-      } else if (canonical.extensions?.reasoning_effort !== undefined) {
+      } else if (
+        canonical.extensions?.reasoning_effort !== undefined &&
+        !remed.dropEffort
+      ) {
         // Unmapped effort value preserved through extensions (GAP-004).
         body.reasoning_effort = canonical.extensions.reasoning_effort;
       }
 
       const gen = canonical.generation;
       if (gen?.maxTokens !== undefined) body.max_tokens = gen.maxTokens;
-      if (gen?.temperature !== undefined) body.temperature = gen.temperature;
-      if (gen?.topP !== undefined) body.top_p = gen.topP;
+      if (!remed.dropSampling) {
+        if (gen?.temperature !== undefined) body.temperature = gen.temperature;
+        if (gen?.topP !== undefined) body.top_p = gen.topP;
+      }
       if (gen?.stopSequences?.length) body.stop = gen.stopSequences;
       if (gen?.presencePenalty !== undefined) body.presence_penalty = gen.presencePenalty;
       if (gen?.frequencyPenalty !== undefined) body.frequency_penalty = gen.frequencyPenalty;
@@ -208,7 +227,17 @@ export function createOpenAiChatRequestCodec(
 
       const ext = canonical.extensions ?? {};
       for (const key of EXTENSION_FIELDS) {
+        if (key === "store" && remed.dropStateful) continue;
         if (ext[key] !== undefined) body[key] = ext[key];
+      }
+      // Responses text.format -> Chat response_format (§6.1, review round 2):
+      // structured output must not vanish across protocols.
+      if (ext.responsesTextFormat !== undefined && !remed.dropTextFormat) {
+        const converted = chatResponseFormatFromResponses(
+          ext.responsesTextFormat,
+          ctx,
+        );
+        if (converted !== undefined) body.response_format = converted;
       }
       for (const key of Object.keys(ext)) {
         if (key === "reasoning_effort") continue; // handled explicitly above

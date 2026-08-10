@@ -15,12 +15,12 @@ import {
   createOpenAiResponsesAdapter,
   openaiResponsesDefaultProfile,
 } from "../../src/codecs/openai-responses/index.js";
-import { validateTargetRequest } from "../../src/codecs/openai-responses/validate.js";
+import { validateTargetRequest } from "../../src/pipeline/target-validation.js";
 import {
   buildFidelityPlan,
   applyFidelityPlan,
   collectRemediations,
-} from "../../src/codecs/openai-responses/fidelity-plan.js";
+} from "../../src/pipeline/fidelity-plan.js";
 import { DEFAULT_POLICIES } from "../../src/ir/policies.js";
 import { anthropicDefaultProfile } from "../../src/codecs/anthropic-messages/index.js";
 
@@ -552,5 +552,26 @@ function ctx(): CodecContext {
     expect(ir.tools).toBeUndefined();
     expect(ir.toolChoice).toEqual({ type: "auto" });
     expect(c.warnings.map((w) => w.code)).toContain("server_side_tool_filtered");
+  });
+
+  it("warns explicitly when system media cannot be represented (review P1)", () => {
+    const c = ctx();
+    const ir = {
+      model: "m",
+      messages: [],
+      system: [
+        { type: "text" as const, text: "be strict" },
+        { type: "image" as const, source: { type: "url" as const, url: "https://e.com/a.png" } },
+      ],
+    };
+    const body = responses.request.renderRequest(ir, false, c) as Record<string, unknown>;
+    const items = body.input as Array<Record<string, unknown>>;
+    expect(items[0]).toMatchObject({
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text: "be strict" }],
+    });
+    // high-privilege content must not vanish silently (responses.md §3.2 rule 4)
+    expect(c.warnings.map((w) => w.code)).toContain("system_media_dropped");
   });
 }

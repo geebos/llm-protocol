@@ -135,6 +135,64 @@ function ctx(): CodecContext {
       expect(r.text).toBe("deep");
     }
   });
+
+  it("parses status=failed as a legal terminal state, not an invalid body (review P1)", () => {
+    const c = ctx();
+    const canonical = responses.response.parseResponse(
+      {
+        id: "resp_f",
+        object: "response",
+        status: "failed",
+        model: "m",
+        output: [],
+        error: { code: "server_error", message: "upstream exploded" },
+      },
+      c,
+    );
+    expect(canonical.status).toBe("failed");
+    expect(canonical.finishReason).toBe("unknown");
+    expect(canonical.extensions?.error).toMatchObject({ code: "server_error", message: "upstream exploded" });
+    // `{ object: "error" }` remains an API error envelope and still throws.
+    expect(() => responses.response.parseResponse({ object: "error", message: "bad" }, c)).toThrow(
+      /error object/,
+    );
+  });
+
+  it("preserves output_text.annotations into IR and back (review P2)", () => {
+    const c = ctx();
+    const annotations = [{ type: "url_citation", url: "https://example.com" }];
+    const canonical = responses.response.parseResponse(
+      {
+        id: "resp_a",
+        object: "response",
+        status: "completed",
+        model: "m",
+        output: [
+          {
+            id: "msg_1",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "cited", annotations }],
+          },
+        ],
+      },
+      c,
+    );
+    expect(canonical.content[0]).toEqual({ type: "text", text: "cited", annotations });
+    const body = responses.response.renderResponse(
+      {
+        id: "resp_a",
+        model: "m",
+        content: [{ type: "text", text: "cited", annotations }],
+        finishReason: "end_turn",
+      },
+      c,
+    ) as Record<string, unknown>;
+    const output = body.output as Array<Record<string, unknown>>;
+    const content = (output[0].content as Array<Record<string, unknown>>)[0];
+    expect(content).toEqual({ type: "output_text", text: "cited", annotations });
+  });
 }
 
 {

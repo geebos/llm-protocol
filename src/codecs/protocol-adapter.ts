@@ -14,6 +14,7 @@ import type { TranslationWarning } from "../ir/fidelity.js";
 import type { SSEFrame } from "../streams/sse-parser.js";
 import type { CanonicalStreamEvent } from "../streams/types.js";
 import type { SyntheticIdFactory } from "./openai-responses/ids.js";
+import type { Remediations } from "../pipeline/fidelity-plan.js";
 
 /**
  * Tool definition entry (responses.md §10.4, v0.5 P0-2).
@@ -116,6 +117,12 @@ export interface RequestCodec {
     canonical: CanonicalRequest,
     streaming: boolean,
     ctx?: CodecContext,
+    /**
+     * Aggregated Fidelity Plan remediations, computed by the pipeline's shared
+     * Target Validate + Fidelity Plan stages (§10.0). When absent (direct
+     * codec use), the renderer falls back to running its own validation.
+     */
+    remediations?: Remediations,
   ): unknown;
 }
 

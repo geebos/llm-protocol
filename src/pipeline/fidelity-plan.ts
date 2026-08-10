@@ -7,15 +7,19 @@
  * remediations and surface entries as TranslationWarnings, so the renderer
  * never warns while it degrades ad hoc.
  *
+ * Shared across ALL targets (review round 2): the pipeline builds the plan
+ * once per translation and hands the aggregated remediations to the target
+ * renderer, so a degrade is always executable — never a bare warning.
+ *
  * outputIncludes merge (v0.4 P1-8): target include = requested ∪
  * translator-required. The translator never overrides client includes.
  */
-import type { CanonicalRequest } from "../../ir/types.js";
-import type { ProviderProfile } from "../../capabilities/provider-profile.js";
-import type { TranslationPolicies } from "../../ir/policies.js";
-import type { Fidelity } from "../../ir/fidelity.js";
-import type { CodecContext } from "../protocol-adapter.js";
-import type { ValidationResult, ValidationViolation } from "./validate.js";
+import type { CanonicalRequest } from "../ir/types.js";
+import type { ProviderProfile } from "../capabilities/provider-profile.js";
+import type { TranslationPolicies } from "../ir/policies.js";
+import type { Fidelity } from "../ir/fidelity.js";
+import type { CodecContext } from "../codecs/protocol-adapter.js";
+import type { ValidationResult, ValidationViolation } from "./target-validation.js";
 
 /** Aggregated remediation flags a renderer can branch on. */
 export interface Remediations {
@@ -26,7 +30,24 @@ export interface Remediations {
   dropTruncation: boolean;
   dropIdentity: boolean;
   dropEffort: boolean;
+  /** parallel_tool_calls=true on a serial-only target -> force serial. */
+  forceSerialToolCalls: boolean;
+  /** structured output (`text.format`) unsupported -> drop it. */
+  dropTextFormat: boolean;
 }
+
+/** No-op remediations for direct codec use without a pipeline plan. */
+export const NO_REMEDIATIONS: Remediations = {
+  setToolChoiceAuto: false,
+  dropSampling: false,
+  dropStateful: false,
+  dropMaxToolCalls: false,
+  dropTruncation: false,
+  dropIdentity: false,
+  dropEffort: false,
+  forceSerialToolCalls: false,
+  dropTextFormat: false,
+};
 
 export function collectRemediations(plan: FidelityPlan): Remediations {
   const out: Remediations = {
@@ -37,6 +58,8 @@ export function collectRemediations(plan: FidelityPlan): Remediations {
     dropTruncation: false,
     dropIdentity: false,
     dropEffort: false,
+    forceSerialToolCalls: false,
+    dropTextFormat: false,
   };
   for (const entry of plan.entries) {
     for (const [key, value] of Object.entries(entry.remediation ?? {})) {

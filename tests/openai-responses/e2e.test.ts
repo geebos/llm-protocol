@@ -239,4 +239,46 @@ describe("responses e2e: streaming", () => {
     );
     expect(terminals).toHaveLength(1);
   });
+
+  it("Responses upstream terminal usage reaches the Chat client (review P0)", async () => {
+    // §14.3: Responses returns usage on the terminal SSE event; the parser
+    // must aggregate it into a canonical usage event before message_end so the
+    // Chat client's final chunk carries prompt/completion tokens (review
+    // round 2: this used to vanish entirely). Source = Chat (client), target =
+    // Responses (upstream).
+    const responsesStream =
+      dataFrame({ type: "response.created", response: { id: "resp_1", model: "gpt-4o" } }) +
+      dataFrame({ type: "response.output_item.added", output_index: 0, item: { id: "msg_1", type: "message", role: "assistant", content: [] } }) +
+      dataFrame({ type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "" } }) +
+      dataFrame({ type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "Hi" }) +
+      dataFrame({ type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text: "Hi" }) +
+      dataFrame({ type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: {} }) +
+      dataFrame({ type: "response.output_item.done", output_index: 0, item: { id: "msg_1", type: "message" } }) +
+      dataFrame({
+        type: "response.completed",
+        response: { id: "resp_1", status: "completed", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } },
+      });
+
+    const fetchImpl = (async () =>
+      new Response(bytesStream(responsesStream), {
+        headers: { "content-type": "text/event-stream" },
+      })) as typeof fetch;
+    const forward = translate({ from: "openai-chat", to: "openai-responses", fetch: fetchImpl });
+    const response = await forward(
+      responsesRequest("https://api.example.com/v1/chat/completions", { model: "m", messages: [{ role: "user", content: "hi" }], stream: true }),
+    );
+    const frames = await collectSSEFrames(response.body);
+    const chunks = frames
+      .filter((f) => f.data !== "[DONE]")
+      .map((f) => JSON.parse(f.data) as Record<string, unknown>);
+    const usageChunks = chunks.filter((c) => c.usage !== undefined);
+    expect(usageChunks.length).toBeGreaterThan(0);
+    expect(usageChunks[usageChunks.length - 1].usage).toMatchObject({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+    });
+    // the terminal chunk still carries the finish reason
+    expect(chunks.some((c) => (c.choices as Array<{ finish_reason?: string }>)?.[0]?.finish_reason === "stop")).toBe(true);
+  });
 });

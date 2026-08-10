@@ -18,6 +18,8 @@ import {
   safeParseJson,
 } from "./content.js";
 import { normalizeAnthropicTurns } from "./normalize.js";
+import type { Remediations } from "../../pipeline/fidelity-plan.js";
+import { NO_REMEDIATIONS } from "../../pipeline/fidelity-plan.js";
 
 /** Anthropic requires an explicit max_tokens; OpenAI Chat does not. */
 const DEFAULT_MAX_TOKENS = 1024;
@@ -185,7 +187,9 @@ export const anthropicRequestCodec: RequestCodec = {
     canonical: CanonicalRequest,
     streaming: boolean,
     ctx: CodecContext = { warnings: [] },
+    remediations?: Remediations,
   ): unknown {
+    const remed = remediations ?? NO_REMEDIATIONS;
     const body: Record<string, unknown> = {
       model: canonical.model,
       stream: streaming,
@@ -227,12 +231,18 @@ export const anthropicRequestCodec: RequestCodec = {
       });
     }
     if (canonical.toolChoice) {
-      const rendered = renderToolChoice(canonical.toolChoice);
-      if (canonical.parallelToolCalls === false) {
+      // review round 2: a forced tool_choice degrades to auto (executable
+      // remediation), not just a trace warning.
+      const rendered = remed.setToolChoiceAuto
+        ? { type: "auto" }
+        : renderToolChoice(canonical.toolChoice);
+      if (canonical.parallelToolCalls === false || remed.forceSerialToolCalls) {
+        // review round 2: serial-only target must actually disable parallel
+        // tool use, not just warn.
         rendered.disable_parallel_tool_use = true;
       }
       body.tool_choice = rendered;
-    } else if (canonical.parallelToolCalls === false) {
+    } else if (canonical.parallelToolCalls === false || remed.forceSerialToolCalls) {
       // disable_parallel_tool_use is only expressible inside tool_choice.
       body.tool_choice = {
         type: "auto",
@@ -248,8 +258,10 @@ export const anthropicRequestCodec: RequestCodec = {
     }
 
     const gen = canonical.generation;
-    if (gen?.temperature !== undefined) body.temperature = gen.temperature;
-    if (gen?.topP !== undefined) body.top_p = gen.topP;
+    if (!remed.dropSampling) {
+      if (gen?.temperature !== undefined) body.temperature = gen.temperature;
+      if (gen?.topP !== undefined) body.top_p = gen.topP;
+    }
     if (gen?.stopSequences?.length) body.stop_sequences = gen.stopSequences;
 
     const ext = canonical.extensions ?? {};
@@ -278,7 +290,7 @@ export const anthropicRequestCodec: RequestCodec = {
         };
       } else if (t.mode === "adaptive") {
         body.thinking = { type: "adaptive" };
-        if (t.effort !== undefined) {
+        if (t.effort !== undefined && !remed.dropEffort) {
           body.output_config = { effort: t.effort };
         }
       }

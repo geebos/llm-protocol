@@ -22,6 +22,7 @@ import { ensureToolCallRegistry } from "../protocol-adapter.js";
 import { registerToolCall } from "./normalize.js";
 import { createSyntheticIdFactory } from "./ids.js";
 import { usageToWire } from "./envelope.js";
+import { parseUsage } from "./usage.js";
 
 /** §8.2: CanonicalFinishReason -> Responses status (independent axes). */
 export function finishReasonToStatus(
@@ -52,7 +53,17 @@ export const openaiResponsesResponseCodec: ResponseCodec = {
       throw validationError("response body must be a JSON object");
     }
     const p = payload as Record<string, unknown>;
-    if (p.object === "error" || (p.error && typeof p.error === "object")) {
+    const rawStatus = typeof p.status === "string" ? p.status : undefined;
+    const hasTerminalStatus =
+      rawStatus === "completed" ||
+      rawStatus === "incomplete" ||
+      rawStatus === "failed" ||
+      rawStatus === "cancelled";
+    // `{ object: "error" }` is an API error envelope, not a Response body.
+    // A Response terminal state `{ object: "response", status: "failed",
+    // error: {...} }` is a legal CanonicalResponseStatus axis and must parse
+    // normally with its error metadata preserved (review round 2).
+    if (p.object === "error" || (p.error && typeof p.error === "object" && !hasTerminalStatus)) {
       throw validationError("response contains an error object");
     }
 
@@ -61,7 +72,6 @@ export const openaiResponsesResponseCodec: ResponseCodec = {
     const output = Array.isArray(p.output) ? p.output : [];
     const content = parseOutputItems(output, ctx);
 
-    const rawStatus = typeof p.status === "string" ? p.status : undefined;
     let status: CanonicalResponseStatus | undefined;
     let finishReason: CanonicalFinishReason | undefined;
     switch (rawStatus) {
@@ -111,7 +121,7 @@ export const openaiResponsesResponseCodec: ResponseCodec = {
       content,
       finishReason,
       status,
-      usage: parseUsage(p.usage, ctx),
+      usage: parseUsage(p.usage),
       extensions,
     };
   },
@@ -201,7 +211,17 @@ function parseOutputItems(
           if (!block || typeof block !== "object") continue;
           const b = block as Record<string, unknown>;
           if (b.type === "output_text" && typeof b.text === "string") {
-            if (b.text !== "") parts.push({ type: "text", text: b.text });
+            if (b.text !== "") {
+              parts.push({
+                type: "text",
+                text: b.text,
+                // output_text.annotations is part metadata (v0.3 P2-1);
+                // preserved verbatim, never rewritten (review round 2).
+                ...(Array.isArray(b.annotations)
+                  ? { annotations: b.annotations }
+                  : {}),
+              });
+            }
           } else if (b.type === "refusal" && typeof b.refusal === "string") {
             parts.push({ type: "refusal", text: b.refusal });
           } else {
@@ -293,7 +313,7 @@ function renderOutputItems(content: ContentPart[], ctx: CodecContext): unknown[]
   const items: unknown[] = [];
   // Aggregate adjacent text/refusal parts into a single message item; tool
   // calls and reasoning become independent items (output_index ordering).
-  let messageItem: { parts: Array<{ type: string; text?: string; refusal?: string }> } | undefined;
+  let messageItem: { parts: Array<{ type: string; text?: string; refusal?: string; annotations?: unknown[] }> } | undefined;
 
   const flushMessage = (): void => {
     if (messageItem) {
@@ -313,7 +333,11 @@ function renderOutputItems(content: ContentPart[], ctx: CodecContext): unknown[]
     if (part.type === "text" || part.type === "refusal") {
       messageItem ??= { parts: [] };
       if (part.type === "text") {
-        messageItem.parts.push({ type: "output_text", text: part.text });
+        messageItem.parts.push({
+          type: "output_text",
+          text: part.text,
+          ...(part.annotations?.length ? { annotations: part.annotations } : {}),
+        });
       } else {
         messageItem.parts.push({ type: "refusal", refusal: part.text });
       }
@@ -375,44 +399,6 @@ function renderOutputItems(content: ContentPart[], ctx: CodecContext): unknown[]
 
 function lookupCall(ctx: CodecContext, callId: string): ToolCallEntry | undefined {
   return ensureToolCallRegistry(ctx).byCallId.get(callId);
-}
-
-function parseUsage(usage: unknown, ctx: CodecContext): CanonicalUsage | undefined {
-  if (!usage || typeof usage !== "object") return undefined;
-  const u = usage as Record<string, unknown>;
-  const parsed: CanonicalUsage = {};
-  // Responses input_tokens includes cached_tokens as a subset (like Chat);
-  // canonical inputTokens is pure input, cache split out.
-  const inputTokens = u.input_tokens;
-  if (typeof inputTokens === "number") {
-    const details = u.input_tokens_details as { cached_tokens?: unknown } | undefined;
-    const cached =
-      details && typeof details.cached_tokens === "number" ? details.cached_tokens : 0;
-    parsed.inputTokens = Math.max(0, inputTokens - cached);
-    if (cached > 0) parsed.cacheReadTokens = cached;
-  }
-  if (typeof u.output_tokens === "number") parsed.outputTokens = u.output_tokens;
-  const details: Record<string, unknown> = {};
-  for (const key of ["input_tokens_details", "output_tokens_details"]) {
-    if (u[key] !== undefined) details[key] = u[key];
-  }
-  const outputDetails = u.output_tokens_details as
-    | { reasoning_tokens?: unknown }
-    | undefined;
-  if (outputDetails && typeof outputDetails.reasoning_tokens === "number") {
-    parsed.reasoningTokens = outputDetails.reasoning_tokens;
-  }
-  if (parsed.inputTokens !== undefined && parsed.outputTokens !== undefined) {
-    parsed.totalTokens =
-      parsed.inputTokens +
-      (parsed.cacheReadTokens ?? 0) +
-      (parsed.cacheCreationTokens ?? 0) +
-      parsed.outputTokens;
-  } else if (typeof u.total_tokens === "number") {
-    parsed.totalTokens = u.total_tokens;
-  }
-  if (Object.keys(details).length) parsed.providerDetails = details;
-  return Object.keys(parsed).length ? parsed : undefined;
 }
 
 /**

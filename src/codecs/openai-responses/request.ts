@@ -37,13 +37,17 @@ import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
 import { createSyntheticIdFactory } from "./ids.js";
 import { registerToolCall, registerToolDefinition } from "./normalize.js";
-import { validateTargetRequest } from "./validate.js";
 import {
-  applyFidelityPlan,
+  validateTargetRequest,
+  type ValidationResult,
+} from "../../pipeline/target-validation.js";
+import {
   buildFidelityPlan,
+  applyFidelityPlan,
   collectRemediations,
   type Remediations,
-} from "./fidelity-plan.js";
+} from "../../pipeline/fidelity-plan.js";
+import { responsesTextFormatFromChat } from "../text-format.js";
 
 const EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
 type ReasoningEffort = (typeof EFFORT_VALUES)[number];
@@ -238,23 +242,42 @@ export function createOpenAiResponsesRequestCodec(
       canonical: CanonicalRequest,
       streaming: boolean,
       ctx: CodecContext = { warnings: [] },
+      remediations?: Remediations,
     ): unknown {
       ctx.syntheticIds ??= createSyntheticIdFactory();
 
-      // Target Validation + Fidelity Plan run before the IR is touched (§10.0).
-      const validation = validateTargetRequest(canonical, profile, ctx, policies);
-      const plan = buildFidelityPlan(canonical, profile, validation, ctx, policies);
-      // UNSUPPORTED decisions must actually block the request, not just warn
-      // (review P0-2, §10.0 frozen pipeline). The error message carries the
-      // first blocking violation code so callers can map it.
-      if (plan.blocking) {
-        const first = plan.entries.find((e) => e.fidelity === "UNSUPPORTED");
-        throw unsupportedError(
-          `Target validation rejected the request: ${first?.code ?? "unsupported"} — ${first?.message ?? "unsupported construct"}`,
+      // Include merge is independent of the plan (requested ∪ required, v0.4
+      // P1-8); computed here so the body renders it even when the pipeline
+      // supplied precomputed remediations.
+      const requestedIncludes = canonical.outputIncludes?.requestedIncludes ?? [];
+      const requiredIncludes = canonical.outputIncludes?.translatorRequiredIncludes ?? [];
+      const effectiveIncludes = [...new Set([...requestedIncludes, ...requiredIncludes])];
+
+      // Target Validate + Fidelity Plan run before the IR is touched (§10.0).
+      // The pipeline (translate.ts) computes them for EVERY target; when this
+      // codec is used directly without remediations, fall back to computing
+      // them locally so direct codec use keeps the same guarantees.
+      if (remediations === undefined) {
+        const validation: ValidationResult = validateTargetRequest(
+          canonical,
+          profile,
+          ctx,
+          policies,
         );
+        const plan = buildFidelityPlan(canonical, profile, validation, ctx, policies);
+        // UNSUPPORTED decisions must actually block the request, not just warn
+        // (review P0-2, §10.0 frozen pipeline). The error message carries the
+        // first blocking violation code so callers can map it.
+        if (plan.blocking) {
+          const first = plan.entries.find((e) => e.fidelity === "UNSUPPORTED");
+          throw unsupportedError(
+            `Target validation rejected the request: ${first?.code ?? "unsupported"} — ${first?.message ?? "unsupported construct"}`,
+          );
+        }
+        applyFidelityPlan(plan, ctx);
+        remediations = collectRemediations(plan);
       }
-      applyFidelityPlan(plan, ctx);
-      const remed = collectRemediations(plan);
+      const remed = remediations;
 
       const body: Record<string, unknown> = {
         model: canonical.model,
@@ -278,8 +301,12 @@ export function createOpenAiResponsesRequestCodec(
       if (canonical.thinking) {
         body.reasoning = renderThinking(canonical.thinking, remed, ctx);
       }
-      if (canonical.parallelToolCalls !== undefined) {
-        body.parallel_tool_calls = canonical.parallelToolCalls;
+      if (canonical.parallelToolCalls !== undefined || remed.forceSerialToolCalls) {
+        // review round 2: a serial-only target must actually receive
+        // parallel_tool_calls=false, not just a trace warning.
+        body.parallel_tool_calls = remed.forceSerialToolCalls
+          ? false
+          : canonical.parallelToolCalls;
       }
 
       const tools = renderTools(canonical.tools ?? [], ctx);
@@ -290,8 +317,8 @@ export function createOpenAiResponsesRequestCodec(
         if (rendered.allowedTools?.length) body.allowed_tools = rendered.allowedTools;
       }
 
-      if (plan.includes.effective.length) {
-        body.include = plan.includes.effective;
+      if (effectiveIncludes.length) {
+        body.include = effectiveIncludes;
       }
 
       const ext = canonical.extensions ?? {};
@@ -311,6 +338,25 @@ export function createOpenAiResponsesRequestCodec(
       }
       for (const key of ["metadata", "service_tier", "stream_options", "background", "text"] as const) {
         if (ext[key] !== undefined) body[key] = ext[key];
+      }
+      // Structured output: `text.format` round-trips through
+      // extensions.responsesTextFormat (parse) and is converted back here;
+      // Chat sources preserved `response_format` verbatim and convert too
+      // (review round 2: no silent loss of response_format across protocols).
+      {
+        const text: Record<string, unknown> = {};
+        if (!remed.dropTextFormat) {
+          if (ext.responsesTextFormat !== undefined) {
+            text.format = ext.responsesTextFormat;
+          } else if (ext.response_format !== undefined) {
+            const converted = responsesTextFormatFromChat(ext.response_format, ctx);
+            if (converted !== undefined) text.format = converted;
+          }
+        }
+        if (ext.responsesTextVerbosity !== undefined) {
+          text.verbosity = ext.responsesTextVerbosity;
+        }
+        if (Object.keys(text).length) body.text = text;
       }
       if (!remed.dropIdentity && canonical.identity) {
         const id = canonical.identity;
@@ -870,13 +916,7 @@ function renderInput(canonical: CanonicalRequest, ctx: CodecContext): unknown[] 
   const items: unknown[] = [];
   // Default: developer message as the first input item (§5.1).
   if (canonical.system?.length) {
-    items.push({
-      type: "message",
-      role: "developer",
-      content: canonical.system
-        .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
-        .map((p) => ({ type: "input_text", text: p.text })),
-    });
+    items.push(renderSystemDeveloperItem(canonical.system, ctx));
   }
   for (const m of canonical.messages) {
     items.push(...renderMessage(m, ctx));
@@ -884,77 +924,101 @@ function renderInput(canonical: CanonicalRequest, ctx: CodecContext): unknown[] 
   return items;
 }
 
+/**
+ * High-privilege system/developer content -> leading developer item (§3.2
+ * rule 4). Media or unknown blocks cannot be represented in a Responses
+ * developer message and must be surfaced explicitly — never silently dropped.
+ */
+function renderSystemDeveloperItem(
+  parts: ContentPart[],
+  ctx: CodecContext,
+): unknown {
+  const content: unknown[] = [];
+  for (const p of parts) {
+    if (p.type === "text") {
+      content.push({ type: "input_text", text: p.text });
+    } else {
+      ctx.warnings.push({
+        code: "system_media_dropped",
+        message: `System/developer content part "${p.type}" cannot be represented in a Responses developer item; dropped with warning`,
+        fidelity: "LOSSY",
+        field: "system",
+      });
+    }
+  }
+  return { type: "message", role: "developer", content };
+}
+
 function renderMessage(m: CanonicalMessage, ctx: CodecContext): unknown[] {
   if (m.role === "system") {
     // High-authority system message stays high authority as a developer item.
-    return [
-      {
-        type: "message",
-        role: "developer",
-        content: m.content
-          .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
-          .map((p) => ({ type: "input_text", text: p.text })),
-      },
-    ];
+    return [renderSystemDeveloperItem(m.content, ctx)];
   }
 
-  const textParts = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "text" }> => p.type === "text",
-  );
-  const imageParts = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "image" }> => p.type === "image",
-  );
-  const fileParts = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "file" }> => p.type === "file",
-  );
-  const refusalParts = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "refusal" }> => p.type === "refusal",
-  );
-  const calls = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
-  );
-  const results = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "tool_result" }> => p.type === "tool_result",
-  );
-  const reasoningParts = m.content.filter(
-    (p): p is Extract<ContentPart, { type: "reasoning" }> => p.type === "reasoning",
-  );
-
+  // review round 2: preserve the source part order. Do NOT filter by type up
+  // front — that would reorder assistant [text, reasoning, tool_call] into
+  // [text, tool_call, reasoning]. Scan `m.content` in order and aggregate only
+  // *consecutive* message content (text/refusal, plus media on user turns); a
+  // reasoning/tool/tool_result part flushes the current message item and
+  // becomes an independent item at its source position (§5.2, P0-4).
   const items: unknown[] = [];
-  const media: unknown[] = [
-    ...imageParts.map((p) => renderImagePart(p.source)),
-    ...fileParts.map((p) => renderFilePart(p)),
-  ];
+  let messageParts: unknown[] | undefined;
+  const wireTextType = m.role === "assistant" ? "output_text" : "input_text";
 
-  if (m.role === "assistant") {
-    const content: unknown[] = [];
-    for (const t of textParts) content.push({ type: "output_text", text: t.text });
-    for (const r of refusalParts) {
-      content.push({ type: "refusal", refusal: r.text });
+  const flushMessage = (): void => {
+    if (messageParts && messageParts.length) {
+      items.push({
+        type: "message",
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: messageParts,
+      });
     }
-    if (content.length) {
-      items.push({ type: "message", role: "assistant", content });
-    }
-    for (const c of calls) {
-      items.push(renderToolCallItem(c, ctx));
-    }
-  } else {
-    // user turn: text + media in one message item; tool results as separate
-    // output items (call/result adjacency is NOT required, v0.5 P0-4).
-    const content: unknown[] = [];
-    for (const t of textParts) content.push({ type: "input_text", text: t.text });
-    content.push(...media);
-    if (content.length) {
-      items.push({ type: "message", role: "user", content });
-    }
-    for (const r of results) {
-      items.push(renderToolResultItem(r, ctx));
+    messageParts = undefined;
+  };
+
+  for (const p of m.content) {
+    switch (p.type) {
+      case "text":
+        messageParts ??= [];
+        messageParts.push({ type: wireTextType, text: p.text });
+        break;
+      case "refusal":
+        messageParts ??= [];
+        messageParts.push({ type: "refusal", refusal: p.text });
+        break;
+      case "image":
+      case "file": {
+        if (m.role === "assistant") {
+          // Assistant Responses message items only carry output_text/refusal.
+          ctx.warnings.push({
+            code: "assistant_media_dropped",
+            message: `Assistant message media ("${p.type}") cannot be represented in a Responses assistant item; dropped with warning`,
+            fidelity: "LOSSY",
+            field: "messages.assistant.content",
+          });
+          break;
+        }
+        messageParts ??= [];
+        messageParts.push(
+          p.type === "image" ? renderImagePart(p.source) : renderFilePart(p),
+        );
+        break;
+      }
+      case "tool_call":
+        flushMessage();
+        items.push(renderToolCallItem(p, ctx));
+        break;
+      case "tool_result":
+        flushMessage();
+        items.push(renderToolResultItem(p, ctx));
+        break;
+      case "reasoning":
+        flushMessage();
+        items.push(renderReasoningItem(p, ctx));
+        break;
     }
   }
-
-  for (const r of reasoningParts) {
-    items.push(renderReasoningItem(r, ctx));
-  }
+  flushMessage();
   return items;
 }
 

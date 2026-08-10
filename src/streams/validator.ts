@@ -9,7 +9,7 @@
  *
  * Violations surface as a `stream_protocol` error event rather than a crash.
  */
-import type { CanonicalStreamEvent } from "./types.js";
+import type { CanonicalStreamEvent, StreamLocation } from "./types.js";
 import type { CanonicalError } from "../errors.js";
 
 type BlockKind = "text" | "tool" | "reasoning";
@@ -62,7 +62,7 @@ export class StreamValidator {
         if (this.messageEnded) {
           return { type: "error", error: protocolError(`${event.type} after message_end`) };
         }
-        const key = blockKey(startKind(event.type), event.index);
+        const key = blockKey(startKind(event.type), event.index, event.location);
         if (this.blocks.has(key)) {
           return { type: "error", error: protocolError(`duplicate ${event.type} for index ${event.index}`) };
         }
@@ -71,6 +71,8 @@ export class StreamValidator {
       }
 
       case "text_delta":
+        return this.deltaGuard(event, "text");
+      case "text_annotation":
         return this.deltaGuard(event, "text");
       case "tool_arguments_delta":
         return this.deltaGuard(event, "tool");
@@ -119,7 +121,7 @@ export class StreamValidator {
   }
 
   private deltaGuard(event: IndexedEvent, kind: BlockKind): CanonicalStreamEvent {
-    const key = blockKey(kind, event.index);
+    const key = blockKey(kind, event.index, event.location);
     if (!this.blocks.has(key)) {
       return { type: "error", error: protocolError(`${event.type} for unstarted index ${event.index}`) };
     }
@@ -130,7 +132,7 @@ export class StreamValidator {
   }
 
   private endGuard(event: IndexedEvent, kind: BlockKind): CanonicalStreamEvent {
-    const key = blockKey(kind, event.index);
+    const key = blockKey(kind, event.index, event.location);
     if (!this.blocks.has(key)) {
       return { type: "error", error: protocolError(`${event.type} for unstarted index ${event.index}`) };
     }
@@ -142,7 +144,25 @@ export class StreamValidator {
   }
 }
 
-function blockKey(kind: BlockKind, index: number): string {
+/**
+ * Block identity (review round 2): content parts within the same message item
+ * are keyed by (outputIndex, contentIndex) via the multi-level `location`, so
+ * a second content part of the same message no longer collides with the first
+ * (single flat `index` leaked across parts). Legacy events without a location
+ * fall back to `index`. Tool/reasoning blocks are item-scoped: one item = one
+ * block, keyed by outputIndex regardless of the delta-level location.
+ */
+function blockKey(
+  kind: BlockKind,
+  index: number,
+  location?: StreamLocation,
+): string {
+  if (kind === "text" && location?.kind === "content") {
+    return `text:${location.outputIndex}:${location.contentIndex}`;
+  }
+  if (kind === "text" && location?.kind === "annotation") {
+    return `text:${location.outputIndex}:${location.contentIndex}`;
+  }
   return `${kind}:${index}`;
 }
 

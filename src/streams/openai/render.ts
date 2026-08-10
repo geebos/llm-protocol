@@ -36,6 +36,7 @@ export function createOpenAiChatStreamRenderer(
   let errorSent = false;
   let reasoningReported = false;
   let cacheUsageReported = false;
+  let annotationReported = false;
   let cachedUsage: CanonicalUsage | undefined;
   let id = `chatcmpl-${crypto.randomUUID()}`;
   let model: string | undefined;
@@ -135,6 +136,21 @@ export function createOpenAiChatStreamRenderer(
           return;
         case "text_end":
           return;
+        case "text_annotation": {
+          // Chat completions have no annotation/citation field; drop with an
+          // explicit warning, never silently (v0.3 P2-1).
+          if (!annotationReported) {
+            annotationReported = true;
+            report?.({
+              code: "annotations_dropped",
+              message:
+                "Text annotations (citations) dropped because the target has no annotation field",
+              fidelity: "LOSSY",
+              field: "content.text.annotations",
+            });
+          }
+          return;
+        }
 
         case "reasoning_start":
           return;

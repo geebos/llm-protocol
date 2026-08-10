@@ -27,8 +27,13 @@ interface OpenItem {
   itemId: string;
   outputIndex: number;
   type: "message" | "reasoning" | "function" | "custom";
-  /** message item: open content parts (content_index -> kind/text). */
-  textParts: Array<{ contentIndex: number; kind: "output_text" | "refusal"; text: string }>;
+  /** message item: open content parts (content_index -> kind/text/annotations). */
+  textParts: Array<{
+    contentIndex: number;
+    kind: "output_text" | "refusal";
+    text: string;
+    annotations?: unknown[];
+  }>;
   /** reasoning item: summary parts (summary_index -> text). */
   summaryParts: Map<number, string>;
   /** reasoning item: reasoning-text parts (content_index -> text). */
@@ -76,7 +81,7 @@ export function createResponsesStreamRenderer(
     messageItem = undefined;
     const finalParts = item.textParts.map((p) =>
       p.kind === "output_text"
-        ? { type: "output_text", text: p.text, annotations: [] }
+        ? { type: "output_text", text: p.text, annotations: p.annotations ?? [] }
         : { type: "refusal", refusal: p.text },
     );
     const wire: Record<string, unknown> = {
@@ -465,6 +470,23 @@ export function createResponsesStreamRenderer(
           }
           return;
         }
+        // output_text annotations are part metadata (v0.3 P2-1, review round
+        // 2): attached to the open text part, never a standalone item.
+        case "text_annotation": {
+          if (!messageItem) return;
+          const contentIndex =
+            event.location?.kind === "annotation"
+              ? event.location.contentIndex
+              : undefined;
+          const part =
+            contentIndex !== undefined
+              ? messageItem.textParts.find((p) => p.contentIndex === contentIndex)
+              : messageItem.textParts[messageItem.textParts.length - 1];
+          if (!part) return;
+          part.annotations ??= [];
+          part.annotations.push(event.annotation);
+          return;
+        }
         case "text_end": {
           if (!messageItem) return;
           const part = messageItem.textParts[messageItem.textParts.length - 1];
@@ -494,7 +516,7 @@ export function createResponsesStreamRenderer(
             part:
               event.kind === "refusal"
                 ? { type: "refusal", refusal: part.text }
-                : { type: "output_text", text: part.text, annotations: [] },
+                : { type: "output_text", text: part.text, annotations: part.annotations ?? [] },
           });
           return;
         }

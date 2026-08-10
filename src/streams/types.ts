@@ -37,6 +37,13 @@ export type CanonicalStreamEvent =
   | { type: "text_start"; index: number; kind?: "text" | "refusal"; location?: StreamLocation }
   | { type: "text_delta"; index: number; text: string; kind?: "text" | "refusal"; location?: StreamLocation }
   | { type: "text_end"; index: number; kind?: "text" | "refusal"; location?: StreamLocation }
+  | {
+      type: "text_annotation";
+      index: number;
+      /** Opaque annotation payload (e.g. Responses output_text annotation). */
+      annotation: unknown;
+      location?: StreamLocation;
+    }
   | { type: "tool_start"; index: number; id: string; name: string; kind?: "function" | "custom"; location?: StreamLocation }
   | { type: "tool_arguments_delta"; index: number; partialJson: string; location?: StreamLocation }
   | { type: "tool_end"; index: number; location?: StreamLocation }

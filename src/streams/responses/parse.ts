@@ -14,7 +14,9 @@ import type { CanonicalStreamEvent } from "../types.js";
 import type { SSEFrame } from "../sse-parser.js";
 import type { ProviderProfile } from "../../capabilities/provider-profile.js";
 import type { CanonicalFinishReason } from "../../ir/finish-reason.js";
+import type { CanonicalUsage } from "../../ir/usage.js";
 import type { TranslationWarning } from "../../ir/fidelity.js";
+import { parseUsage } from "../../codecs/openai-responses/usage.js";
 
 type ItemType = "message" | "reasoning" | "function" | "custom";
 
@@ -172,10 +174,17 @@ export function createResponsesStreamParser(
   function terminal(
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
     finishReason: CanonicalFinishReason | undefined,
+    usage?: CanonicalUsage,
   ): void {
     if (messageEnded || errored) return;
     messageEnded = true;
     closeAllItems(controller);
+    // Responses carries usage on the terminal event (§14.3); aggregate it into
+    // a canonical usage event BEFORE message_end so the target renderer never
+    // loses token counts (review round 2).
+    if (usage !== undefined) {
+      enqueue(controller, { type: "usage", usage });
+    }
     enqueue(controller, { type: "message_end", finishReason });
   }
 
@@ -405,6 +414,31 @@ export function createResponsesStreamParser(
         case "response.refusal.done":
           return;
 
+        // output_text.annotations is part metadata (v0.3 P2-1): forwarded as a
+        // canonical text_annotation event so the target renderer can attach it
+        // to the text part — never a standalone part (review round 2).
+        case "response.output_text.annotation.added": {
+          const itemId = typeof data.item_id === "string" ? data.item_id : undefined;
+          const state = itemId ? items.get(itemId) : undefined;
+          if (!state || state.type !== "message") return;
+          const contentIndex = typeof data.content_index === "number" ? data.content_index : 0;
+          if (state.parts.get(contentIndex) !== "output_text") return;
+          const annotationIndex =
+            typeof data.annotation_index === "number" ? data.annotation_index : 0;
+          enqueue(controller, {
+            type: "text_annotation",
+            index: state.outputIndex,
+            annotation: data.annotation,
+            location: {
+              kind: "annotation",
+              outputIndex: state.outputIndex,
+              contentIndex,
+              annotationIndex,
+            },
+          });
+          return;
+        }
+
         case "response.reasoning_summary_part.added": {
           const itemId = typeof data.item_id === "string" ? data.item_id : undefined;
           const state = itemId ? items.get(itemId) : undefined;
@@ -484,11 +518,17 @@ export function createResponsesStreamParser(
         case "response.completed": {
           // Items are removed from the map at output_item.done; the terminal
           // finish reason must not depend on currently-open items (review P0-5).
-          terminal(controller, sawToolCall ? "tool_call" : "end_turn");
+          const response = (data.response ?? {}) as { usage?: unknown };
+          terminal(
+            controller,
+            sawToolCall ? "tool_call" : "end_turn",
+            parseUsage(response.usage),
+          );
           return;
         }
         case "response.incomplete": {
-          terminal(controller, "max_tokens");
+          const response = (data.response ?? {}) as { usage?: unknown };
+          terminal(controller, "max_tokens", parseUsage(response.usage));
           return;
         }
         case "response.failed": {

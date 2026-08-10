@@ -1,17 +1,24 @@
 /**
- * Target Validation Matrix (responses.md §10.1, D-10).
+ * Target-side validation layer (responses.md §10.0/§10.1, D-10).
  *
- * Cross-field combination constraints live here, not scattered across
- * renderers. Every check has a fixed default behavior (reject / degrade +
- * LOSSY warning / drop + warning). This module only *validates*: it never
- * mutates the canonical request; the Fidelity Plan consumes violations and the
- * renderers execute the remediation.
+ * Shared across ALL targets — the frozen seven-stage pipeline is
+ *   Source Parse -> Canonical Validate -> Capability Resolve ->
+ *   Target Validate -> Fidelity Plan -> Target Normalize -> Render.
+ *
+ * This module owns two stages:
+ * - `validateCanonicalRequest`: IR-internal invariants (Canonical Validate),
+ *   independent of the target protocol;
+ * - `validateTargetRequest`: cross-field combination constraints (Target
+ *   Validate), driven by the target ProviderProfile. It only *validates*: it
+ *   never mutates the canonical request; the Fidelity Plan consumes the
+ *   violations and the renderers execute the remediation (review round 2).
  */
-import type { CanonicalRequest } from "../../ir/types.js";
-import type { ProviderProfile } from "../../capabilities/provider-profile.js";
-import type { TranslationPolicies } from "../../ir/policies.js";
-import type { CodecContext } from "../protocol-adapter.js";
-import { resolveDefinition } from "./normalize.js";
+import type { CanonicalRequest } from "../ir/types.js";
+import type { ProviderProfile } from "../capabilities/provider-profile.js";
+import type { TranslationPolicies } from "../ir/policies.js";
+import { validationError } from "../errors.js";
+import type { CodecContext } from "../codecs/protocol-adapter.js";
+import { resolveDefinition } from "../codecs/openai-responses/normalize.js";
 
 export type ViolationKind = "reject" | "degrade";
 
@@ -29,11 +36,49 @@ export interface ValidationViolation {
     dropTruncation?: boolean;
     dropIdentity?: boolean;
     dropEffort?: boolean;
+    /** parallel_tool_calls=true on a serial-only target -> force serial. */
+    forceSerialToolCalls?: boolean;
+    /** structured output (`text.format`) unsupported -> drop it. */
+    dropTextFormat?: boolean;
   };
 }
 
 export interface ValidationResult {
   violations: ValidationViolation[];
+}
+
+/**
+ * Canonical Validate (responses.md §10.0): IR-internal invariants, checked
+ * before any target-specific logic. A function tool call's `argumentsText`
+ * must parse to a JSON object — otherwise the Anthropic renderer would
+ * silently turn broken arguments into `{}` (review round 2, Canonical
+ * Validate gap). Custom (`inputText`) payloads are freeform and never parsed.
+ */
+export function validateCanonicalRequest(
+  canonical: CanonicalRequest,
+): void {
+  for (const message of canonical.messages) {
+    for (const part of message.content) {
+      if (part.type !== "tool_call" || part.kind !== "function") continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(part.argumentsText);
+      } catch {
+        throw validationError(
+          `Function tool call "${part.name}" has arguments that are not valid JSON: cannot be parsed`,
+        );
+      }
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        throw validationError(
+          `Function tool call "${part.name}" arguments must parse to a JSON object`,
+        );
+      }
+    }
+  }
 }
 
 export function validateTargetRequest(
@@ -172,7 +217,9 @@ export function validateTargetRequest(
     });
   }
 
-  // 8. parallel tools requested but target does not support them.
+  // 8. parallel tools requested but target does not support them: degrade to
+  //    serial, and the renderer must actually flip parallel_tool_calls to
+  //    false (review round 2: every degrade needs an executable remediation).
   if (
     canonical.parallelToolCalls === true &&
     caps.parallelTools === false
@@ -183,10 +230,11 @@ export function validateTargetRequest(
         "parallel_tool_calls requested but the target does not support parallel tools; degraded to serial",
       kind: "degrade",
       field: "parallelToolCalls",
+      remediation: { forceSerialToolCalls: true },
     });
   }
 
-  // 9. structured output × capability.
+  // 9. structured output × capability: drop text.format on the wire.
   const textFormat = (canonical.extensions as Record<string, unknown> | undefined)
     ?.responsesTextFormat;
   if (textFormat !== undefined && res?.structuredOutput === false) {
@@ -196,10 +244,14 @@ export function validateTargetRequest(
         "text.format structured output is not supported by the target; dropped",
       kind: "degrade",
       field: "extensions.responsesTextFormat",
+      remediation: { dropTextFormat: true },
     });
   }
 
-  // 10. stateful fields × capability bits.
+  // 10. stateful fields × capability bits. previous_response_id / conversation
+  //     are REAL server-side state dependencies: the target must declare
+  //     conversationState or the request is rejected — never silently turned
+  //     into a stateless request (review round 2, P0).
   const ext = canonical.extensions as Record<string, unknown> | undefined;
   const previousResponseId = ext?.previousResponseId;
   const conversation = ext?.conversation;
@@ -223,6 +275,7 @@ export function validateTargetRequest(
       message: "store=true requires response storage the target does not declare",
       kind: "degrade",
       field: "extensions.store",
+      remediation: { dropStateful: true },
     });
   }
   if (prompt !== undefined && res?.promptTemplates !== true) {
@@ -260,9 +313,13 @@ export function validateTargetRequest(
     });
   }
 
-  // 12. reasoning effort × target thinking capability.
+  // 12. reasoning effort × target thinking capability. OpenAI Chat renders
+  //     reasoning_effort natively (regardless of its declared thinking bit),
+  //     so it must not be flagged for a Chat target (review round 2: the
+  //     shared pipeline must not regress Responses -> Chat reasoning effort).
   if (
     thinking?.effort !== undefined &&
+    target.protocol !== "openai-chat" &&
     !target.capabilities.thinking &&
     caps.thinkingGeneration?.mode !== "adaptive"
   ) {

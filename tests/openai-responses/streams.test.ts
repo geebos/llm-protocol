@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createSSEParser,
+  createCanonicalValidator,
   createResponsesStreamParser,
   createResponsesStreamRenderer,
   type SSEFrame,
@@ -16,11 +17,11 @@ import {
 } from "../../src/streams/index.js";
 import { openaiResponsesDefaultProfile } from "../../src/codecs/openai-responses/index.js";
 import { createSyntheticIdFactory } from "../../src/codecs/openai-responses/ids.js";
-import { validateTargetRequest } from "../../src/codecs/openai-responses/validate.js";
+import { validateTargetRequest } from "../../src/pipeline/target-validation.js";
 import {
   buildFidelityPlan,
   applyFidelityPlan,
-} from "../../src/codecs/openai-responses/fidelity-plan.js";
+} from "../../src/pipeline/fidelity-plan.js";
 import { DEFAULT_POLICIES } from "../../src/ir/policies.js";
 import { anthropicDefaultProfile } from "../../src/codecs/anthropic-messages/index.js";
 import type { CanonicalStreamEvent } from "../../src/streams/types.js";
@@ -578,3 +579,132 @@ describe("responses stream render", () => {
     expect(c.warnings.every((w) => w.fidelity !== undefined)).toBe(true);
   });
 }
+// placeholder
+
+describe("responses stream review round 2", () => {
+  it("aggregates terminal usage into a canonical usage event before message_end (review P0)", async () => {
+    const events = await parseResponses([
+      { type: "response.created", response: { id: "r" } },
+      {
+        type: "response.completed",
+        response: {
+          id: "r",
+          status: "completed",
+          usage: {
+            input_tokens: 100,
+            input_tokens_details: { cached_tokens: 20 },
+            output_tokens: 10,
+            output_tokens_details: { reasoning_tokens: 4 },
+          },
+        },
+      },
+    ]);
+    const usageIdx = events.findIndex((e) => e.type === "usage");
+    const endIdx = events.findIndex((e) => e.type === "message_end");
+    expect(usageIdx).toBeGreaterThan(-1);
+    expect(endIdx).toBeGreaterThan(usageIdx);
+    const usage = events[usageIdx] as Extract<CanonicalStreamEvent, { type: "usage" }>;
+    expect(usage.usage).toMatchObject({
+      inputTokens: 80,
+      outputTokens: 10,
+      cacheReadTokens: 20,
+      reasoningTokens: 4,
+    });
+  });
+
+  it("keeps terminal usage on incomplete too (review P0)", async () => {
+    const events = await parseResponses([
+      { type: "response.created", response: { id: "r" } },
+      {
+        type: "response.incomplete",
+        response: { id: "r", status: "incomplete", usage: { input_tokens: 5, output_tokens: 3 } },
+      },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "usage",
+        usage: expect.objectContaining({ inputTokens: 5, outputTokens: 3 }),
+      }),
+    );
+  });
+
+  it("does not flag a second content part of the same message as duplicate (review P0)", async () => {
+    const events = await collect(
+      bytesStream(
+        sse(
+          { type: "response.created", response: { id: "r" } },
+          { type: "response.output_item.added", output_index: 0, item: { id: "msg_1", type: "message", role: "assistant", content: [] } },
+          { type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "" } },
+          { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "a" },
+          { type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 1, part: { type: "output_text", text: "" } },
+          { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 1, delta: "b" },
+          { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text: "a" },
+          { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: {} },
+          { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 1, text: "b" },
+          { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 1, part: {} },
+          { type: "response.output_item.done", output_index: 0, item: { id: "msg_1", type: "message" } },
+          { type: "response.completed", response: { id: "r", status: "completed" } },
+        ),
+      )
+        .pipeThrough(createSSEParser())
+        .pipeThrough(createResponsesStreamParser(openaiResponsesDefaultProfile))
+        .pipeThrough(createCanonicalValidator()),
+    );
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.filter((e) => e.type === "text_start")).toHaveLength(2);
+    expect(events.filter((e) => e.type === "text_end")).toHaveLength(2);
+  });
+
+  it("forwards output_text.annotation.added as text_annotation (review P2)", async () => {
+    const events = await parseResponses([
+      { type: "response.created", response: { id: "r" } },
+      { type: "response.output_item.added", output_index: 0, item: { id: "msg_1", type: "message", role: "assistant", content: [] } },
+      { type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "" } },
+      { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "x" },
+      {
+        type: "response.output_text.annotation.added",
+        item_id: "msg_1",
+        output_index: 0,
+        content_index: 0,
+        annotation_index: 0,
+        annotation: { type: "url_citation", url: "https://example.com" },
+      },
+      { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text: "x" },
+      { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: {} },
+      { type: "response.output_item.done", output_index: 0, item: { id: "msg_1", type: "message" } },
+      { type: "response.completed", response: { id: "r", status: "completed" } },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "text_annotation",
+        index: 0,
+        annotation: { type: "url_citation", url: "https://example.com" },
+        location: { kind: "annotation", outputIndex: 0, contentIndex: 0, annotationIndex: 0 },
+      }),
+    );
+  });
+
+  it("renders text_annotation into the wire output_text part annotations (review P2)", async () => {
+    const frames = await renderResponses([
+      { type: "message_start", model: "m" },
+      { type: "text_start", index: 0 },
+      { type: "text_delta", index: 0, text: "cited" },
+      {
+        type: "text_annotation",
+        index: 0,
+        annotation: { type: "url_citation", url: "https://e.com" },
+        location: { kind: "annotation", outputIndex: 0, contentIndex: 0, annotationIndex: 0 },
+      },
+      { type: "text_end", index: 0 },
+      { type: "message_end", finishReason: "end_turn" },
+    ]);
+    const done = frames.find((f) => f.type === "response.output_text.done");
+    expect(done?.text).toBe("cited");
+    const partDone = frames.find((f) => f.type === "response.content_part.done");
+    expect(partDone?.part).toMatchObject({
+      type: "output_text",
+      text: "cited",
+      annotations: [{ type: "url_citation", url: "https://e.com" }],
+    });
+  });
+});

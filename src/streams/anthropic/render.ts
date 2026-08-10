@@ -31,6 +31,7 @@ export function createAnthropicStreamRenderer(
   let ended = false;
   let terminal = false;
   let cachedUsage: CanonicalUsage | undefined;
+  let annotationReported = false;
 
   function outputIndex(kind: BlockKind, sourceIndex: number): number {
     const key = `${kind}:${sourceIndex}`;
@@ -97,6 +98,22 @@ export function createAnthropicStreamRenderer(
             type: "content_block_stop",
             index,
           });
+          return;
+        }
+        case "text_annotation": {
+          // Anthropic citations have a provider-specific structure; generic
+          // annotations are dropped with an explicit warning, never silently
+          // (v0.3 P2-1).
+          if (!annotationReported) {
+            annotationReported = true;
+            report?.({
+              code: "annotations_dropped",
+              message:
+                "Text annotations (citations) dropped because the target cannot represent the source annotation structure",
+              fidelity: "LOSSY",
+              field: "content.text.annotations",
+            });
+          }
           return;
         }
 

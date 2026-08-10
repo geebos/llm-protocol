@@ -11,7 +11,7 @@
  *   target SSE -> SSE frames -> canonical events -> source SSE
  * with backpressure (Web Streams) and cancellation propagation (SR-007/008).
  */
-import { TranslationError, validationError } from "../errors.js";
+import { TranslationError, unsupportedError, validationError } from "../errors.js";
 import type { ApiFormat } from "../formats.js";
 import { getAdapter } from "../codecs/registry.js";
 import {
@@ -25,6 +25,15 @@ import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
 import { resolveCacheAffinity, DEFAULT_CACHE_RESOLVERS } from "../cache/resolver.js";
 import { applyOpenAIChatCacheAffinity } from "../cache/openai-chat/apply-cache-affinity.js";
+import {
+  validateCanonicalRequest,
+  validateTargetRequest,
+} from "./target-validation.js";
+import {
+  buildFidelityPlan,
+  applyFidelityPlan,
+  collectRemediations,
+} from "./fidelity-plan.js";
 
 async function readErrorPayload(response: Response): Promise<unknown> {
   try {
@@ -115,6 +124,15 @@ export function translate<
     const streaming = source.request.detectStreaming(sourcePayload);
     const canonicalRequest = source.request.parseRequest(sourcePayload, ctx);
 
+    // Frozen seven-stage pipeline (responses.md §10.0, review round 2):
+    // Source Parse -> Canonical Validate -> Capability Resolve -> Target
+    // Validate -> Fidelity Plan -> Target Normalize -> Render. Canonical
+    // Validate guards IR invariants (function tool args must parse); Target
+    // Validate + Fidelity Plan run for EVERY target, so stateful/unsupported
+    // constructs are rejected or degraded with executable remediations even
+    // when the target renderer is not the Responses adapter.
+    validateCanonicalRequest(canonicalRequest);
+
     // Prompt-cache affinity (Anthropic cache_control -> OpenAI Chat
     // prompt_cache_key). Derive the identity from the *source* body and the
     // raw request, never by scanning the converted target request. Only
@@ -135,10 +153,37 @@ export function translate<
       request.headers,
       credential,
     );
+
+    // Target Validate + Fidelity Plan: shared, protocol-agnostic. Blocking
+    // (UNSUPPORTED) decisions throw before any render/remediation; the rest
+    // become warnings plus machine-readable remediations the renderer must
+    // execute so the wire body matches the trace (review round 2).
+    const validation = validateTargetRequest(
+      canonicalRequest,
+      target.profile,
+      ctx,
+      options.policies ?? DEFAULT_POLICIES,
+    );
+    const plan = buildFidelityPlan(
+      canonicalRequest,
+      target.profile,
+      validation,
+      ctx,
+      options.policies ?? DEFAULT_POLICIES,
+    );
+    if (plan.blocking) {
+      const first = plan.entries.find((e) => e.fidelity === "UNSUPPORTED");
+      throw unsupportedError(
+        `Target validation rejected the request: ${first?.code ?? "unsupported"} — ${first?.message ?? "unsupported construct"}`,
+      );
+    }
+    applyFidelityPlan(plan, ctx);
+    const remediations = collectRemediations(plan);
     const targetPayload = target.request.renderRequest(
       canonicalRequest,
       streaming,
       ctx,
+      remediations,
     );
     const cacheApplication = cacheEnabled
       ? applyOpenAIChatCacheAffinity(
