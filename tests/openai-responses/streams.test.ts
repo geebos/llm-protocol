@@ -13,9 +13,23 @@ import {
   createResponsesStreamRenderer,
   type SSEFrame,
   type CanonicalStreamEvent,
-} from "../src/streams/index.js";
-import { openaiResponsesDefaultProfile } from "../src/codecs/openai-responses/index.js";
-import type { TranslationWarning } from "../src/ir/fidelity.js";
+} from "../../src/streams/index.js";
+import { openaiResponsesDefaultProfile } from "../../src/codecs/openai-responses/index.js";
+import { createSyntheticIdFactory } from "../../src/codecs/openai-responses/ids.js";
+import { validateTargetRequest } from "../../src/codecs/openai-responses/validate.js";
+import {
+  buildFidelityPlan,
+  applyFidelityPlan,
+} from "../../src/codecs/openai-responses/fidelity-plan.js";
+import { DEFAULT_POLICIES } from "../../src/ir/policies.js";
+import { anthropicDefaultProfile } from "../../src/codecs/anthropic-messages/index.js";
+import type { CanonicalStreamEvent } from "../../src/streams/types.js";
+import type { TranslationWarning } from "../../src/ir/fidelity.js";
+import { newCodecContext } from "../../src/codecs/protocol-adapter.js";
+
+function ctx() {
+  return newCodecContext();
+}
 
 async function collect<T>(stream: ReadableStream<T>): Promise<T[]> {
   const out: T[] = [];
@@ -475,3 +489,92 @@ describe("responses stream render", () => {
     expect(frames.some((f) => f.type === "response.refusal.delta")).toBe(true);
   });
 });
+// placeholder
+
+{
+  it("lazily opens text on the first delta when content_part.added is skipped", async () => {
+    const events = await parseResponses([
+      { type: "response.created", response: { id: "r" } },
+      { type: "response.output_item.added", output_index: 0, item: { id: "msg_1", type: "message", role: "assistant", content: [] } },
+      { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" },
+      { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text: "hi" },
+      { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: {} },
+      { type: "response.output_item.done", output_index: 0, item: { id: "msg_1", type: "message" } },
+      { type: "response.completed", response: { id: "r", status: "completed", output: [] } },
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "text_start", index: 0 }));
+  });
+
+  it("handles response.cancelled per profile declaration", async () => {
+    // default profile declares cancelled -> terminal error event
+    const declared = await parseResponses([
+      { type: "response.created", response: { id: "r" } },
+      { type: "response.cancelled", response: { id: "r", status: "cancelled" } },
+    ]);
+    expect(declared.some((e) => e.type === "error")).toBe(true);
+  });
+
+  it("renders response_state continuations as additive events", async () => {
+    const frames = await renderResponses([
+      { type: "message_start", model: "m" },
+      { type: "response_state", state: "queued" },
+      { type: "message_end", finishReason: "end_turn" },
+    ]);
+    const types = frames.map((f) => f.type);
+    expect(types).toContain("response.queued");
+    expect(types.filter((t) => t === "response.created")).toHaveLength(1);
+  });
+
+  it("renders reasoning_end with explicit part indices", async () => {
+    const frames = await renderResponses([
+      { type: "message_start", model: "m" },
+      { type: "reasoning_start", index: 0 },
+      { type: "reasoning_delta", index: 0, text: "a", kind: "summary", summaryIndex: 0 },
+      { type: "reasoning_delta", index: 0, text: "b", kind: "summary", summaryIndex: 1 },
+      { type: "reasoning_end", index: 0, metadata: { summaryIndex: 0 } },
+      { type: "reasoning_end", index: 0, metadata: { summaryIndex: 1 } },
+      { type: "reasoning_end", index: 0 },
+      { type: "message_end", finishReason: "end_turn" },
+    ]);
+    const done = frames.filter((f) => f.type === "response.reasoning_summary_part.done");
+    expect(done).toHaveLength(2);
+  });
+
+  it("ignores unknown canonical events and renders error as response.failed", async () => {
+    const frames = await renderResponses([
+      { type: "message_start", model: "m" },
+      { type: "unknown", sourceType: "future.event", raw: {} } as CanonicalStreamEvent,
+      { type: "error", error: { kind: "upstream", message: "boom" } },
+    ]);
+    const types = frames.map((f) => f.type);
+    expect(types).toContain("response.failed");
+    expect((frames.find((f) => f.type === "response.failed")!.response as Record<string, unknown>).status).toBe("failed");
+  });
+
+  it("synthetic id factory keeps prefixes and uniqueness", () => {
+    const ids = createSyntheticIdFactory();
+    const items = ["message", "reasoning", "function", "custom"] as const;
+    for (const k of items) {
+      expect(ids.itemId(k).startsWith(k === "message" ? "msg_" : k === "reasoning" ? "rs_" : k === "function" ? "fc_" : "ctc_")).toBe(true);
+    }
+    expect(ids.responseId().startsWith("resp_")).toBe(true);
+    expect(ids.callId().startsWith("call_")).toBe(true);
+    const a = ids.itemId("message");
+    const b = ids.itemId("message");
+    expect(a).not.toBe(b);
+  });
+
+  it("applyFidelityPlan surfaces entries as warnings (FR-008)", () => {
+    const c = ctx();
+    const ir = {
+      model: "m",
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }],
+      extensions: { truncation: "auto" as const },
+    };
+    const v = validateTargetRequest(ir, anthropicDefaultProfile, c, DEFAULT_POLICIES);
+    const plan = buildFidelityPlan(ir, anthropicDefaultProfile, v, c, DEFAULT_POLICIES);
+    applyFidelityPlan(plan, c);
+    expect(c.warnings.length).toBeGreaterThan(0);
+    expect(c.warnings.every((w) => w.fidelity !== undefined)).toBe(true);
+  });
+}
