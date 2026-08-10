@@ -79,10 +79,19 @@ export class ResponseEnvelopeBuilder {
     this.state.output.sort((a, b) => a.outputIndex - b.outputIndex);
   }
 
-  /** `output_item.done`: completed, or incomplete when truncated. */
-  completeItem(itemId: string, truncated = false): void {
+  /**
+   * `output_item.done`: completed, or incomplete when truncated. Accepts the
+   * final wire payload so the terminal `output[]` matches the done item
+   * exactly (review P0-3, §13.1.2 rule 3).
+   */
+  completeItem(
+    itemId: string,
+    options?: { truncated?: boolean; payload?: unknown },
+  ): void {
     const item = this.state.output.find((o) => o.id === itemId);
-    if (item) item.status = truncated ? "incomplete" : "completed";
+    if (!item) return;
+    item.status = options?.truncated ? "incomplete" : "completed";
+    if (options?.payload !== undefined) item.payload = options.payload;
   }
 
   setStatus(status: ResponsesStatus, details?: { error?: unknown; incompleteDetails?: unknown }): void {

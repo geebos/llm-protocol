@@ -304,8 +304,12 @@ describe("responses e2e: streaming", () => {
       input_tokens: 10,
       output_tokens: 7,
     });
-    const output = (completed[0].response as { output?: unknown[] }).output ?? [];
+    // review P0-3: the terminal output[] carries the FINAL text payload, not
+    // the empty content captured at output_item.added.
+    const output = (completed[0].response as { output?: Array<Record<string, unknown>> }).output ?? [];
     expect(output[0]).toMatchObject({ type: "message", status: "completed" });
+    const content = output[0].content as Array<Record<string, unknown>>;
+    expect(content[0]).toMatchObject({ type: "output_text", text: "Hello Responses" });
   });
 
   it("Responses upstream SSE -> Anthropic client SSE: named events + terminal", async () => {

@@ -10,6 +10,10 @@ import { getAdapter } from "../src/codecs/registry.js";
 import { newCodecContext } from "../src/codecs/protocol-adapter.js";
 import type { CodecContext } from "../src/codecs/protocol-adapter.js";
 import { createSyntheticIdFactory } from "../src/codecs/openai-responses/ids.js";
+import {
+  createOpenAiResponsesAdapter,
+  openaiResponsesDefaultProfile,
+} from "../src/codecs/openai-responses/index.js";
 import { validateTargetRequest } from "../src/codecs/openai-responses/validate.js";
 import { buildFidelityPlan, applyFidelityPlan } from "../src/codecs/openai-responses/fidelity-plan.js";
 import { DEFAULT_POLICIES } from "../src/ir/policies.js";
@@ -72,6 +76,17 @@ describe("responses request parse", () => {
       c,
     );
     expect(c.warnings.map((w) => w.code)).toContain("authority_order_normalized");
+  });
+
+  it("keeps top-level instructions with a string input (review P0-1)", () => {
+    const c = ctx();
+    const ir = responses.request.parseRequest(
+      { model: "m", instructions: "Be concise.", input: "hello" },
+      c,
+    );
+    expect(ir.system?.map((p) => (p.type === "text" ? p.text : ""))).toEqual(["Be concise."]);
+    expect(ir.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
+    expect(c.warnings).toEqual([]);
   });
 
   it("pairs function calls and outputs by call_id, keeping source order", () => {
@@ -630,6 +645,24 @@ describe("target validation & fidelity plan", () => {
     expect(rem?.remediation?.setToolChoiceAuto).toBe(true);
   });
 
+  it("does NOT relax a forced tool_choice on a Responses target (review P1-7)", () => {
+    // The Anthropic extended-thinking restriction is Anthropic-specific;
+    // Responses reasoning + forced tool_choice are compatible and must not be
+    // silently downgraded to auto.
+    const c = ctx();
+    const ir = {
+      ...base,
+      thinking: { mode: "adaptive" as const, effort: "high" as const },
+      tools: [{ name: "get_weather", inputSchema: { type: "object" } }],
+      toolChoice: { type: "required" as const },
+    };
+    const v = validateTargetRequest(ir, responses.profile, c, DEFAULT_POLICIES);
+    expect(v.violations.map((x) => x.code)).not.toContain("thinking_tool_choice_limited");
+    const body = responses.request.renderRequest(ir, false, c) as Record<string, unknown>;
+    expect(body.tool_choice).toBe("required");
+    expect(body.reasoning).toEqual({ effort: "high" });
+  });
+
   it("rejects truncation=auto on a target without context truncation (P1-7)", () => {
     const c = ctx();
     const ir = { ...base, extensions: { truncation: "auto" } };
@@ -679,5 +712,44 @@ describe("target validation & fidelity plan", () => {
     const v = validateTargetRequest(ir, responses.profile, c, DEFAULT_POLICIES);
     const plan = buildFidelityPlan(ir, responses.profile, v, c, DEFAULT_POLICIES);
     expect(plan.includes.effective).toEqual(["citations", "reasoning.encrypted_content"]);
+  });
+
+  it("blocks a request whose Fidelity Plan is UNSUPPORTED, not just warns (review P0-2)", () => {
+    // A Responses adapter whose profile does not declare conversation state
+    // must REJECT previous_response_id instead of degrading silently.
+    const adapter = createOpenAiResponsesAdapter({
+      ...openaiResponsesDefaultProfile,
+      capabilities: {
+        ...openaiResponsesDefaultProfile.capabilities,
+        responses: {
+          ...openaiResponsesDefaultProfile.capabilities.responses,
+          conversationState: false,
+        },
+      },
+    });
+    const c = ctx();
+    const ir = {
+      model: "m",
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }],
+      extensions: { previousResponseId: "resp_x" },
+    };
+    expect(() => adapter.request.renderRequest(ir, false, c)).toThrow(/conversation_state_unsupported/);
+    // truncation=auto is UNSUPPORTED when the profile does not declare it.
+    const adapter2 = createOpenAiResponsesAdapter({
+      ...openaiResponsesDefaultProfile,
+      capabilities: {
+        ...openaiResponsesDefaultProfile.capabilities,
+        responses: {
+          ...openaiResponsesDefaultProfile.capabilities.responses,
+          contextTruncation: { auto: false },
+        },
+      },
+    });
+    const ir2 = {
+      model: "m",
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }],
+      extensions: { truncation: "auto" },
+    };
+    expect(() => adapter2.request.renderRequest(ir2, false, c)).toThrow(/context_truncation_unsupported/);
   });
 });

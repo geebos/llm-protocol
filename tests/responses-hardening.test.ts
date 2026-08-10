@@ -471,7 +471,7 @@ describe("response envelope builder", () => {
     env.addItem({ id: "msg_1", type: "message", status: "in_progress", outputIndex: 0, payload: { role: "assistant", content: [] } });
     env.addItem({ id: "msg_2", type: "message", status: "in_progress", outputIndex: 1, payload: {} });
     env.completeItem("msg_1");
-    env.completeItem("msg_2", true);
+    env.completeItem("msg_2", { truncated: true });
     env.setStatus("completed");
     const snap = env.snapshot();
     expect(snap.createdAt).toBe(1700000000);

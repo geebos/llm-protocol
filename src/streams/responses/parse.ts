@@ -44,6 +44,8 @@ export function createResponsesStreamParser(
   const items = new Map<string, ItemState>();
   let responseId: string | undefined;
   let model: string | undefined;
+  /** Sticky: any function/custom tool item seen this stream (review P0-5). */
+  let sawToolCall = false;
 
   function enqueue(
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
@@ -140,20 +142,18 @@ export function createResponsesStreamParser(
       }
       state.parts.clear();
     } else if (state.type === "reasoning") {
-      for (const summaryIndex of state.summaryParts) {
-        enqueue(controller, {
-          type: "reasoning_end",
-          index: state.outputIndex,
-          location: { kind: "summary", outputIndex: state.outputIndex, summaryIndex },
-        });
-      }
-      for (const contentIndex of state.reasoningParts) {
-        enqueue(controller, {
-          type: "reasoning_end",
-          index: state.outputIndex,
-          location: { kind: "content", outputIndex: state.outputIndex, contentIndex },
-        });
-      }
+      // One reasoning_start must close with exactly one reasoning_end (SR-002
+      // start/end pairing, review P0-4): part-level done events already
+      // tracked completion; the item close emits the single end.
+      enqueue(controller, {
+        type: "reasoning_end",
+        index: state.outputIndex,
+        metadata: {
+          summaryIndices: [...state.summaryParts],
+          contentIndices: [...state.reasoningParts],
+        },
+        location: { kind: "output", outputIndex: state.outputIndex },
+      });
       state.summaryParts.clear();
       state.reasoningParts.clear();
     }
@@ -238,6 +238,7 @@ export function createResponsesStreamParser(
           }
           // function_call / custom_tool_call
           state.started = true;
+          sawToolCall = true;
           const item = data.item as {
             name?: unknown;
             call_id?: unknown;
@@ -281,26 +282,20 @@ export function createResponsesStreamParser(
           if (!state) return;
           if (state.type === "reasoning") {
             if (state.started && !state.ended) {
-              for (const summaryIndex of state.summaryParts) {
-                enqueue(controller, {
-                  type: "reasoning_end",
-                  index: state.outputIndex,
-                  metadata: { summaryIndex },
-                  location: { kind: "summary", outputIndex: state.outputIndex, summaryIndex },
-                });
-              }
-              for (const contentIndex of state.reasoningParts) {
-                enqueue(controller, {
-                  type: "reasoning_end",
-                  index: state.outputIndex,
-                  metadata: { contentIndex },
-                  location: { kind: "content", outputIndex: state.outputIndex, contentIndex },
-                });
-              }
-              state.summaryParts.clear();
-              state.reasoningParts.clear();
+              // Item-level close: one reasoning_start -> one reasoning_end
+              // (review P0-4). Part-level done events already closed the
+              // summary/text parts; this end closes the reasoning item.
               state.ended = true;
               items.delete(itemId!);
+              enqueue(controller, {
+                type: "reasoning_end",
+                index: state.outputIndex,
+                metadata: {
+                  summaryIndices: [...state.summaryParts],
+                  contentIndices: [...state.reasoningParts],
+                },
+                location: { kind: "output", outputIndex: state.outputIndex },
+              });
             }
             return;
           }
@@ -487,7 +482,9 @@ export function createResponsesStreamParser(
           return;
 
         case "response.completed": {
-          terminal(controller, hasToolItems(items) ? "tool_call" : "end_turn");
+          // Items are removed from the map at output_item.done; the terminal
+          // finish reason must not depend on currently-open items (review P0-5).
+          terminal(controller, sawToolCall ? "tool_call" : "end_turn");
           return;
         }
         case "response.incomplete": {
@@ -557,11 +554,4 @@ export function createResponsesStreamParser(
       terminal(controller, undefined);
     },
   });
-}
-
-function hasToolItems(items: Map<string, ItemState>): boolean {
-  for (const state of items.values()) {
-    if (state.type === "function" || state.type === "custom") return true;
-  }
-  return false;
 }

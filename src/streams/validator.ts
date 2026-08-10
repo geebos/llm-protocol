@@ -94,6 +94,17 @@ export class StreamValidator {
         if (this.messageEnded) {
           return { type: "error", error: protocolError("duplicate message_end") };
         }
+        // SR-002: every start must close before the terminal transition; a
+        // leak here silently corrupts downstream renderers (review P0-4).
+        {
+          const unclosed = [...this.blocks.keys()].find((k) => !this.ended.has(k));
+          if (unclosed !== undefined) {
+            return {
+              type: "error",
+              error: protocolError(`message_end with unclosed block ${unclosed}`),
+            };
+          }
+        }
         this.messageEnded = true;
         this.terminal = true;
         return event;

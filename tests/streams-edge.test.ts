@@ -106,6 +106,32 @@ describe("canonical validator invariants (SR-002, 7.2)", () => {
     expect(out[5].type).toBe("error"); // event after message_end
   });
 
+  it("rejects message_end with an unclosed block (review P0-4)", async () => {
+    const events = await validate([
+      { type: "message_start", id: "m" },
+      { type: "reasoning_start", index: 0 },
+      // reasoning_end is missing: the terminal must not pass silently
+      { type: "message_end", finishReason: "end_turn" },
+    ]);
+    const err = events.find((e) => e.type === "error");
+    expect(err).toBeDefined();
+    if (err && err.type === "error") {
+      expect(err.error.message).toContain("unclosed block");
+    }
+  });
+
+  it("passes a fully closed reasoning block through unchanged", async () => {
+    const events = await validate([
+      { type: "message_start", id: "m" },
+      { type: "reasoning_start", index: 0 },
+      { type: "reasoning_delta", index: 0, text: "deep" },
+      { type: "reasoning_end", index: 0 },
+      { type: "message_end", finishReason: "end_turn" },
+    ]);
+    expect(events.every((e) => e.type !== "error")).toBe(true);
+    expect(events[events.length - 1]).toMatchObject({ type: "message_end" });
+  });
+
   it("passes through a valid stream unchanged", async () => {
     const events: CanonicalStreamEvent[] = [
       { type: "message_start" },

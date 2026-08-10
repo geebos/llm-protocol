@@ -50,11 +50,15 @@ export function validateTargetRequest(
   const gen = canonical.generation;
   const thinking = canonical.thinking;
 
-  // 1. thinking × toolChoice: extended thinking only tolerates auto/none.
+  // 1. thinking × toolChoice: Anthropic extended thinking only tolerates
+  //    auto/none. This is an Anthropic-specific constraint (review P1-7):
+  //    Responses reasoning + tool_choice are compatible, so the rule must not
+  //    silently relax a forced tool_choice on a Responses target.
   const thinkingActive =
     thinking !== undefined &&
     (thinking.mode === "enabled" || thinking.mode === "adaptive");
   if (
+    target.protocol === "anthropic-messages" &&
     thinkingActive &&
     (toolChoice?.type === "required" || toolChoice?.type === "tool")
   ) {
@@ -68,8 +72,10 @@ export function validateTargetRequest(
     });
   }
 
-  // 2. thinking × maxTokens: budget must stay below max_tokens.
+  // 2. thinking × maxTokens: Anthropic budget must stay below max_tokens.
+  //    Anthropic-specific (Responses has no budget concept).
   if (
+    target.protocol === "anthropic-messages" &&
     thinkingActive &&
     thinking.mode === "enabled" &&
     thinking.budgetTokens !== undefined &&

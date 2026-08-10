@@ -158,6 +158,10 @@ describe("responses stream parse", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "tool_arguments_delta", index: 0, partialJson: "{\"city\":" }));
     expect(events).toContainEqual(expect.objectContaining({ type: "tool_end", index: 0 }));
     expect(events.filter((e) => e.type === "message_end")).toHaveLength(1);
+    // review P0-5: tool items are removed from the map at done, but the
+    // terminal finish reason must stay tool_call (sticky sawToolCall).
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ type: "message_end", finishReason: "tool_call" });
   });
 
   it("parses custom_tool_call items with kind=custom (P0-1)", async () => {
@@ -209,6 +213,10 @@ describe("responses stream parse", () => {
     expect(events).toContainEqual(
       expect.objectContaining({ type: "reasoning_delta", kind: "text", text: "deep" }),
     );
+    // review P0-4: one reasoning_start closes with exactly one reasoning_end,
+    // even though summary/text part done events preceded the item close.
+    expect(events.filter((e) => e.type === "reasoning_end")).toHaveLength(1);
+    expect(events[events.length - 1]).toMatchObject({ type: "message_end" });
   });
 
   it("selects terminal events: completed/incomplete/failed exactly once (P0-1)", async () => {
@@ -295,10 +303,62 @@ describe("responses stream render", () => {
     expect(types).toContain("response.output_item.done");
     const delta = frames.find((f) => f.type === "response.output_text.delta");
     expect(delta?.delta).toBe("Hello");
-    // envelope snapshot on the terminal event carries the item (P0-3)
+    // review P0-3: the terminal envelope output[] must carry the FINAL payload,
+    // not the empty part from output_item.added.
     const completed = frames.find((f) => f.type === "response.completed");
     const output = completed?.response?.output as Array<Record<string, unknown>> | undefined;
-    expect(output?.[0]).toMatchObject({ type: "message", status: "completed" });
+    expect(output?.[0]).toMatchObject({ type: "message", status: "completed", role: "assistant" });
+    const doneItem = frames.find((f) => f.type === "response.output_item.done");
+    const doneContent = (doneItem?.item as { content?: unknown[] })?.content ?? [];
+    const terminalContent = (output?.[0]?.content as unknown[]) ?? [];
+    // terminal output[] matches the done item exactly (§13.1.2 rule 3)
+    expect(terminalContent).toEqual(doneContent);
+    expect(terminalContent[0]).toMatchObject({ type: "output_text", text: "Hello" });
+  });
+
+  it("does not duplicate queued/in_progress on a Responses round-trip (P1-6)", async () => {
+    // parse a Responses stream -> canonical, then render canonical -> SSE:
+    // the created/queued/in_progress lifecycle appears exactly once.
+    const upstream = await parseResponses([
+      { type: "response.created", response: { id: "r", status: "queued" } },
+      { type: "response.queued", response: { id: "r", status: "queued" } },
+      { type: "response.in_progress", response: { id: "r", status: "in_progress" } },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { id: "msg_1", type: "message", role: "assistant", content: [] },
+      },
+      {
+        type: "response.content_part.added",
+        item_id: "msg_1",
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: "" },
+      },
+      { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "hi" },
+      { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text: "hi" },
+      { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: {} },
+      { type: "response.output_item.done", output_index: 0, item: { id: "msg_1", type: "message" } },
+      { type: "response.completed", response: { id: "r", status: "completed", output: [] } },
+    ]);
+    const frames = await renderResponses(upstream);
+    const types = frames.map((f) => f.type);
+    expect(types.filter((t) => t === "response.created")).toHaveLength(1);
+    expect(types.filter((t) => t === "response.queued")).toHaveLength(1);
+    expect(types.filter((t) => t === "response.in_progress")).toHaveLength(1);
+    // lifecycle order preserved: created -> queued -> in_progress
+    const lifecycle = types.filter((t) =>
+      ["response.created", "response.queued", "response.in_progress"].includes(t),
+    );
+    expect(lifecycle).toEqual(["response.created", "response.queued", "response.in_progress"]);
+    // exactly one terminal
+    expect(types.filter((t) => t === "response.completed")).toHaveLength(1);
+    // text survives the round-trip with the final payload
+    const doneItem = frames.find((f) => f.type === "response.output_item.done");
+    expect((doneItem?.item as { content?: unknown[] })?.content?.[0]).toMatchObject({
+      type: "output_text",
+      text: "hi",
+    });
   });
 
   it("renders tool events with kind-specific deltas (P0-1)", async () => {

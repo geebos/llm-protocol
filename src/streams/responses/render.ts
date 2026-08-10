@@ -50,7 +50,9 @@ export function createResponsesStreamRenderer(
   let messageStarted = false;
   let terminal = false;
   let ended = false;
-  let lifecycleSent = false;
+  let createdSent = false;
+  let queuedSent = false;
+  let inProgressSent = false;
   let messageItem: OpenItem | undefined;
   let nextContentIndex = 0;
   const toolItems = new Map<number, OpenItem>();
@@ -72,19 +74,20 @@ export function createResponsesStreamRenderer(
     if (!messageItem) return;
     const item = messageItem;
     messageItem = undefined;
+    const finalParts = item.textParts.map((p) =>
+      p.kind === "output_text"
+        ? { type: "output_text", text: p.text, annotations: [] }
+        : { type: "refusal", refusal: p.text },
+    );
     const wire: Record<string, unknown> = {
       id: item.itemId,
       type: "message",
       status: "completed",
       role: "assistant",
-      content: item.textParts.map((p) =>
-        p.kind === "output_text"
-          ? { type: "output_text", text: p.text, annotations: [] }
-          : { type: "refusal", refusal: p.text },
-      ),
+      content: finalParts,
     };
     send(controller, { type: "response.output_item.done", output_index: item.outputIndex, item: wire });
-    envelope?.completeItem(item.itemId);
+    envelope?.completeItem(item.itemId, { payload: { role: "assistant", content: finalParts } });
   }
 
   function flushToolItem(
@@ -93,6 +96,7 @@ export function createResponsesStreamRenderer(
   ): void {
     toolItems.delete(item.outputIndex);
     if (item.toolKind === "custom") {
+      const payload = { name: item.name, call_id: item.callId, input: item.args ?? "" };
       send(controller, {
         type: "response.custom_tool_call_input.done",
         item_id: item.itemId,
@@ -102,16 +106,11 @@ export function createResponsesStreamRenderer(
       send(controller, {
         type: "response.output_item.done",
         output_index: item.outputIndex,
-        item: {
-          id: item.itemId,
-          type: "custom_tool_call",
-          status: "completed",
-          name: item.name,
-          call_id: item.callId,
-          input: item.args ?? "",
-        },
+        item: { id: item.itemId, type: "custom_tool_call", status: "completed", ...payload },
       });
+      envelope?.completeItem(item.itemId, { payload });
     } else {
+      const payload = { name: item.name, call_id: item.callId, arguments: item.args ?? "" };
       send(controller, {
         type: "response.function_call_arguments.done",
         item_id: item.itemId,
@@ -121,17 +120,10 @@ export function createResponsesStreamRenderer(
       send(controller, {
         type: "response.output_item.done",
         output_index: item.outputIndex,
-        item: {
-          id: item.itemId,
-          type: "function_call",
-          status: "completed",
-          name: item.name,
-          call_id: item.callId,
-          arguments: item.args ?? "",
-        },
+        item: { id: item.itemId, type: "function_call", status: "completed", ...payload },
       });
+      envelope?.completeItem(item.itemId, { payload });
     }
-    envelope?.completeItem(item.itemId);
   }
 
   function flushReasoningItem(
@@ -145,6 +137,7 @@ export function createResponsesStreamRenderer(
     const content = [...item.reasoningParts.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([, text]) => ({ type: "reasoning_text", text }));
+    const payload = { summary, content };
     send(controller, {
       type: "response.output_item.done",
       output_index: item.outputIndex,
@@ -152,11 +145,10 @@ export function createResponsesStreamRenderer(
         id: item.itemId,
         type: "reasoning",
         status: "completed",
-        summary,
-        content,
+        ...payload,
       },
     });
-    envelope?.completeItem(item.itemId);
+    envelope?.completeItem(item.itemId, { payload });
   }
 
   function flushAllItems(
@@ -177,23 +169,55 @@ export function createResponsesStreamRenderer(
     return envelope;
   }
 
-  function sendLifecycle(
+  function sendCreated(
     controller: TransformStreamDefaultController<Uint8Array>,
   ): void {
-    if (lifecycleSent) return;
-    lifecycleSent = true;
+    if (createdSent) return;
+    createdSent = true;
     const env = ensureEnvelope();
     env.setStatus("queued");
     send(controller, { type: "response.created", response: envelopeToWire(env.snapshot()) });
+  }
+
+  function sendQueued(
+    controller: TransformStreamDefaultController<Uint8Array>,
+  ): void {
+    if (queuedSent) return;
     // queued only when the profile declares the SSE event (v0.4 P1-9).
-    if (profile.capabilities.responses?.terminalEvents?.queued) {
-      send(controller, {
-        type: "response.queued",
-        response: envelopeToWire(env.snapshot()),
-      });
+    if (!profile.capabilities.responses?.terminalEvents?.queued) {
+      queuedSent = true; // consumed silently: the profile has no queued event
+      return;
     }
+    queuedSent = true;
+    send(controller, {
+      type: "response.queued",
+      response: envelopeToWire(ensureEnvelope().snapshot()),
+    });
+  }
+
+  function sendInProgress(
+    controller: TransformStreamDefaultController<Uint8Array>,
+  ): void {
+    if (inProgressSent) return;
+    inProgressSent = true;
+    const env = ensureEnvelope();
     env.setStatus("in_progress");
     send(controller, { type: "response.in_progress", response: envelopeToWire(env.snapshot()) });
+  }
+
+  /**
+   * Synthesize the missing lifecycle prefix before the first business output
+   * event or the terminal event (review P1-6). `message_start` only emits
+   * `response.created`; `queued`/`in_progress` come from explicit
+   * `response_state` events or are synthesized exactly once here — never
+   * duplicated on a Responses -> IR -> Responses round-trip.
+   */
+  function ensureLifecycle(
+    controller: TransformStreamDefaultController<Uint8Array>,
+  ): void {
+    sendCreated(controller);
+    sendQueued(controller);
+    sendInProgress(controller);
   }
 
   function openMessageItem(
@@ -349,6 +373,7 @@ export function createResponsesStreamRenderer(
     if (terminal || ended) return;
     terminal = true;
     ended = true;
+    ensureLifecycle(controller);
     flushAllItems(controller);
     const env = ensureEnvelope();
     if (cachedUsage) env.setUsage(cachedUsage);
@@ -378,19 +403,24 @@ export function createResponsesStreamRenderer(
           const env = ensureEnvelope();
           if (event.id) env.setId(event.id);
           if (event.model) env.setModel(event.model);
-          sendLifecycle(controller);
+          // Only `created` here; queued/in_progress are synthesized lazily or
+          // come from explicit response_state events (review P1-6).
+          sendCreated(controller);
           return;
         }
 
         case "response_state": {
-          if (!lifecycleSent) sendLifecycle(controller);
-          const env = ensureEnvelope();
-          if (event.state === "in_progress") env.setStatus("in_progress");
-          send(controller, { type: `response.${event.state}`, response: envelopeToWire(env.snapshot()) });
+          // Additive lifecycle continuation (v0.5 P1-1). Each state is emitted
+          // at most once, so a parsed created/queued/in_progress sequence does
+          // not double-emit when rendered back.
+          sendCreated(controller);
+          if (event.state === "queued") sendQueued(controller);
+          else if (event.state === "in_progress") sendInProgress(controller);
           return;
         }
 
         case "text_start": {
+          ensureLifecycle(controller);
           const item = openMessageItem(controller, event.kind ?? "text");
           const contentIndex = item.textParts.length;
           item.textParts.push({
@@ -470,6 +500,7 @@ export function createResponsesStreamRenderer(
         }
 
         case "tool_start": {
+          ensureLifecycle(controller);
           openToolItem(controller, event.index, event.id, event.name, event.kind ?? "function");
           return;
         }
@@ -501,6 +532,7 @@ export function createResponsesStreamRenderer(
         }
 
         case "reasoning_start": {
+          ensureLifecycle(controller);
           openReasoningItem(controller, event.index);
           return;
         }
@@ -652,6 +684,7 @@ export function createResponsesStreamRenderer(
           if (ended) return;
           terminal = true;
           ended = true;
+          ensureLifecycle(controller);
           flushAllItems(controller);
           const env = ensureEnvelope();
           env.setStatus("failed", { error: { message: event.error.message } });

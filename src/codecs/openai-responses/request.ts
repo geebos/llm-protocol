@@ -244,6 +244,15 @@ export function createOpenAiResponsesRequestCodec(
       // Target Validation + Fidelity Plan run before the IR is touched (§10.0).
       const validation = validateTargetRequest(canonical, profile, ctx, policies);
       const plan = buildFidelityPlan(canonical, profile, validation, ctx, policies);
+      // UNSUPPORTED decisions must actually block the request, not just warn
+      // (review P0-2, §10.0 frozen pipeline). The error message carries the
+      // first blocking violation code so callers can map it.
+      if (plan.blocking) {
+        const first = plan.entries.find((e) => e.fidelity === "UNSUPPORTED");
+        throw unsupportedError(
+          `Target validation rejected the request: ${first?.code ?? "unsupported"} — ${first?.message ?? "unsupported construct"}`,
+        );
+      }
       applyFidelityPlan(plan, ctx);
       const remed = collectRemediations(plan);
 
@@ -341,8 +350,18 @@ function parseInput(
   ctx: CodecContext,
   policies: TranslationPolicies,
 ): ParsedInput {
+  // §3.2: instructions first (whitespace preserved, pure-blank segments
+  // skipped), then system/developer items appended in source order. Built
+  // before branching on string/array so a string `input` never drops the
+  // top-level `instructions` (review P0-1).
+  const system: ContentPart[] = [];
+  if (instructions !== undefined && instructions !== "") {
+    system.push({ type: "text", text: instructions });
+  }
+
   if (typeof input === "string") {
     return {
+      system: system.length ? system : undefined,
       messages: input === "" ? [] : [{ role: "user", content: [{ type: "text", text: input }] }],
       authorityReordered: false,
     };
@@ -351,12 +370,6 @@ function parseInput(
     throw validationError("input must be a string or an item array");
   }
 
-  const system: ContentPart[] = [];
-  // §3.2: instructions first (whitespace preserved, pure-blank segments skipped),
-  // then system/developer items appended in source order.
-  if (instructions !== undefined && instructions !== "") {
-    system.push({ type: "text", text: instructions });
-  }
   const messages: CanonicalMessage[] = [];
   let pendingAssistant: CanonicalMessage | undefined;
   let pendingReasoning: ContentPart[] = [];
