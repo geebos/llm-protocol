@@ -12,6 +12,7 @@ const KIND_TO_TYPE: Record<ErrorKind, string> = {
   cancelled: "server_error",
   stream_protocol: "server_error",
   unsupported: "invalid_request_error",
+  privacy: "invalid_request_error",
 };
 
 export const openaiChatErrorCodec: ErrorCodec = {

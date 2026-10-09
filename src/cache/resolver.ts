@@ -18,6 +18,25 @@ export interface CacheAffinityResolver {
   ): Promise<CacheAffinity | undefined>;
 }
 
+/**
+ * Privacy-safe resolver (PR-025): only reads the canonical request, which has
+ * already been redacted. Mounted by `strict` privacy mode.
+ */
+export interface PrivacySafeCacheAffinityResolver {
+  resolve(canonical: CanonicalRequest): Promise<CacheAffinity | undefined>;
+}
+
+/**
+ * Legacy resolver that reads the raw `Request` (URL/headers). Under privacy it
+ * requires explicit `allowLegacyCacheResolvers: true` authorization.
+ */
+export interface LegacyCacheAffinityResolver {
+  resolve(
+    request: Request,
+    canonical: CanonicalRequest,
+  ): Promise<CacheAffinity | undefined>;
+}
+
 /** Run resolvers in order; the first with a `key` wins. */
 export async function resolveCacheAffinity(
   resolvers: CacheAffinityResolver[],

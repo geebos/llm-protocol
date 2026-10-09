@@ -1,0 +1,150 @@
+/**
+ * Streaming restore invariants (P3/P4): Maximal Munch across chunks and
+ * JSON-aware tool-argument restore. Covers PT-04/05/55/63.
+ */
+import { describe, expect, it } from "vitest";
+import {
+  createPrivacyStreamRestore,
+  PrivacySession,
+  resolvePrivacyConfig,
+  type PrivacyWarning,
+} from "../../src/privacy/index.js";
+import type { CanonicalStreamEvent } from "../../src/streams/index.js";
+
+function makeSession(mappings: number): {
+  session: PrivacySession;
+  config: ReturnType<typeof resolvePrivacyConfig>;
+} {
+  const config = resolvePrivacyConfig({
+    recognizers: [{ priority: 1, recognize: () => [] }],
+  });
+  const session = new PrivacySession("stream-test", {
+    compiled: config.template,
+    tagMode: config.tagMode,
+    tagBytes: config.tagBytes,
+    namespace: config.namespace,
+  });
+  for (let i = 1; i <= mappings; i++) {
+    session.getOrCreate("a", `x${i}`);
+  }
+  return { session, config };
+}
+
+async function run(
+  events: CanonicalStreamEvent[],
+  session: PrivacySession,
+  config: ReturnType<typeof resolvePrivacyConfig>,
+): Promise<{ events: CanonicalStreamEvent[]; warnings: PrivacyWarning[] }> {
+  const warnings: PrivacyWarning[] = [];
+  const handle = createPrivacyStreamRestore(session, config, (w) => warnings.push(w));
+  const input = new ReadableStream<CanonicalStreamEvent>({
+    start(controller) {
+      for (const event of events) controller.enqueue(event);
+      controller.close();
+    },
+  });
+  const out: CanonicalStreamEvent[] = [];
+  const reader = input.pipeThrough(handle.stream).getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.push(value);
+  }
+  return { events: out, warnings };
+}
+
+function deltas(events: CanonicalStreamEvent[]): string {
+  return events
+    .filter((e): e is Extract<CanonicalStreamEvent, { type: "text_delta" }> => e.type === "text_delta")
+    .map((e) => e.text)
+    .join("");
+}
+
+describe("streaming restore", () => {
+  it("uses maximal munch across a chunk boundary (PT-55)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "see <private_placeholder_a_1" },
+        { type: "text_delta", index: 0, text: "0> end" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe("see x10 end");
+  });
+
+  it("waits for a longer placeholder before committing a short one (PT-63)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "<private_placeholder_a_1" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    // Incomplete at end of stream: emitted as-is, never partially restored.
+    expect(deltas(result.events)).toBe("<private_placeholder_a_1");
+  });
+
+  it("restores a completed short placeholder immediately", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "<private_placeholder_a_1>" },
+        { type: "text_delta", index: 0, text: " tail" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe("x1 tail");
+  });
+
+  it("restores buffered tool arguments as valid JSON (PT-05)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "tool_start", index: 0, id: "call_1", name: "f" },
+        { type: "tool_arguments_delta", index: 0, partialJson: '{"a":"<private_placeholder_a_1' },
+        { type: "tool_arguments_delta", index: 0, partialJson: '0>","b":[1,2]}' },
+        { type: "tool_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    const json = result.events
+      .filter((e): e is Extract<CanonicalStreamEvent, { type: "tool_arguments_delta" }> => e.type === "tool_arguments_delta")
+      .map((e) => e.partialJson)
+      .join("");
+    expect(JSON.parse(json)).toEqual({ a: "x10", b: [1, 2] });
+    // Lifecycle preserved: start/tool_end pairing intact.
+    expect(result.events[0].type).toBe("tool_start");
+    expect(result.events[result.events.length - 2].type).toBe("tool_end");
+  });
+
+  it("does not restore unknown placeholders and warns (PT-07)", async () => {
+    const { session, config } = makeSession(1);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "x <private_placeholder_a_42> y" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe("x <private_placeholder_a_42> y");
+    expect(result.warnings.some((w) => w.code === "privacy_unknown_placeholder")).toBe(true);
+  });
+});

@@ -25,6 +25,7 @@ export type {
   CanonicalToolChoice,
   CanonicalGenerationOptions,
   CanonicalThinkingConfig,
+  CanonicalCacheControl,
   ContentPart,
   ImageSource,
   MessageRole,
@@ -63,6 +64,10 @@ export type {
   CacheTranslationWarningCode,
 } from "./cache/types.js";
 export type { CacheAffinityResolver } from "./cache/resolver.js";
+export type {
+  PrivacySafeCacheAffinityResolver,
+  LegacyCacheAffinityResolver,
+} from "./cache/resolver.js";
 export {
   resolveCacheAffinity,
   composeCacheResolvers,
@@ -78,3 +83,46 @@ export {
   applyOpenAIChatCacheAffinity,
   type CacheApplication,
 } from "./cache/openai-chat/apply-cache-affinity.js";
+
+// Privacy transform (docs/privacy-transform.md).
+export { createPrivacyEngine } from "./privacy/engine.js";
+export {
+  compileTemplate,
+  parsePlaceholder,
+  renderPlaceholder,
+  placeholderTag,
+  isValidType,
+  scanTemplateShape,
+  DEFAULT_TEMPLATE,
+  DEFAULT_TAG_BYTES,
+  TemplateError,
+} from "./privacy/template.js";
+export type { CompiledTemplate, ParsedPlaceholder } from "./privacy/template.js";
+export { PrivacyGuardError } from "./privacy/errors.js";
+export { PrivacySession } from "./privacy/session.js";
+export { resolvePrivacyConfig } from "./privacy/config.js";
+export type { ResolvedPrivacyConfig, SecurityMode } from "./privacy/config.js";
+export type {
+  Detection,
+  RecognizerContext,
+  PrivacyRecognizer,
+  PrivacyChannel,
+  CoverageAction,
+  ToolSchemaCoverage,
+  PrivacyCoveragePolicy,
+  PrivacyMappingOptions,
+  PrivacyRecognitionOptions,
+  PrivacyStreamingOptions,
+  PrivacyOptions,
+  MappingEntry,
+  PrivacySessionView,
+  PrivacySessionOptions,
+  PrivacyEngine,
+  PrivacyRequestTrace,
+  PrivacyCompletionReport,
+  PrivacyWarning,
+  PrivacyWarningCode,
+  RenderedExtensionDisposition,
+  ExtensionPrivacyProof,
+  PrivacyErrorResult,
+} from "./privacy/types.js";

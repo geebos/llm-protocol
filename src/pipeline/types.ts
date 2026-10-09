@@ -7,6 +7,7 @@ import type { ProviderProfile } from "../capabilities/provider-profile.js";
 import type { TranslationPolicies } from "../ir/policies.js";
 import type { CacheAffinityResolver } from "../cache/resolver.js";
 import type { CacheTranslationReport } from "../cache/types.js";
+import type { PrivacyCompletionReport, PrivacyOptions } from "../privacy/types.js";
 
 export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> {
   from: From;
@@ -63,6 +64,19 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
   cache?: {
     resolvers?: CacheAffinityResolver[];
   };
+
+  /**
+   * Privacy recognition/redaction/restore (docs/privacy-transform.md). When
+   * set, the same-protocol passthrough fast path is disabled and field-level
+   * cache resolvers that read the raw request require explicit authorization.
+   */
+  privacy?: PrivacyOptions;
+
+  /**
+   * Privacy completion report, invoked once per request with sanitized
+   * statistics only (never raw values or the mapping).
+   */
+  onPrivacyComplete?: (report: PrivacyCompletionReport) => void;
 
   /** Diagnostic hook. Must never receive keys, credentials or prompt bodies. */
   trace?: (trace: TranslationTrace) => void;

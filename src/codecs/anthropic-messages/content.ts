@@ -7,6 +7,7 @@
 import type { ContentPart, ImageSource } from "../../ir/types.js";
 import { validationError } from "../../errors.js";
 import type { CodecContext } from "../protocol-adapter.js";
+import { isEphemeralCacheControl } from "../../cache/anthropic/cache-control.js";
 
 export function toImageSource(block: {
   source?: unknown;
@@ -25,7 +26,7 @@ export function toImageSource(block: {
     if (typeof src.url !== "string") throw validationError("url image requires url");
     return { type: "url", url: src.url };
   }
-  throw validationError(`unsupported image source type: ${String(src.type)}`);
+  throw validationError("unsupported image source type");
 }
 
 export function renderImageSource(source: ImageSource): unknown {
@@ -54,7 +55,13 @@ export function parseAnthropicContent(
     switch (b.type) {
       case "text":
         if (typeof b.text !== "string") throw validationError("text block requires a string text");
-        parts.push({ type: "text", text: b.text });
+        parts.push({
+          type: "text",
+          text: b.text,
+          ...(isEphemeralCacheControl(b.cache_control)
+            ? { cache: b.cache_control }
+            : {}),
+        });
         break;
       case "image":
         parts.push({ type: "image", source: toImageSource(b) });
@@ -99,9 +106,9 @@ export function parseAnthropicContent(
       default:
         ctx.warnings.push({
           code: "unknown_content_block",
-          message: `Unknown Anthropic content block type "${String(b.type)}" preserved in extensions`,
+          message: "Unknown Anthropic content block type preserved in extensions",
           fidelity: "LOSSY",
-          field: `content.${String(b.type)}`,
+          field: "content",
         });
         parts.push({ type: "text", text: "" });
     }
@@ -115,7 +122,11 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
   for (const part of parts) {
     switch (part.type) {
       case "text":
-        blocks.push({ type: "text", text: part.text });
+        blocks.push({
+          type: "text",
+          text: part.text,
+          ...(part.cache ? { cache_control: part.cache } : {}),
+        });
         break;
       case "image":
         blocks.push({ type: "image", source: renderImageSource(part.source) });

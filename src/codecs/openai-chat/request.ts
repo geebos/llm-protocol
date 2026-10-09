@@ -172,6 +172,7 @@ export function createOpenAiChatRequestCodec(
           profile.capabilities.reasoning?.signatureField,
         ),
       };
+      warnDroppedCacheControl(canonical, ctx);
       if (canonical.tools?.length) {
         body.tools = canonical.tools.map((t) => ({
           type: "function",
@@ -271,8 +272,7 @@ function parseMessages(
   reasoningField: string | undefined,
   ctx: CodecContext,
   signatureField?: string,
-): ParsedMessages {
-  if (!Array.isArray(raw)) throw validationError("messages must be an array");
+): ParsedMessages {  if (!Array.isArray(raw)) throw validationError("messages must be an array");
   const system: ContentPart[] = [];
   const messages: CanonicalMessage[] = [];
 
@@ -308,7 +308,7 @@ function parseMessages(
     } else {
       ctx.warnings.push({
         code: "unknown_role",
-        message: `Unknown OpenAI message role "${String(role)}" skipped`,
+        message: "Unknown OpenAI message role skipped",
         fidelity: "LOSSY",
         field: `messages[${i}].role`,
       });
@@ -339,9 +339,9 @@ function parseUserParts(content: unknown, ctx: CodecContext): ContentPart[] {
     } else {
       ctx.warnings.push({
         code: "unknown_content_block",
-        message: `Unknown OpenAI content block type "${String(b.type)}" skipped`,
+        message: "Unknown OpenAI content block type skipped",
         fidelity: "LOSSY",
-        field: `content.${String(b.type)}`,
+        field: "content",
       });
     }
   }
@@ -585,6 +585,35 @@ function renderAssistantMessage(
     }));
   }
   return msg;
+}
+
+/**
+ * OpenAI Chat has no representable prompt-cache breakpoint; dropping an IR
+ * `cache_control` is a fidelity loss and must be reported (PR-017, no silent
+ * downgrade).
+ */
+function warnDroppedCacheControl(
+  canonical: CanonicalRequest,
+  ctx: CodecContext,
+): void {
+  let dropped = false;
+  const scan = (parts: ContentPart[] | undefined): void => {
+    for (const part of parts ?? []) {
+      if (part.type === "text" && part.cache) dropped = true;
+      if (part.type === "tool_result") scan(part.content);
+    }
+  };
+  scan(canonical.system);
+  for (const message of canonical.messages) scan(message.content);
+  if (canonical.tools?.some((t) => t.cache)) dropped = true;
+  if (dropped) {
+    ctx.warnings.push({
+      code: "privacy_cache_control_dropped",
+      message: "Prompt-cache control is not representable in the OpenAI Chat target and was dropped",
+      fidelity: "LOSSY",
+      field: "cache",
+    });
+  }
 }
 
 function renderToolChoice(choice: CanonicalToolChoice): unknown {
