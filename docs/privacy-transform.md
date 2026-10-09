@@ -1,0 +1,1066 @@
+# llm-protocol 隐私识别-替换技术设计
+
+**文档版本：** v1.6（implementation-freeze 候选）
+**日期：** 2026-08-10
+**适用仓库：** `llm-protocol`
+**范围：** 请求侧隐私识别-替换（Redact）+ 响应侧占位符换回（Restore），覆盖非流式与 SSE 流式
+**核心约束：** **识别（Detection）由调用方实现**并返回具体识别类型；**映射与替换（Mapping / Replace）由 llm-protocol 实现**；**会话为请求级，每次请求都是不含占位符的原文**；**同一请求内替换必须确定性稳定，以保障上游 prompt cache 命中**。
+
+> **需求来源：** 《Privacy Transform Engine 技术方案》v1.0 + 本项目 Canonical IR / Stream 状态机 + 第一~五轮评审修订。
+> **核心场景：** 把请求正文中的隐私原文替换为稳定占位符（`182****bbbb` → `<private_placeholder_phone_1>`）后再发往上游；当 LLM 在响应中引用占位符时，换回原文。
+> **硬约束：** 一切转换经 Canonical IR；流式必须经 `CanonicalStreamEvent`；任何降级/不可判定必须产生 `TranslationWarning`；隐私原文与 API Key 一样属于敏感数据，**禁止**进入 trace、report、日志或错误消息。
+
+## 文档控制
+
+| **版本** | **日期**   | **说明** |
+|----------|------------|----------|
+| v1.0     | 2026-08-10 | 初稿。 |
+| v1.1     | 2026-08-10 | Span 裁决、JSON-aware 恢复、放开 Delta 不变量、Coverage Policy、文档顺序编号、Trace 拆分、保护区、Tag ≥96-bit、代理对校验、拼写修正。 |
+| v1.2     | 2026-08-10 | 删 span allowlist；unknown/error 不误 flush；碰撞检测；Coverage 路径级；JSON Value-only；配置统一；错误路径；缓冲拆分；Session 只读。 |
+| v1.3     | 2026-08-10 | `PrivacyOptions.system` 提示注入。 |
+| v1.4     | 2026-08-10 | 错误恢复与诊断隔离；Codec 异常/Warning 归一化；IR cache 保真前置；`privacy` ErrorKind；异步收集后串行分配；HMAC 算法冻结。 |
+| v1.5     | 2026-08-10 | Maximal Munch；Cache Affinity 移后并 HMAC；跨 Text Part 检测；reasoning 检测门控；Extension 双证据；碰撞扫描范围；`CanonicalTool.cache`；工具恢复授权推迟。 |
+| v1.6     | 2026-08-10 | **Maximal Munch 可执行算法（`matchAt`）+ 共享 Safe Emit Boundary**；**Policy-aware EgressVerify**（尊重 allow，`egress` 档位）；跨 Part 撞 Cache Breakpoint 拒绝；模板无歧义校验；`ExtensionPrivacyProof` 状态化 + `fieldId`；Cache Resolver 拆分为 Privacy-safe / Legacy；**`strict` / `best_effort` 运行模式**；工具恢复 V1 使用条件。 |
+
+## 目录
+
+1. [背景与目标](#1-背景与目标)
+2. [职责边界](#2-职责边界)
+3. [现状与集成点](#3-现状与集成点)
+4. [领域模型](#4-领域模型)
+5. [公开接口：识别-替换 API](#5-公开接口识别-替换-api)
+6. [正向替换（Redact）](#6-正向替换redact)
+7. [IR 通道、覆盖策略与请求侧](#7-ir-通道覆盖策略与请求侧)
+8. [反向换回（Restore）](#8-反向换回restore)
+9. [流式安全输出边界](#9-流式安全输出边界)
+10. [会话生命周期、并发与配置](#10-会话生命周期并发与配置)
+11. [安全不变量与正确性](#11-安全不变量与正确性)
+12. [测试与验收](#12-测试与验收)
+13. [实施阶段](#13-实施阶段)
+14. [附录 A：接口签名](#附录-a接口签名)
+15. [附录 B：与参考文档的对应与差异](#附录-b与参考文档的对应与差异)
+16. [附录 C：占位符语法与冲突规则](#附录-c占位符语法与冲突规则)
+
+---
+
+# 1. 背景与目标
+
+## 1.1 背景
+
+`llm-protocol` 把客户端协议请求（Anthropic Messages / OpenAI Chat）经 Canonical IR 转换为上游协议，并把上游响应转换回客户端协议。
+
+企业网关的合规诉求：
+
+1. **请求外发前脱敏**：上游模型与供应商侧不应看到隐私原文。
+2. **响应还原可读**：模型可以用占位符推理与引用，客户端最终看到的响应换回原文。
+3. **同一请求内可逆**：脱敏与换回共享同一份请求级映射。
+
+本项目**不内置任何识别规则**，识别能力开放为调用方注入的接口。
+
+> **安全承诺（精确版）：**
+> 1. 保证**被 Privacy Coverage Policy 声明为覆盖的文本通道**执行识别与替换；未覆盖通道（默认含 `extensions`）按显式策略放行或拒绝。
+> 2. 检测文本边界**等于目标 Codec 最终呈现的语义文本边界**（拼接组），并做 Policy-aware 最终校验。
+> 3. **内部诊断（日志 / Trace / error `cause`）永不包含隐私原文、占位符映射或用户文本**。
+> 4. **客户端可见错误文本默认不恢复 PII**；仅 `errorRestore: "trusted_client"` 时在安全字段恢复。
+> 5. 只有 **`strict` 模式**提供无泄露保证；**`best_effort` 模式**允许显式降级，不提供该保证（§5.2/§5.4）。
+> 6. 该承诺**不覆盖 Privacy 层之前的 Codec 行为**；启用 Privacy 时 Pipeline 边界必须安全归一化 Codec 异常/Warning（§3.4）。
+
+## 1.2 目标
+
+| 编号 | 目标 |
+| --- | --- |
+| PR-001 | 识别器列表接口，`priority` 必填、列表内唯一。 |
+| PR-002 | 纯文本级 `redact()` / `restore()`，同一 Session 内可逆。 |
+| PR-003 | canonical 层 `redactRequest` / `restoreResponse`。 |
+| PR-004 | 请求级稳定映射。 |
+| PR-005 | Span 裁决：覆盖取最外层；相等取 priority；交叉报错。 |
+| PR-006 | 流式换回经 `CanonicalStreamEvent`。 |
+| PR-007 | fail-closed（`strict` 模式下）。 |
+| PR-008 | 原文与映射不进 trace / warning / 日志 / 错误消息。 |
+| PR-009 | 先收集、后按 IR 文档顺序串行分配。 |
+| PR-010 | Coverage Policy（通道 + `tool_schema` 路径 + extensions 路径）。 |
+| PR-011 | 工具参数换回 JSON-aware Value-only。 |
+| PR-012 | Trace 拆分请求阶段与完成报告。 |
+| PR-013 | 错误响应 Restore，与内部诊断隔离。 |
+| PR-014 | Extension 双证据（转发证据 × 脱敏证据）。 |
+| PR-015 | System 提示注入（`{template}`）。 |
+| PR-016 | Codec 异常/Warning 安全归一化。 |
+| PR-017 | IR 保真 `cache_control`（text 与 tool 共用类型）。 |
+| PR-018 | 识别先收集后串行分配。 |
+| PR-019 | 流式换回 **Maximal Munch**（最长匹配）。 |
+| PR-020 | 检测边界 = 目标语义边界（拼接组）。 |
+| PR-021 | Cache Affinity 基于脱敏后内容 + HMAC。 |
+| PR-022 | 未知占位符经模板语法扫描，与已注册 Trie 共享安全边界。 |
+| PR-023 | Policy-aware EgressVerify（默认尊重 allow，可切 strict）。 |
+| PR-024 | 运行模式 `strict` / `best_effort`，并在完成报告中标识。 |
+| PR-025 | Cache Resolver 拆分 Privacy-safe / Legacy。 |
+
+## 1.3 非目标
+
+- 不实现识别（关键词、正则、NER、模型调用）。
+- 不实现 HTTP / SSE / WebSocket 解析；不处理多媒体。
+- 不提供鉴权、管理页面、跨进程持久化、持久化 Session Vault。
+- 不考虑占位符跨请求存活；每次请求都是原文。
+- V1 不做 Streaming JSON 增量恢复（工具参数缓冲到 `tool_end`）。
+- **V1 不处理「工具参数恢复授权」**（§8.4），使用条件见 §8.4。
+- `best_effort` 模式不提供无泄露保证。
+- 不保证模型改写/截断/拆分/删除占位符后精确还原。
+
+---
+
+# 2. 职责边界
+
+```text
+调用方：PrivacyRecognizer[]（必填、列表内唯一 priority）
+   ↓
+llm-protocol 隐私层
+  1. SpanValidator        区间 + UTF-16 代理对
+  2. SpanResolver         覆盖→最外层；相等→priority；交叉→报错
+  3. CollisionGuard       占位符 vs 原文（全模型可见文本）
+  4. PseudonymAllocator   先收集后按 IR 顺序串行分配
+  5. Replacer             从后向前替换
+  6. DetectionBoundary    目标 Codec 拼接组 + 偏移回填
+  7. SessionStore         双向映射、引用计数、版本快照（只读）
+  8. RestoreEngine        最长匹配（Maximal Munch）
+  9. UnknownSyntaxScan    模板语法扫描（共享安全边界）
+ 10. JsonRestore          JSON-aware Value-only
+ 11. StreamRestore        流式状态机
+ 12. CoveragePolicy       通道/路径 redact / allow / reject
+ 13. ExtensionVerify      转发证据 × 脱敏证据
+ 14. EgressVerify         Policy-aware 最终校验
+ 15. SystemNotice         system 提示注入
+```
+
+---
+
+# 3. 现状与集成点
+
+## 3.1 现有 `translate()` 数据流
+
+```text
+parseRequest(116) → resolveCacheAffinity(124, raw sourcePayload)
+  → renderRequest(138) → applyOpenAIChatCacheAffinity(144) → execute(180)
+```
+
+## 3.2 隐私改造后的注入顺序
+
+```text
+parseRequest
+  → [privacy.collectRecognitions]
+  → [privacy.redactRequest]              // 拼接组边界；裁决；碰撞；串行分配；替换
+  → [privacy.systemNotice]
+  → [cache.resolveAffinity(redacted)]    // 基于脱敏后 canonical + HMAC
+  → renderRequest
+  → [cache.applyAffinity]
+  → [privacy.verifyExtensions]           // 双证据
+  → [privacy.verifyEgress]               // Policy-aware 最终校验
+  → execute
+```
+
+响应侧：`parseResponse → [restoreResponse] → renderResponse`；错误：`parseError → [restoreError] → renderError`；流式：`parse → validator → [privacyRestoreTransform] → validator(测试) → render`。
+
+## 3.3 同协议直通路径
+
+启用 privacy 时禁用直通快速路径，强制 `parse → redact → render`，并给出 `privacy_passthrough_disabled` warning。此路径依赖 §3.5 的 IR cache 保真；不保真时按 `strict` 拒绝或 `best_effort` 降级。
+
+## 3.4 Codec 异常与 Warning 安全归一化（前置）
+
+现有 parse 阶段会把用户输入拼进错误串（`String(c.type)`、`String(role)`、`String(src.type)`、`String(t.type)`）。
+
+**规则：**
+
+1. Codec 错误/Warning 构造点禁止插值用户输入；改为 `code` + 结构路径。
+2. 启用 Privacy 时 Pipeline 边界安全归一化异常：只保留 `kind` / `code` / 结构路径，不携带原始 message 插值，不携带未净化 `cause`。
+3. 审计所有把用户输入拼进 message 的构造点。
+4. Codec 侧硬要求。
+
+## 3.5 IR Cache 保真前置
+
+```ts
+export interface CanonicalCacheControl { type: "ephemeral"; ttl?: string; }
+export interface CanonicalTool {
+  name: string; description?: string;
+  inputSchema: Record<string, unknown>; strict?: boolean;
+  cache?: CanonicalCacheControl;
+}
+// ContentPart.text 同样增加 cache?: CanonicalCacheControl
+```
+
+- Anthropic Codec 对 **system / messages / tools** 三处 `cache_control` 对称解析与渲染。
+- 暂不支持时：源含 `cache_control` 且强制 IR → `strict` 拒绝；`best_effort` 产出 `privacy_cache_control_dropped` 降级报告。
+
+## 3.6 Cache Affinity 重排、匿名化与 Resolver 受信输入
+
+- 基于**脱敏后 canonical** 计算；摘要用 **HMAC-SHA256(租户密钥, 命名空间 + 脱敏 anchor)**。
+- **Resolver 拆分（PR-025）：**
+
+```ts
+/** 严格 Privacy 可用：只访问脱敏后的 canonical。 */
+export interface PrivacySafeCacheAffinityResolver {
+  resolve(canonical: CanonicalRequest): Promise<CacheAffinity | undefined>;
+}
+
+/** 需要原始 Request（URL/Header）；严格 Privacy 下必须显式授权。 */
+export interface LegacyCacheAffinityResolver {
+  resolve(request: Request, canonical: CanonicalRequest): Promise<CacheAffinity | undefined>;
+}
+```
+
+- `strict` 模式只挂 `PrivacySafeCacheAffinityResolver`；`Legacy` 需 `allowLegacyCacheResolvers: true` 显式启用。
+- 否则 `privacy_untrusted_cache_resolver` 拒绝。
+
+---
+
+# 4. 领域模型
+
+## 4.1 识别结果
+
+```ts
+export interface Detection {
+  start: number; end: number; type: string;
+  value?: string; confidence?: number; metadata?: unknown;
+}
+```
+
+UTF-16 偏移；不切断代理对；`value` 仅校验。
+
+## 4.2 识别器列表
+
+```ts
+export interface RecognizerContext { channel: PrivacyChannel; path?: string; sessionId: string; }
+export interface PrivacyRecognizer {
+  priority: number;   // 必填、列表内唯一
+  recognize(text: string, context: RecognizerContext): Detection[] | Promise<Detection[]>;
+}
+```
+
+## 4.3 会话与映射（只读封装）
+
+```ts
+export interface MappingEntry {
+  readonly id: string; readonly type: string;
+  readonly original: string; readonly placeholder: string; readonly createdAt: number;
+}
+export interface PrivacySessionView {
+  readonly id: string; readonly version: number; readonly activeStreams: number;
+  lookupPlaceholder(placeholder: string): MappingEntry | undefined;
+  lookupOriginal(type: string, original: string): MappingEntry | undefined;
+}
+```
+
+## 4.4 占位符模板、无歧义校验与 HMAC Tag
+
+默认模板：`<private_placeholder_{type}_{N}>`。
+
+**模板无歧义校验（编译期，任一不满足即拒绝）：**
+
+1. 含 `{type}` 与 `{N}` 各一次；`tagMode` 时含 `{tag}`。
+2. **动态 Token 之间必须至少有 1 个固定字面量字符**；禁止相邻动态 Token（如 `PII-{type}{N}` 拒绝）。
+3. 字面量前缀非空。
+4. 模板必须能被**确定性解析**（唯一划分 type / N / tag 的边界）。
+5. 不含 `"`、`\`、控制字符与换行；`tool_arguments` 通道时仅 ASCII。
+
+**HMAC Tag（冻结）：**
+
+```text
+domain = "llm-protocol-privacy-v1"
+tag    = hex( HMAC-SHA256(key, domain || 0x00 || namespace || 0x00 || type || 0x00 || original) )
+tag    = tag.slice(0, 2 * tagBytes)      // tagBytes >= 12（≥96-bit）
+```
+
+`key` / `namespace` 稳定、受保护；命名空间由 `tagNamespace` 提供；缓存稳定模式禁止随机密钥。
+
+---
+
+# 5. 公开接口：识别-替换 API
+
+## 5.1 引擎接口
+
+```ts
+export interface PrivacyEngine {
+  createSession(id?: string, options?: PrivacySessionOptions): PrivacySessionView;
+  getSession(id: string): PrivacySessionView | undefined;
+  destroySession(id: string): void;
+  redact(text: string, session: PrivacySessionView, recognizers: PrivacyRecognizer[],
+         context?: Partial<RecognizerContext>): Promise<string>;
+  restore(text: string, session: PrivacySessionView): string;
+}
+```
+
+## 5.2 `translate()` 集成
+
+```ts
+export interface PrivacyOptions {
+  recognizers: PrivacyRecognizer[];
+  coverage?: PrivacyCoveragePolicy;
+  mapping?: PrivacyMappingOptions;
+  recognition?: PrivacyRecognitionOptions;
+  streaming?: PrivacyStreamingOptions;
+  tagKey?: () => Uint8Array | Promise<Uint8Array>;
+  tagNamespace?: string;
+  system?: string | false;
+  errorRestore?: "never" | "trusted_client";        // 默认 "never"
+
+  /** 运行模式。strict 提供无泄露保证；best_effort 允许降级。默认 "strict"。 */
+  securityMode?: "strict" | "best_effort";
+  /** EgressVerify 档位。默认 "policy"（尊重 allow）。 */
+  egress?: "policy" | "strict";
+  /** 短原文 Egress 检查下限，默认 1（全部检查）。 */
+  minEgressValueLength?: number;
+  /** 允许 Legacy Cache Resolver（访问原始 Request）；默认 false。 */
+  allowLegacyCacheResolvers?: boolean;
+}
+
+export interface PrivacyRecognitionOptions {
+  onRecognizerError?: "reject" | "passthrough_with_warning";   // 默认 reject
+  onInvalidDetection?: "reject" | "drop_with_warning";         // 默认 reject
+}
+export interface PrivacyStreamingOptions {
+  maxTextPendingBytes?: number;   // 4096
+  maxToolArgumentBytes?: number;  // 1 MiB
+  maxPlaceholderLength?: number;  // 128
+  maxTypeLength?: number;         // 32
+  overflowAction?: "reject" | "flush_raw";   // reject
+  strictStreaming?: boolean;      // false
+}
+```
+
+**运行模式语义（PR-024）：**
+
+| 模式 | 行为 | 保证 |
+| --- | --- | --- |
+| `strict`（默认） | 不允许原文旁路；recognizer 报错 / 非法区间 / 缓冲超限 / 未覆盖通道一律拒绝 | 满足 INV-5 |
+| `best_effort` | 按配置降级（`passthrough_with_warning` / `drop_with_warning` / `flush_raw`） | **不提供无泄露保证** |
+
+降级选项仅在 `best_effort` 下生效；`strict` 下这些配置被忽略并 warning。
+
+## 5.3 内部流式变压器
+
+```ts
+interface StreamTransformer { write(chunk: string): string[]; flush(): string[]; abort(reason?: Error): void; }
+```
+
+## 5.4 Trace：请求阶段与完成报告
+
+```ts
+export interface PrivacyRequestTrace { sessionId: string; redacted: number; channelsCovered: PrivacyChannel[]; }
+
+export interface PrivacyCompletionReport {
+  sessionId: string; redacted: number; restored: number;
+  unknownPlaceholders: number; invalidDetections: number;
+  overflowed: boolean; jsonParseFailures: number;
+  status: "completed" | "errored" | "cancelled" | "aborted";
+  /** 本次请求的实际安全模式与是否发生降级。 */
+  securityMode: "strict" | "best_effort";
+  degraded: boolean;
+  warnings: PrivacyWarning[];
+}
+```
+
+- `TranslateOptions` 新增 `onPrivacyComplete?: (report) => void`。
+- 不承诺未消费的 stream 自动触发回调。
+- **Warning 统一净化**：privacy 模式下所有 warning 的 `message` / `field` 不得含用户输入或原文。
+
+```ts
+export type PrivacyWarningCode =
+  | "privacy_recognizer_failed" | "privacy_invalid_detection"
+  | "privacy_buffer_overflow" | "privacy_unknown_placeholder"
+  | "privacy_channel_skipped" | "privacy_passthrough_disabled"
+  | "privacy_signature_guard" | "privacy_uncovered_channel"
+  | "privacy_json_parse_failed" | "privacy_json_key_placeholder"
+  | "privacy_cache_control_dropped" | "privacy_extension_unverifiable"
+  | "privacy_cross_part_detection_unsafe" | "privacy_cross_part_cache_break"
+  | "privacy_untrusted_cache_resolver" | "privacy_degraded_mode";
+```
+
+---
+
+# 6. 正向替换（Redact）
+
+```text
+收集全部 recognizer 结果（可异步乱序）
+  → 目标语义边界重映射（拼接组）
+  → SpanValidator（区间 + 代理对）
+  → CoveragePolicy / 保护区
+  → SpanResolver（覆盖→最外层；相等→priority；交叉→报错）
+  → CollisionGuard（占位符 vs 原文）
+  → PseudonymAllocator（按 IR 文档顺序串行）
+  → Replacer（从后向前）
+```
+
+## 6.1 识别结果校验契约
+
+| 检查 | 失败处理 |
+| --- | --- |
+| 整数且 `0 <= start < end <= text.length` | 拒绝或丢弃（按模式） |
+| 不切断 UTF-16 代理对 | 同上 |
+| `value === text.slice(start, end)` | 同上 |
+| `type` 非空且长度 ≤ `maxTypeLength` | 超长 → 拒绝 |
+| `priority` 有限、列表内唯一 | 缺失/重复 → 拒绝 |
+
+## 6.2 Span 裁决
+
+```text
+1. 一个 detection 覆盖 cluster 内所有其它 → 取它
+2. 全部为相等区间并列 → 取 priority 最高者
+3. 存在真正交叉 → privacy_conflict 拒绝
+```
+
+## 6.3 占位符分配与替换
+
+```text
+getOrCreate(session, type, original):
+  key = `${type}\u0000${original}`
+  if realToPlaceholder.has(key): return entry
+  n = counters.get(type) + 1
+  placeholder = render(template, type, n, tag?)
+  while placeholderToReal.has(placeholder): n++
+  ...原子双写...
+```
+
+同步、无 `await`；替换从后向前。
+
+## 6.4 幂等、保护区与碰撞（扫描范围 = 所有模型可见文本）
+
+1. 保护区：只保护已注册占位符。
+2. 未注册形状匹配文本：按普通输入处理或拒绝。
+3. 原文碰撞：扫描**所有可能到达模型的文本**（含默认 allow 的 extensions）；分配占位符 P 时若 P 出现在被替换区间之外 → 碰撞 → 拒绝。V1 不做逃逸换号。
+4. 已分配占位符重名 → 递增序号；原文等于已注册占位符 → 跳过 + warning。
+
+## 6.5 确定性分配与缓存稳定
+
+```text
+1. 收集全部 recognizer 结果（异步可乱序完成）
+2. 集齐后按固定 IR 文档顺序串行：校验 → 裁决 → 分配 → 替换
+3. 异步完成顺序绝不影响编号
+```
+
+遍历顺序：`system → tools[] → messages[]（含 content[] 与 tool_result 递归）`；同文本内按 `start` 升序；计数器按 `type` 隔离。
+
+---
+
+# 7. IR 通道、覆盖策略与请求侧
+
+## 7.1 文本通道
+
+| 通道 | IR 位置 |
+| --- | --- |
+| `system` | `CanonicalRequest.system[*].text` |
+| `message_text` | `CanonicalMessage.content[*].type === "text"` |
+| `tool_result` | `tool_result.content[*].text` |
+| `tool_arguments` | `tool_call.argumentsText` |
+| `tool_description` | `CanonicalTool.description` |
+| `tool_schema` | `CanonicalTool.inputSchema` 字符串 |
+| `reasoning` | `reasoning.text / summary` |
+| `extensions` | 实际会转发的扩展字符串 |
+| `opaque` | `signature / encryptedContent / image` |
+
+## 7.2 检测文本边界与拼接组
+
+**原则：Privacy Detection 的文本边界必须与目标 Codec 最终呈现的语义文本边界一致。**
+
+1. 计算目标 Codec 的**拼接组**（会连续 join 的相邻 text part）。
+2. 对拼接后整段文本识别，建立 `组偏移 → (partIndex, localOffset)` 映射。
+3. 替换按映射回填；跨 part detection 拆分到相邻 part。
+4. 无法安全回填（跨越非文本 part / 不可改写结构）→ 拒绝（`privacy_cross_part_detection_unsafe`）。
+5. **跨 Part 撞 Cache Breakpoint（P1-1）：** 若敏感区间跨越**带 `cache` 元数据**的 part 边界 → 拒绝（`privacy_cross_part_cache_break`）；V1 不做静默重排。
+6. 最终 Payload 由 §7.6 校验兜底。
+
+## 7.3 `tool_arguments` 正向（Value-only）
+
+- `json-values`（默认）：parse → 只替换字符串 Value → stringify。
+- `raw-substring`：显式子串替换（可能命中 Key）。
+- Key 命中隐私 → 默认 reject。
+
+## 7.4 thinking / reasoning 保护（检测门控）
+
+```text
+在 reasoning 文本上运行 recognizer
+  命中隐私 → 拒绝请求（privacy_signature_guard）
+  未命中 → 原样透传（不改写，signature 有效）
+```
+
+即**检测命中才拒绝**，不是「字段存在即拒绝」。
+
+## 7.5 Privacy Coverage Policy 与 Extension 双证据
+
+```ts
+export type CoverageAction = "redact" | "allow" | "reject";
+
+export interface ToolSchemaCoverage {
+  structural?: CoverageAction;   // 默认 allow
+  text?: CoverageAction;         // 默认 redact
+  valueBearing?: CoverageAction; // 默认 reject（识别到敏感值才拒绝）
+}
+
+export interface PrivacyCoveragePolicy {
+  system?: CoverageAction; message_text?: CoverageAction;
+  tool_result?: CoverageAction; tool_arguments?: CoverageAction;
+  tool_description?: CoverageAction;
+  tool_schema?: CoverageAction | ToolSchemaCoverage;
+  reasoning?: CoverageAction;
+  extensions?: CoverageAction | Record<string, CoverageAction>;  // 默认 allow
+}
+```
+
+默认：文本通道 `redact`；`structural=allow` / `text=redact` / `valueBearing=reject`（命中才拒）；`reasoning=reject`（命中才拒）；`extensions=allow`；非文本 `allow`。
+
+### Extension 双证据（状态化 Proof）
+
+```ts
+// 证据 1：Codec render 产出——只证明「哪些字段被转发」
+export interface RenderedExtensionDisposition {
+  path: string; kind: "text" | "non-text" | "opaque";
+  forwarded: boolean;
+  fieldId: string;
+}
+
+// 证据 2：Privacy 层产出——证明「字段被如何处理」
+export interface ExtensionPrivacyProof {
+  path: string;
+  status: "inspected" | "transformed" | "rejected";
+  fieldId: string;
+}
+
+export interface CodecContext {
+  warnings: TranslationWarning[];
+  extensionDispositions?: RenderedExtensionDisposition[];
+}
+export interface RequestCodec { readonly supportsExtensionReport?: boolean; }
+```
+
+- `inspected`：完成检测，无需替换；
+- `transformed`：完成检测并替换；
+- `rejected`：不允许外发。
+
+核对规则：以 `fieldId` + `path` 共同定位；转发证据与脱敏证据必须一致；**被要求检查的字段未出现在报告中 → 默认拒绝**（`privacy_extension_unverifiable`）；`opaque` 路径只允许 `reject`；Codec 不支持报告时配置了非 allow 路径 → 拒绝。
+
+## 7.6 Policy-aware EgressVerify（最终校验）
+
+在所有 Payload 修改之后、`execute()` 之前，对**真实目标 Payload** 校验：
+
+```text
+EgressVerify(finalPayload):
+  1. 标记【引擎生成的占位符】区间（已注册 + 由本引擎产生的模板字面量）
+  2. 预计算 allowedOriginals = 出现在 allow 通道文本中的已识别原文
+  3. 扫描 Payload 的 String Value 与 Key（剔除占位符区间后）：
+       - 命中已识别 original 且 original ∉ allowedOriginals → 拒绝
+       - 命中已识别 original 且 original ∈ allowedOriginals → 跳过（尊重 allow）
+       - 出现非本引擎产生的占位符形状字面量 → 拒绝
+  4. reject 通道：确保不含不允许外发的内容
+  5. 短值：默认出现即拒绝；可用 minEgressValueLength 设下限减少噪声
+```
+
+档位：
+
+| `egress` | 语义 |
+| --- | --- |
+| `"policy"`（默认） | 尊重 `allow`：allow 通道出现的原文不触发拒绝；仅拦截其它位置的残留 |
+| `"strict"` | **显式覆盖 allow**：任意已识别原文出现在最终 Payload 即拒绝 |
+
+> 误报防护：先剔除引擎生成的占位符区间，避免原文 `phone` 命中 `<private_placeholder_phone_1>`。
+
+## 7.7 recognizer 错误、span 冲突与碰撞
+
+- `strict`：recognizer 报错 / 非法区间 / 交叉 / 碰撞 / 未覆盖通道 → 拒绝。
+- `best_effort`：按配置降级（warning + `degraded=true`）。
+- 错误模型：`ErrorKind` 扩单个 `privacy` + 子码 `code`；同步更新 Error Codec 映射。
+- 错误信息只含 channel 与偏移，不含原文。
+
+## 7.8 System 提示注入
+
+```ts
+export interface PrivacyOptions { system?: string | false; }
+```
+
+`{template}` 替换为 `mapping.template`。内置默认提示词：
+
+```text
+Privacy notice: some values in this conversation may be replaced by placeholders of the form {template}.
+Treat every placeholder as an opaque reference to real content:
+- Reproduce placeholders exactly as written; never rewrite, translate, split, or invent placeholders.
+- You may reference a placeholder in your answer when useful; it will be restored for the end user.
+- Do not attempt to infer or reveal the underlying value.
+```
+
+规则：追加到 system 末尾、独立 text part、以 `"\n\n"` 分隔前缀开头；在 `redactRequest`（含碰撞扫描）之后注入；不参与识别/碰撞/换回/计数；协议无关；已含则去重；**受信配置**，不得嵌入未处理的私密运行时数据；默认英文属待验证假设。
+
+缓存语义：区分四类（从未注入→注入 / 持续同内容 / 改提示词或模板 / IR 丢 `cache_control`）；**提示词稳定 ≠ Prompt Cache 稳定**。
+
+---
+
+# 8. 反向换回（Restore）
+
+## 8.1 非流式
+
+| 通道 | 实现 |
+| --- | --- |
+| 文本 `content[*].text` | 最长匹配（Maximal Munch） |
+| 工具参数 `argumentsText` | JSON-aware Value-only |
+| reasoning | 不换回（签名保护） |
+| opaque | 不换回 |
+
+Key 含占位符 → 不修改 + `privacy_json_key_placeholder` warning。
+
+## 8.2 流式事件表
+
+| 事件 | 处理 |
+| --- | --- |
+| `text_delta` | Maximal Munch（跨 chunk 缓冲） |
+| `tool_arguments_delta` | V1：缓冲至 `tool_end` → JSON-aware → 再输出 |
+| `text_end` | flush 文本块（最终 Maximal Munch 提交） |
+| `tool_end` | 完成 JSON 恢复 |
+| `message_end` | 完成仍有效块；无新 delta |
+| `unknown` | 保持恢复状态不变；是否渲染由 Codec 决定，transform 不触碰 |
+| `error` | 中止恢复状态，丢弃未确认后缀，不 flush 原文 |
+| EOF | 正常 → 最终校验；异常 → 错误策略 |
+
+**必须保持：** message_start/end 顺序、start/end 配对、kind+index 语义。**允许改变：** delta 数量、内容、边界。
+
+## 8.3 未知与不完整占位符（共享安全边界）
+
+- **已注册匹配器** 与 **未知语法扫描器** 共享安全输出边界（§9.2）。
+- 未知占位符统计由模板语法扫描器产出，不依赖已注册 Trie。
+- 前缀但流未结束 → 缓存等待。
+- 超 `maxPlaceholderLength` 未闭合 → 原样输出并重置。
+- 流终止仍不完整 → `strict` 默认原样 + warning（可选 `strictStreaming` 中止）；`best_effort` 按配置。
+
+## 8.4 `tool_arguments` 换回（JSON-aware Value-only，无授权层）
+
+1. `text`：纯字符串最长匹配。
+2. 非流式 `argumentsText`：parse → 只换回字符串 Value → stringify。
+3. 流式：缓冲到 `tool_end` → parse → 换回 Value → stringify。
+4. parse 失败 → 默认 `reject`（`privacy_json_parse_failed`）。
+5. 上限 `maxToolArgumentBytes`；模板必须 ASCII。
+
+> **V1 使用条件（冻结）：**
+> - Restore 输出面向**可信客户端**；
+> - 调用方负责模型生成工具调用的**执行授权**；
+> - 本组件**不承诺**防止模型利用已注册占位符经客户端工具间接外传敏感信息；
+> - 若在具备自动工具执行能力的 Agent 中启用，应在执行边界提供独立授权控制。
+
+## 8.5 错误响应 Restore
+
+```ts
+export interface PrivacyErrorResult { clientMessage: string; diagnosticCode: string; requestId: string; }
+```
+
+| 情形 | 处理 |
+| --- | --- |
+| `errorRestore: "never"`（默认） | 客户端错误文本不恢复 PII；已知占位符保留 |
+| `errorRestore: "trusted_client"` | 仅在安全字段恢复 |
+| 内部诊断/日志/trace/`cause` | 永不包含原文、映射、用户文本 |
+| 载荷结构未知 | 不盲目递归恢复 |
+| 未知占位符 | 保留或净化 + 安全诊断 |
+| 非流式错误 / 200 后流式错误 | 前者可改状态码；后者走流错误事件 |
+
+---
+
+# 9. 流式安全输出边界（Maximal Munch）
+
+## 9.1 问题
+
+占位符模板任意，已注册占位符之间可能存在**前缀关系**（`PII-phone-1` 是 `PII-phone-10` 的前缀）。「完整匹配即输出」会错切分。
+
+## 9.2 可执行算法
+
+```ts
+type MatchResult =
+  | { kind: "match"; end: number; value: string }
+  | { kind: "need_more" }
+  | { kind: "no_match" };
+
+function matchAt(buffer: string, start: number, final: boolean): MatchResult {
+  let node = trie.root;
+  let cursor = start;
+  let accepted: MatchResult | undefined;
+
+  while (cursor < buffer.length) {
+    const next = node.children.get(buffer[cursor]);
+    if (!next) break;
+    node = next;
+    cursor++;
+    if (node.value !== undefined) {
+      accepted = { kind: "match", end: cursor, value: node.value };
+    }
+  }
+
+  // 走到缓冲区末尾且仍可扩展 → 需要更多输入（不提交短匹配、不移动起点）
+  if (!final && cursor === buffer.length && node.children.size > 0) {
+    return { kind: "need_more" };
+  }
+  return accepted ?? { kind: "no_match" };
+}
+```
+
+外层循环：
+
+```text
+pos = 0
+while pos < buffer.length:
+  r = matchAt(buffer, pos, final=false)
+  match     → 输出原文，pos = r.end
+  need_more → 保留 buffer[pos..]，break
+  no_match  → 输出 buffer[pos] 作为普通文本，pos++
+
+flush():
+  以 final=true 重跑；处理末尾 no_match；need_more 按 §8.3
+```
+
+- `scanStart` 与 `cursor` 严格分离。
+- 只有确认无法扩展成更长**已注册**占位符时才提交。
+
+## 9.3 共享安全输出边界（已注册 × 未知语法）
+
+```text
+SafeEmitBoundary = min(RegisteredMatcher.safeEnd, UnknownSyntaxMatcher.safeEnd)
+```
+
+两者都确认安全才输出，避免「已注册放行、未知语法仍持有可能前缀」的泄露。
+
+缓冲上限：`maxTextPendingBytes`；溢出按 `overflowAction`（`strict` 下恒 reject）。
+
+---
+
+# 10. 会话生命周期、并发与配置
+
+## 10.1 生命周期与快照
+
+- 请求级 Session；每请求独立。
+- 释放：请求处理结束（正常/断流/取消）后；`activeStreams` 引用计数。
+- 映射快照：流式换回开始时冻结 `placeholderToReal`。
+- 对外只读。
+
+## 10.2 并发
+
+- 每流独立缓冲区与匹配状态。
+- 映射创建原子；识别先收集后串行分配。
+- session 按请求隔离。
+
+## 10.3 配置模型
+
+```jsonc
+{
+  "mapping": { "template": "<private_placeholder_{type}_{N}>", "tagMode": false },
+  "tagNamespace": "tenant-42",
+  "system": "default",
+  "errorRestore": "never",
+  "securityMode": "strict",
+  "egress": "policy",
+  "minEgressValueLength": 1,
+  "allowLegacyCacheResolvers": false,
+  "recognition": { "onRecognizerError": "reject", "onInvalidDetection": "reject" },
+  "streaming": {
+    "maxTextPendingBytes": 4096, "maxToolArgumentBytes": 1048576,
+    "maxPlaceholderLength": 128, "maxTypeLength": 32,
+    "overflowAction": "reject", "strictStreaming": false
+  },
+  "coverage": {
+    "tool_schema": { "structural": "allow", "text": "redact", "valueBearing": "reject" },
+    "reasoning": "reject",
+    "extensions": "allow"
+  }
+}
+```
+
+配置在交付运行时前必须校验并编译（模板无歧义、token 齐全、tag ≥96-bit、priority 唯一、长度阈值合法）。
+
+---
+
+# 11. 安全不变量与正确性
+
+## 11.1 往返一致性
+
+当 recognizer 区间覆盖目标原文、无交叉/碰撞、占位符未被修改、映射可用、通道被 `redact` 时：
+
+```text
+restore(redact(text, session, recognizers), session) === text
+```
+
+无法保证：漏检；交叉/碰撞（报错）；跨 part 不安全或撞缓存断点（报错）；模型改写；工具参数重序列化改字节；reasoning 签名保护；显式 `allow` 通道；`best_effort` 降级。
+
+## 11.2 不变量
+
+| 编号 | 不变量 |
+| --- | --- |
+| INV-1 | 被 `redact` 通道内的已识别区间原文不再出现。 |
+| INV-2 | 流仍可能继续时，不输出仍可能被补全的占位符前缀。 |
+| INV-3 | 内部诊断不含原文、映射或用户文本；warning 字段名净化。 |
+| INV-4 | 未知占位符不被换回为任何原文。 |
+| INV-5 | **仅 `strict` 模式**：recognizer 报错、区间非法、交叉、碰撞、缓冲超限、未覆盖通道时一律拒绝。 |
+| INV-6 | 换回保持 message_start/end 顺序、start/end 配对、kind+index 语义；delta 数量与边界可改。 |
+| INV-7 | 相同 `(type, original)` 在同一 Session 内恒得同一占位符。 |
+| INV-8 | 同一请求文本 + 确定性 recognizer ⇒ 相同占位符字节序列（异步顺序不影响）。 |
+| INV-9 | 工具参数通道换回后始终是合法 JSON（TR-003）。 |
+| INV-10 | extensions 默认不检查；仅 opt-in 路径受保护。 |
+| INV-11 | 客户端错误文本默认不恢复 PII；内部诊断与客户端文本隔离。 |
+| INV-12 | Privacy 层之前的 Codec 异常不得把用户输入带入 message/cause。 |
+| INV-13 | 检测边界 = 目标 Codec 语义文本边界。 |
+| INV-14 | Policy-aware EgressVerify：`policy` 档尊重 allow，`strict` 档覆盖 allow。 |
+| INV-15 | Cache Affinity 基于脱敏后内容，且为 HMAC 摘要而非原文摘要。 |
+| INV-16 | 流式换回使用最长匹配，前缀重叠占位符不误切。 |
+| INV-17 | 已注册匹配器与未知语法扫描器共享安全输出边界。 |
+| INV-18 | `best_effort` 降级必须在完成报告标记 `degraded`，不得宣称满足 INV-5。 |
+
+## 11.3 与凭据边界的关系
+
+隐私层与 header codec 的凭据处理正交；禁止读取 `Request.headers`（Legacy Cache Resolver 需显式授权）。
+
+---
+
+# 12. 测试与验收
+
+单元/集成 `tests/**/*.test.ts`（走 `translate()` 公开 API）；实时矩阵只在 `tests/testkit/` + `tests/cli.ts`；离线优先，无 key 时 skip。recognizer 用 mock。
+
+## 12.1 必测场景
+
+| 编号 | 场景 | 验收标准 |
+| --- | --- | --- |
+| PT-01 | recognizer 注入替换 | 生成模板占位符 |
+| PT-02 | 文本往返 | `restore(redact(x)) === x` |
+| PT-03 | 请求-响应同 session | 非流式响应精确换回 |
+| PT-04 | 流式换回跨 chunk | 不泄露残片、不丢字 |
+| PT-05 | 流式 tool_arguments | 换回后 `JSON.parse` 成功 |
+| PT-06 | 多 channel 交错 | 各 index 缓冲互不污染 |
+| PT-07 | 未知占位符 | 原样保留 + warning |
+| PT-08 | Span 裁决 | 覆盖取最外层；相等取 priority；交叉报错 |
+| PT-09 | 非法检测 | 越界/错 value/断代理对 |
+| PT-10 | recognizer 报错 | strict 拒绝；best_effort 标记降级 |
+| PT-11 | 请求间隔离 | 不同请求各自映射 |
+| PT-12 | 并发相同实体 | 仅一次映射 |
+| PT-13 | 活跃流 | 流未结束不释放映射 |
+| PT-14 | 缓冲超限 | strict 拒绝 |
+| PT-15 | 幂等 | `redact(redact(x)) === redact(x)` |
+| PT-16 | 敏感泄露 | trace/report 不含原文；warning 净化 |
+| PT-17 | 同协议直通 | 强制走 IR 并 warning |
+| PT-18 | 签名保护 | 命中拒绝；未命中透传 |
+| PT-19 | 类型规范化 | 归一；超长拒绝 |
+| PT-20 | 确定性分配 | 同文本同结果 |
+| PT-21 | 自定义模板 | 可生成并换回；非法拒绝 |
+| PT-22 | priority 校验 | 缺失/重复拒绝 |
+| PT-23 | 邮箱与域名重叠 | 取外层邮箱 |
+| PT-24 | 工具参数含引号/换行 | 换回后 JSON 合法 |
+| PT-25 | 流式延迟到 `text_end` | 结构不变量满足 |
+| PT-26 | 历史追加后重新分配 | 旧前缀编号稳定 |
+| PT-27 | Tag 与缓存模式 | 稳定密钥下可复现 |
+| PT-28 | 未注册占位符出现在正文 | 不信任 |
+| PT-29 | extensions 默认 allow / 路径 opt-in | 默认放行；opt-in 生效；opaque reject |
+| PT-30 | 流中途取消/异常 | 生命周期正确 |
+| PT-31 | 完成报告 | 四态统计 + securityMode/degraded |
+| PT-32 | 代理对中间的 Detection | 拒绝非法 Span |
+| PT-33 | Extension 双证据 | 转发证据与脱敏证据一致 |
+| PT-34 | 原文含将生成的占位符 | 碰撞拒绝 |
+| PT-35 | `unknown` 插入占位符 delta 之间 | 恢复状态不破坏 |
+| PT-36 | 不完整占位符遇 error/EOF | 默认原样+warning；strict 不输出残片 |
+| PT-37 | 工具 JSON Key 含占位符 | 不改 Key + warning |
+| PT-38 | 标准 Tool Schema 默认策略 | 普通工具可通过（命中才拒） |
+| PT-39 | 上游非 2xx 引用占位符 | 按 §8.5 处理 |
+| PT-40 | 超长 type / 工具参数 | 正确校验或拒绝 |
+| PT-41 | Stream 未消费/取消/异常 | 无错误恢复/资源保留 |
+| PT-42 | 默认 system 注入 | 追加默认提示词，`{template}` 已替换 |
+| PT-43 | 自定义/关闭 system | 自定义生效；`false` 不注入 |
+| PT-44 | 去重与缓存稳定 | 已含不重复；常量下前缀稳定 |
+| PT-45 | 注入文本不参与隐私处理 | 不识别/替换，不触发碰撞 |
+| PT-46 | 源 Codec 脱敏前异常 | 错误与内部诊断不含原始输入 |
+| PT-47 | 上游错误含已注册占位符 | 客户端与内部诊断隔离 |
+| PT-48 | Extension Opt-in 但 Codec 无报告 | 请求拒绝 |
+| PT-49 | Anthropic 同协议 + `cache_control`（system/messages/tools） | 保留，或明确拒绝/降级 |
+| PT-50 | OpenAI System 追加隐私提示 | 有明确分隔 |
+| PT-51 | recognizer 多字段异步乱序完成 | 编号与同步一致 |
+| PT-52 | Tool Schema 含 `enum`/`default` | 命中才拒，无一概阻断 |
+| PT-53 | Stream 内 `unknown` 事件 | 恢复状态正确 |
+| PT-54 | 自定义 system 含敏感信息/占位符字面量 | 受信约束，无预期外恢复 |
+| PT-55 | `PII-phone-1` 与 `PII-phone-10` 跨 Chunk | 最长匹配正确 |
+| PT-56 | 两个 IR Text Part 拼成手机号 | 不泄露完整号码 |
+| PT-57 | 脱敏结果相同、原文不同 | Cache Affinity 依脱敏语义稳定 |
+| PT-58 | 敏感信息位于 Cache Anchor | 不外发可枚举的原文摘要（HMAC） |
+| PT-59 | Anthropic Tool Definition 带 `cache_control` | 同协议往返保留 |
+| PT-61 | Renderer 声称转发但脱敏证据缺失 | 最终核对拒绝请求 |
+| PT-62 | 默认 allow 的 Extension 含已分配占位符 | 按碰撞策略处理 |
+| PT-63 | 短占位符完整到达，长占位符下一 Chunk 补齐 | 必须等待，不提前恢复 |
+| PT-64 | 已注册 Trie 与未知语法扫描器对同一前缀判断不同 | 采用共同安全边界 |
+| PT-65 | 原文恰好包含在生成的占位符内部 | EgressVerify 不误报 |
+| PT-66 | 默认 Allow 的 Extension 含已识别相同原文 | 与冻结的 Coverage 优先级一致 |
+| PT-67 | 脱敏区间跨 Cache Breakpoint | 拒绝或按明确缓存策略处理 |
+| PT-68 | 自定义模板动态 Token 相邻且解析歧义 | 配置编译阶段拒绝 |
+| PT-69 | Extension 已检查但无识别结果 | `inspected`，不误判为未执行 |
+| PT-70 | Cache Resolver 使用未经脱敏的请求元数据 | strict 阻断或要求显式授权 |
+| PT-71 | recognizer 故障并启用 best-effort | 报告 `degraded`，不宣称满足 INV-5 |
+
+> PT-60（工具参数恢复授权）V1 推迟，不纳入本轮冻结验收。
+
+## 12.2 Property-Based Testing
+
+- 随机文本 + 随机 chunk 切分，整段与流式换回一致；断言 INV-2。
+- **前缀重叠占位符 + 随机切分**：断言 Maximal Munch 正确（PT-55/63 泛化）。
+- **双匹配器前缀分歧**：断言共享安全边界（PT-64 泛化）。
+- 跨 part 拼接随机拆分：不泄露（PT-56 泛化）。
+- 随机多 recognizer（嵌套/相等/交叉/非法/乱序）：外层优先、相等取 priority、交叉报错、确定。
+- 异步乱序：随机延迟完成顺序，编号与串行一致。
+- JSON 转义：含 `"`、`\`、换行、控制字符、Emoji 时换回后 JSON 合法且值相等。
+- 缓存前缀稳定：逐步追加历史，旧编号不变。
+- 碰撞：随机注入模板形状字面量（含 allow 通道），碰撞拒绝。
+- Egress：随机构造 allow/非 allow 字段，断言 `policy`/`strict` 档语义正确。
+
+## 12.3 验收原则
+
+**正确性优先于流式延迟。** 只承诺「给定识别结果，映射与替换正确且可逆」；识别召回率属调用方 recognizer 验收范围。
+
+---
+
+# 13. 实施阶段
+
+| 阶段 | 内容 | 完成判据 |
+| --- | --- | --- |
+| **P0 前置（Codec/IR/Cache）** | IR `cache_control` 保真（system/messages/tools）；Codec 异常/Warning 归一化；`privacy` ErrorKind；Cache Affinity 重排 + HMAC + Resolver 拆分 | PT-46/49/57/58/70 通过 |
+| P1 核心域模型 | Detection / Recognizer / Session / SpanValidator / SpanResolver / CollisionGuard / 模板无歧义 + HMAC Tag | PT-01/02/08/09/15/19/21/22/28/34/68 通过 |
+| P2 请求侧集成 | redactRequest、拼接组检测 + 缓存断点规则、Coverage、Extension 双证据、system 注入、EgressVerify | PT-03/17/23/29/33/38/42/43/44/45/48/56/61/62/65/66/67/69 通过 |
+| P3 反向换回 | **Maximal Munch** + 共享安全边界 + JSON-aware Value-only + 错误路径隔离 | PT-04/05/24/37/39/47/55/63/64 通过 |
+| P4 流式不变量 | 事件表、弱化 INV-2、二次校验、缓冲上限 | PT-06/14/25/35/36/53 通过 |
+| P5 会话/缓存/Trace | 文档顺序串行分配、Tag 稳定性、完成报告四态 + securityMode、warning 净化 | PT-11/12/13/20/26/27/30/31/40/41/51/71 通过 |
+| P6 安全与验收 | 泄露断言、PBT、fixture 矩阵 | PT-16/18/32/50/52/54/59、`typecheck:all` + `npm test` + `compat --offline-only` |
+
+---
+
+# 附录 A：接口签名
+
+```ts
+export interface Detection {
+  start: number; end: number; type: string;
+  value?: string; confidence?: number; metadata?: unknown;
+}
+export interface RecognizerContext { channel: PrivacyChannel; path?: string; sessionId: string; }
+export interface PrivacyRecognizer {
+  priority: number;
+  recognize(text: string, context: RecognizerContext): Detection[] | Promise<Detection[]>;
+}
+
+export type PrivacyChannel =
+  | "system" | "message_text" | "tool_result" | "tool_arguments"
+  | "tool_description" | "tool_schema" | "reasoning" | "extensions" | "text";
+
+export type CoverageAction = "redact" | "allow" | "reject";
+export interface ToolSchemaCoverage {
+  structural?: CoverageAction; text?: CoverageAction; valueBearing?: CoverageAction;
+}
+export interface PrivacyCoveragePolicy {
+  system?: CoverageAction; message_text?: CoverageAction;
+  tool_result?: CoverageAction; tool_arguments?: CoverageAction;
+  tool_description?: CoverageAction;
+  tool_schema?: CoverageAction | ToolSchemaCoverage;
+  reasoning?: CoverageAction;
+  extensions?: CoverageAction | Record<string, CoverageAction>;
+}
+
+export interface CanonicalCacheControl { type: "ephemeral"; ttl?: string; }
+export interface CanonicalTool {
+  name: string; description?: string;
+  inputSchema: Record<string, unknown>; strict?: boolean;
+  cache?: CanonicalCacheControl;
+}
+
+export interface RenderedExtensionDisposition {
+  path: string; kind: "text" | "non-text" | "opaque";
+  forwarded: boolean; fieldId: string;
+}
+export interface ExtensionPrivacyProof {
+  path: string;
+  status: "inspected" | "transformed" | "rejected";
+  fieldId: string;
+}
+export interface CodecContext {
+  warnings: TranslationWarning[];
+  extensionDispositions?: RenderedExtensionDisposition[];
+}
+export interface RequestCodec { readonly supportsExtensionReport?: boolean; }
+
+export interface PrivacySafeCacheAffinityResolver {
+  resolve(canonical: CanonicalRequest): Promise<CacheAffinity | undefined>;
+}
+export interface LegacyCacheAffinityResolver {
+  resolve(request: Request, canonical: CanonicalRequest): Promise<CacheAffinity | undefined>;
+}
+
+export interface MappingEntry { /* §4.3 */ }
+export interface PrivacySessionView { /* §4.3 */ }
+export interface PrivacySessionOptions { template?: string; tagMode?: boolean; }
+
+export interface PrivacyEngine {
+  createSession(id?: string, options?: PrivacySessionOptions): PrivacySessionView;
+  getSession(id: string): PrivacySessionView | undefined;
+  destroySession(id: string): void;
+  redact(text: string, session: PrivacySessionView, recognizers: PrivacyRecognizer[],
+         context?: Partial<RecognizerContext>): Promise<string>;
+  restore(text: string, session: PrivacySessionView): string;
+}
+
+export interface PrivacyOptions {
+  recognizers: PrivacyRecognizer[];
+  coverage?: PrivacyCoveragePolicy;
+  mapping?: PrivacyMappingOptions;
+  recognition?: PrivacyRecognitionOptions;
+  streaming?: PrivacyStreamingOptions;
+  tagKey?: () => Uint8Array | Promise<Uint8Array>;
+  tagNamespace?: string;
+  system?: string | false;
+  errorRestore?: "never" | "trusted_client";
+  securityMode?: "strict" | "best_effort";
+  egress?: "policy" | "strict";
+  minEgressValueLength?: number;
+  allowLegacyCacheResolvers?: boolean;
+}
+
+export interface TranslateOptions<From, To> {
+  // ...既有一切字段
+  privacy?: PrivacyOptions;
+  onPrivacyComplete?: (report: PrivacyCompletionReport) => void;
+}
+
+export type ErrorKind =
+  | "validation" | "upstream" | "rate_limit" | "timeout"
+  | "cancelled" | "stream_protocol" | "unsupported" | "privacy";
+```
+
+# 附录 B：与参考文档的对应与差异
+
+| 参考文档概念 | 本项目落地 | 差异与理由 |
+| --- | --- | --- |
+| Detection | 完全下沉到调用方 | 识别由调用方实现，返回类型 + priority |
+| Span Resolver | 覆盖取最外层 / 相等取 priority / 交叉报错 | fail-closed |
+| 白名单 | 不提供 span 级 allowlist | 误报由调用方负责 |
+| Pseudonym Mapping / Session | 请求级、只读封装 | 无需持久化 Vault |
+| 占位符 | `<private_placeholder_{type}_{N}>`，Tag ≥96-bit 版本化 HMAC，模板无歧义 | 类型由调用方给出 |
+| Streaming 恢复 | Maximal Munch + 共享安全边界（含未知语法扫描） | 前缀重叠占位符必须最长匹配 |
+| 请求流 Safe Boundary | 请求体已物化，整段替换 | 现有 `translate()` 先 `arrayBuffer()` |
+| 多次 `str.replace()` | 先解析区间、统一替换、从后向前 | 避免偏移漂移 |
+| Unicode 偏移 | UTF-16 + 代理对边界校验 | 与既有 codec 一致 |
+| Session Vault / TTL | 进程内、请求级 | 每次请求均为原文 |
+| 占位符编号 | 按 IR 文档顺序串行分配 | 上游 prompt cache 命中 |
+| 工具参数恢复 | JSON-aware Value-only；V1 无授权层 | 直接替换会破坏 JSON；授权留后续 |
+| 缓存标识 | 脱敏后内容 + HMAC；Resolver 受信拆分 | 避免原文摘要外发与缓存不一致 |
+| Egress 校验 | Policy-aware（默认尊重 allow） | 避免与 Coverage 冲突 |
+
+# 附录 C：占位符语法与冲突规则
+
+```text
+placeholder := 由 template 实例化（字面量 + {type} + {N} + {tag}?）
+type        := [a-z0-9_]+          // 长度 ≤ maxTypeLength
+seq         := [1-9][0-9]*         // {N}
+tag         := hex(HMAC-SHA256(key, "llm-protocol-privacy-v1\0" + ns + "\0" + type + "\0" + original))
+               .slice(0, 2*tagBytes)   // tagBytes ≥ 12（≥96-bit）
+```
+
+冲突与边界规则：
+
+1. 保护区仅限**已注册**占位符；未注册形状匹配文本按普通输入处理或 reject。
+2. 原文等于已注册占位符字面量 → 跳过 + warning。
+3. 原文含将生成的占位符（**任何模型可见文本**，含 allow 通道）→ 碰撞拒绝。
+4. 分配时与已有占位符重名 → 递增 `seq` 重试。
+5. 换回时未知占位符不还原；tagMode 下 Tag 校验失败视为未知。
+6. 占位符长度 ≤ `maxPlaceholderLength`；`type` 长度 ≤ `maxTypeLength`。
+7. Span 裁决：覆盖取最外层；相等取 priority；交叉报错。
+8. JSON 工具参数：只处理字符串 Value，不处理 Key。
+9. `system` 注入文本在碰撞扫描之后追加，不参与 `existingShaped`。
+10. 流式换回使用 **Maximal Munch**；已注册匹配器与未知语法扫描器共享安全边界。
+11. 模板动态 Token 之间必须有固定字面量分隔，禁止相邻动态 Token。
+12. 脱敏区间跨越带 `cache` 元数据的 Part 边界 → 拒绝。
