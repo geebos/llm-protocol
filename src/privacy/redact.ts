@@ -195,6 +195,16 @@ export async function redactRegions(
 
   for (const region of regions) {
     const text = regionText(region);
+    if (
+      region.channel === "tool_arguments" &&
+      text.length > config.streaming.maxToolArgumentBytes
+    ) {
+      guard(
+        "privacy_buffer_overflow",
+        "Tool arguments exceed the configured privacy limit",
+        region.path,
+      );
+    }
     if (region.detectOnly) {
       const detections = await collectDetections(region, text, config, session.id, state);
       if (detections.length) {

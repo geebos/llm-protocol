@@ -187,4 +187,35 @@ describe("coverage policy", () => {
       ),
     ).rejects.toBeDefined();
   });
+
+  it("rejects oversized tool arguments (PT-40)", async () => {
+    const forward = translate({
+      from: "openai-chat",
+      to: "anthropic-messages",
+      fetch: fetchOk(),
+      privacy: {
+        recognizers: [phoneRecognizer()],
+        streaming: { maxToolArgumentBytes: 100 },
+      },
+    });
+    await expect(
+      forward(
+        openaiRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "f", arguments: JSON.stringify({ x: "1".repeat(500) }) },
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "privacy", code: "privacy_buffer_overflow" });
+  });
 });
