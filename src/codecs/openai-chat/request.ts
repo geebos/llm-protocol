@@ -219,9 +219,9 @@ export function createOpenAiChatRequestCodec(
         if (!EXTENSION_FIELDS.includes(key)) {
           ctx.warnings.push({
             code: "dropped_extension",
-            message: `Extension "${key}" cannot be represented in OpenAI Chat request`,
+            message: "Extension cannot be represented in OpenAI Chat request",
             fidelity: "LOSSY",
-            field: `extensions.${key}`,
+            field: "extensions",
           });
         }
       }

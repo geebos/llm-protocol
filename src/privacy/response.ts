@@ -24,6 +24,7 @@ export function restoreResponse(
   session: PrivacySession,
   template: CompiledTemplate,
   maxPlaceholderLength: number,
+  maxToolArgumentBytes = 1024 * 1024,
 ): RestoreCounts {
   const entries = session.snapshot();
   const counts: RestoreCounts = {
@@ -47,6 +48,14 @@ export function restoreResponse(
       if (part.type === "text") {
         part.text = restoreField(part.text);
       } else if (part.type === "tool_call") {
+        if (part.argumentsText.length > maxToolArgumentBytes) {
+          counts.warnings.push({
+            code: "privacy_buffer_overflow",
+            message: "Tool arguments exceed the restore limit and were left unrestored",
+            field: "content.tool_call.arguments",
+          });
+          continue;
+        }
         const result = restoreJsonText(
           part.argumentsText,
           template,

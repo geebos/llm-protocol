@@ -217,13 +217,13 @@ export const anthropicRequestCodec: RequestCodec = {
       body.messages = messages.map((m) => renderMessage(m, ctx));
     }
     if (canonical.tools?.length) {
-      body.tools = canonical.tools.map((t) => {
+      body.tools = canonical.tools.map((t, ti) => {
         if (t.strict !== undefined) {
           ctx.warnings.push({
             code: "tool_strict",
-            message: `Tool "${t.name}" strict flag is not representable in Anthropic`,
+            message: "Tool strict flag is not representable in Anthropic",
             fidelity: "LOSSY",
-            field: `tools.${t.name}.strict`,
+            field: `tools[${ti}].strict`,
           });
         }
         return {
@@ -268,9 +268,9 @@ export const anthropicRequestCodec: RequestCodec = {
       if (key !== "topK" && key !== "metadata" && key !== "service_tier") {
         ctx.warnings.push({
           code: "dropped_extension",
-          message: `Extension "${key}" cannot be represented in Anthropic request`,
+          message: "Extension cannot be represented in Anthropic request",
           fidelity: "LOSSY",
-          field: `extensions.${key}`,
+          field: "extensions",
         });
       }
     }

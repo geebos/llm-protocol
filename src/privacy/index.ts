@@ -72,7 +72,7 @@ export { buildSystemNotice, DEFAULT_SYSTEM_NOTICE } from "./system.js";
 export { verifyEgress } from "./egress.js";
 export {
   verifyExtensions,
-  type ExtensionCoverageEntry,
+  buildExtensionProofs,
 } from "./extension-verify.js";
 export { createPrivacyEngine } from "./engine.js";
 export {

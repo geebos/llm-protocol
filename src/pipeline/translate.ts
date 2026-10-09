@@ -37,13 +37,14 @@ import { PrivacySession } from "../privacy/session.js";
 import { PrivacyGuardError } from "../privacy/errors.js";
 import { redactCanonicalRequest, injectSystemNotice } from "../privacy/runtime.js";
 import { verifyEgress } from "../privacy/egress.js";
-import { verifyExtensions, type ExtensionCoverageEntry } from "../privacy/extension-verify.js";
+import { verifyExtensions } from "../privacy/extension-verify.js";
 import { restoreResponse } from "../privacy/response.js";
 import { restoreString } from "../privacy/restore.js";
 import { createPrivacyStreamRestore } from "../privacy/stream.js";
 import { toTranslationWarning } from "../privacy/config.js";
 import type {
   PrivacyCompletionReport,
+  PrivacyRequestTrace,
   PrivacyWarning,
 } from "../privacy/types.js";
 
@@ -138,8 +139,8 @@ export function translate<
 
     let privacySession: PrivacySession | undefined;
     let allowTexts: string[] = [];
-    let extensionsCoverage: ExtensionCoverageEntry[] = [];
-    let transformedExtensions: string[] = [];
+    let extensionProofs: import("../privacy/types.js").ExtensionPrivacyProof[] = [];
+    let privacyRequestTrace: PrivacyRequestTrace | undefined;
     let privacyFinalized = false;
     const reportState: PrivacyReportState | undefined = privacyConfig
       ? {
@@ -238,8 +239,12 @@ export function translate<
         reportState.invalidDetections = outcome.invalidDetections;
         reportState.degraded = reportState.degraded || outcome.degraded;
         allowTexts = outcome.allowTexts;
-        extensionsCoverage = outcome.extensionsCoverage;
-        transformedExtensions = outcome.transformedExtensions;
+        extensionProofs = outcome.extensionProofs;
+        privacyRequestTrace = {
+          sessionId: traceId,
+          redacted: outcome.redacted,
+          channelsCovered: outcome.channels,
+        };
         for (const warning of outcome.warnings) pushPrivacyWarning(warning);
         injectSystemNotice(canonicalRequest, privacyConfig);
       }
@@ -319,8 +324,7 @@ export function translate<
           verifyExtensions(
             target.request.supportsExtensionReport === true,
             ctx.extensionDispositions,
-            extensionsCoverage,
-            transformedExtensions,
+            extensionProofs,
           );
           verifyEgress(outboundPayload, privacySession, privacyConfig, allowTexts);
         } catch (err) {
@@ -350,6 +354,7 @@ export function translate<
         targetEndpoint: targetUrl.pathname,
         passthrough: false,
         warnings: ctx.warnings,
+        ...(privacyRequestTrace ? { privacy: privacyRequestTrace } : {}),
         ...(cacheApplication ? { cache: cacheApplication.report } : {}),
       };
 
@@ -439,6 +444,7 @@ export function translate<
           privacySession,
           privacyConfig.template,
           privacyConfig.streaming.maxPlaceholderLength,
+          privacyConfig.streaming.maxToolArgumentBytes,
         );
         reportState.restored += counts.restored;
         reportState.unknown += counts.unknown;

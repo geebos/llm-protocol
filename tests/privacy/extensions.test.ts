@@ -139,13 +139,21 @@ describe("extension double evidence", () => {
 
   it("fails closed when the codec does not report evidence (PT-48)", () => {
     expect(() =>
-      verifyExtensions(false, undefined, [{ path: "extensions.metadata", action: "redact" }], []),
+      verifyExtensions(
+        false,
+        undefined,
+        [{ path: "extensions.metadata", fieldId: "extensions.metadata", status: "inspected" }],
+      ),
     ).toThrow(PrivacyGuardError);
   });
 
   it("fails closed when forwarding evidence is missing (PT-61)", () => {
     expect(() =>
-      verifyExtensions(true, [], [{ path: "extensions.metadata", action: "redact" }], []),
+      verifyExtensions(
+        true,
+        [],
+        [{ path: "extensions.metadata", fieldId: "extensions.metadata", status: "transformed" }],
+      ),
     ).toThrow(PrivacyGuardError);
   });
 
@@ -154,8 +162,7 @@ describe("extension double evidence", () => {
       verifyExtensions(
         true,
         [{ path: "extensions.metadata", kind: "text", forwarded: false, fieldId: "extensions.metadata" }],
-        [{ path: "extensions.metadata", action: "redact" }],
-        [],
+        [{ path: "extensions.metadata", fieldId: "extensions.metadata", status: "inspected" }],
       ),
     ).toThrow(PrivacyGuardError);
   });

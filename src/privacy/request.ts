@@ -58,19 +58,33 @@ function pushTextRegion(
   );
 }
 
-/** Region covering every text part in `parts` (used for tool_result content). */
-function pushAllText(
+/**
+ * Build one region per run of ADJACENT text parts. A non-text part is never
+ * crossed, so the detection boundary stays equal to the codec's semantic join
+ * boundary and a detection can never span an unrewritable gap (INV-13).
+ */
+function pushTextRuns(
   parts: ContentPart[],
   channel: Region["channel"],
   path: string,
   action: Action,
   regions: Region[],
 ): void {
-  const indices: number[] = [];
-  parts.forEach((part, i) => {
-    if (part.type === "text") indices.push(i);
-  });
-  pushTextRegion(parts, indices, channel, path, action, regions);
+  let i = 0;
+  while (i < parts.length) {
+    if (parts[i].type !== "text") {
+      i++;
+      continue;
+    }
+    let j = i;
+    const indices: number[] = [];
+    while (j < parts.length && parts[j].type === "text") {
+      indices.push(j);
+      j++;
+    }
+    pushTextRegion(parts, indices, channel, path, action, regions);
+    i = j;
+  }
 }
 
 interface JsonHolder {
@@ -256,7 +270,7 @@ export function collectRequestRegions(
   const extraHaystack: string[] = [];
 
   if (canonical.system?.length) {
-    pushAllText(canonical.system, "system", "system.content", coverage.system, regions);
+    pushTextRuns(canonical.system, "system", "system.content", coverage.system, regions);
   }
 
   canonical.messages.forEach((message, mi) => {
@@ -282,7 +296,7 @@ export function collectRequestRegions(
         continue;
       }
       if (part.type === "tool_result") {
-        pushAllText(
+        pushTextRuns(
           part.content,
           "tool_result",
           `${path}.content`,

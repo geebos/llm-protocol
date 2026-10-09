@@ -155,6 +155,52 @@ describe("privacy security invariants", () => {
     expect(body.error.message).toBe("not json at all");
   });
 
+  it("leaves oversized response tool arguments unrestored (PT-40)", async () => {
+    const cap = capturingFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-5",
+            content: [
+              {
+                type: "tool_use",
+                id: "t1",
+                name: "f",
+                input: { blob: "x".repeat(200), ref: "<private_placeholder_phone_1>" },
+              },
+            ],
+            stop_reason: "tool_use",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    let overflowed = false;
+    const forward = translate({
+      from: "openai-chat",
+      to: "anthropic-messages",
+      fetch: cap.fetch,
+      privacy: {
+        recognizers: [phoneRecognizer()],
+        streaming: { maxToolArgumentBytes: 50 },
+      },
+      onPrivacyComplete: (report) => {
+        overflowed = report.warnings.some((w) => w.code === "privacy_buffer_overflow");
+      },
+    });
+    const response = await forward(openaiContentRequest(`call ${PHONE}`));
+    const body = (await response.json()) as {
+      choices: { message: { tool_calls?: { function: { arguments: string } }[] } };
+    };
+    expect(overflowed).toBe(true);
+    expect(body.choices[0].message.tool_calls?.[0].function.arguments).toContain(
+      "<private_placeholder_phone_1>",
+    );
+  });
+
   it("rejects a range crossing a cache breakpoint (PT-67)", async () => {
     const cap = capturingFetch(okAnthropic);
     const forward = translate({

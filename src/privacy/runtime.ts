@@ -8,11 +8,13 @@
  */
 import type { CanonicalRequest } from "../ir/types.js";
 import type { ResolvedPrivacyConfig } from "./config.js";
-import type { PrivacyChannel, PrivacyWarning } from "./types.js";
-import { collectRequestRegions } from "./request.js";
+import {
+  collectRequestRegions,
+} from "./request.js";
 import { redactRegions } from "./redact.js";
 import { buildSystemNotice } from "./system.js";
-import type { ExtensionCoverageEntry } from "./extension-verify.js";
+import { buildExtensionProofs } from "./extension-verify.js";
+import type { ExtensionPrivacyProof, PrivacyChannel, PrivacyWarning } from "./types.js";
 import type { PrivacySession } from "./session.js";
 
 export interface RequestPrivacyOutcome {
@@ -22,8 +24,7 @@ export interface RequestPrivacyOutcome {
   channels: PrivacyChannel[];
   allowTexts: string[];
   warnings: PrivacyWarning[];
-  extensionsCoverage: ExtensionCoverageEntry[];
-  transformedExtensions: string[];
+  extensionProofs: ExtensionPrivacyProof[];
 }
 
 /** Redact every redactable channel of a canonical request in place. */
@@ -44,8 +45,10 @@ export async function redactCanonicalRequest(
     channels: [...result.channels] as PrivacyChannel[],
     allowTexts: result.allowTexts,
     warnings: result.warnings,
-    extensionsCoverage,
-    transformedExtensions: result.transformedExtensions,
+    extensionProofs: buildExtensionProofs(
+      extensionsCoverage,
+      result.transformedExtensions,
+    ),
   };
 }
 

@@ -249,6 +249,30 @@ describe("privacy through translate()", () => {
     expect(traceJson).not.toContain("13800138000");
   });
 
+  it("exposes a sanitized privacy request trace (PR-012)", async () => {
+    const cap = capturingFetch(
+      () =>
+        new Response(JSON.stringify(anthropicResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    let privacy: import("../../src/index.js").TranslationTrace["privacy"];
+    const forward = translate({
+      from: "openai-chat",
+      to: "anthropic-messages",
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+      trace: (t) => {
+        privacy = t.privacy;
+      },
+    });
+    await forward(openaiRequest());
+    expect(privacy?.redacted).toBeGreaterThan(0);
+    expect(privacy?.channelsCovered).toContain("message_text");
+    expect(JSON.stringify(privacy)).not.toContain("13800138000");
+  });
+
   it("reports completion with the security mode (PT-31)", async () => {
     const cap = capturingFetch(
       () =>

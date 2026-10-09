@@ -192,6 +192,7 @@ export async function redactRegions(
     warnings: [] as PrivacyWarning[],
   };
   const collected = new Map<Region, { text: string; detections: ValidatedDetection[]; action: "redact" | "reject" }>();
+  const channels = new Set<string>();
 
   for (const region of regions) {
     const text = regionText(region);
@@ -206,6 +207,7 @@ export async function redactRegions(
       );
     }
     if (region.detectOnly) {
+      channels.add(region.channel);
       const detections = await collectDetections(region, text, config, session.id, state);
       if (detections.length) {
         guard(
@@ -218,6 +220,7 @@ export async function redactRegions(
     }
     const action = regionAction(region);
     if (action === "allow") continue;
+    channels.add(region.channel);
     const detections = await collectDetections(region, text, config, session.id, state);
     if (action === "reject") {
       if (detections.length) {
@@ -238,7 +241,6 @@ export async function redactRegions(
   ].join("\u0000");
 
   let redacted = 0;
-  const channels = new Set<string>();
   const allowTexts: string[] = [];
   const transformedExtensions = new Set<string>();
 

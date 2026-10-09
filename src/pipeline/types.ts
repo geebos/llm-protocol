@@ -7,7 +7,7 @@ import type { ProviderProfile } from "../capabilities/provider-profile.js";
 import type { TranslationPolicies } from "../ir/policies.js";
 import type { CacheAffinityResolver, PrivacySafeCacheAffinityResolver } from "../cache/resolver.js";
 import type { CacheTranslationReport } from "../cache/types.js";
-import type { PrivacyCompletionReport, PrivacyOptions } from "../privacy/types.js";
+import type { PrivacyCompletionReport, PrivacyOptions, PrivacyRequestTrace } from "../privacy/types.js";
 
 export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> {
   from: From;
@@ -111,6 +111,8 @@ export interface TranslationTrace {
   /** Worst fidelity observed across warnings (EXACT if none). */
   fidelity: Fidelity;
   warnings: TranslationWarning[];
+  /** Request-side privacy summary (when privacy is enabled). */
+  privacy?: PrivacyRequestTrace;
   /** Cache affinity summary (when `cache` is enabled on the factory). */
   cache?: CacheTranslationReport;
 }
