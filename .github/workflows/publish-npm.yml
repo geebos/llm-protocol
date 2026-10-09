@@ -98,5 +98,14 @@ jobs:
 
       # Trusted Publishing: npm CLI detects GitHub OIDC automatically.
       # Do NOT set NODE_AUTH_TOKEN — that forces classic token auth.
+      # Prerelease versions (e.g. 1.3.0-beta.0) must NOT move `latest`;
+      # publish them under the `beta` dist-tag instead.
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "Prerelease $VERSION -> dist-tag beta"
+            npm publish --access public --provenance --tag beta
+          else
+            npm publish --access public --provenance
+          fi
