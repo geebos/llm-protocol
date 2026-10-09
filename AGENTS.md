@@ -32,9 +32,25 @@ llm-protocol/
 │   ├── pipeline/               # 主 API
 │   │   ├── types.ts            #   TranslateOptions / TranslationTrace
 │   │   └── translate.ts        #   translate() 透明转换工厂（唯一公开入口）
+│   ├── privacy/                # 隐私识别-替换（P1-P6，docs/privacy-transform.md）
+│   │   ├── types.ts            #   Detection / Recognizer / Session / PrivacyOptions
+│   │   ├── template.ts         #   占位符模板编译 / HMAC tag
+│   │   ├── detection.ts        #   Span 校验与裁决
+│   │   ├── session.ts          #   请求级映射（确定性串行分配）
+│   │   ├── redact.ts           #   收集→裁决→分配→替换
+│   │   ├── request.ts          #   IR 通道遍历与拼接组
+│   │   ├── coverage.ts         #   Coverage Policy
+│   │   ├── restore.ts          #   Maximal Munch / JSON-aware 换回
+│   │   ├── stream.ts           #   流式换回状态机
+│   │   ├── response.ts         #   响应侧换回
+│   │   ├── egress.ts           #   Policy-aware EgressVerify
+│   │   ├── extension-verify.ts #   Extension 双证据
+│   │   ├── system.ts           #   System 提示注入
+│   │   └── engine.ts           #   redact/restore 便捷引擎
 │   └── index.ts                # 公共出口
 ├── tests/                      # 测试资产（不随包发布，`files: ["dist"]`）
 │   ├── cli.ts                  #   兼容性测试 CLI（M5，compat-runner）
+│   ├── privacy/                #   隐私层测试（engine/pipeline/stream/coverage/security/pbt）
 │   ├── testkit/                #   多 Provider 测试框架（M5）
 │   │   ├── types.ts            #     ProviderConfig / Scenario / RunResult
 │   │   ├── providers.ts        #     配置解析 / 内置三类 Provider / key 脱敏
@@ -75,7 +91,7 @@ npm run compat -- --offline-only   # 离线 fixture 矩阵（必跑，不打真�
 ### 规范
 
 1. **走公开 API**：端到端用例必须通过 `translate()` 工厂（输入标准 `Request`，输出标准 `Response`），不绕过主 API 只测底层 codec；底层 codec 单独测试放同目录。
-2. **测试文件命名** `*.test.ts`，按**前置协议（请求源协议）归目录**：`tests/openai-chat/`（openai-chat → anthropic-messages）、`tests/anthropic-messages/`（anthropic-messages → openai-chat），目录内按功能分文件（`pipeline / streaming / policies / hardening / nonstream-compat / pipeline-errors / tooling-e2e / cache / streams-compat` 等）；无方向/双向/公共测试留在 `tests/` 根目录（`formats / codecs / cross-render / streams / streams-edge / sdk-smoke / testkit / pipeline-common`）。
+2. **测试文件命名** `*.test.ts`，按**前置协议（请求源协议）归目录**：`tests/openai-chat/`（openai-chat → anthropic-messages）、`tests/anthropic-messages/`（anthropic-messages → openai-chat），目录内按功能分文件（`pipeline / streaming / policies / hardening / nonstream-compat / pipeline-errors / tooling-e2e / cache / streams-compat` 等）；隐私层（跨协议）放 `tests/privacy/`（`engine / pipeline / stream / coverage / extensions / cache / best-effort / security / pbt / config`）；无方向/双向/公共测试留在 `tests/` 根目录（`formats / codecs / cross-render / streams / streams-edge / sdk-smoke / testkit / pipeline-common`）。
 3. **每个里程碑/需求映射到测试**：新增需求时，先写覆盖验收条件的测试（失败）→ 实现 → 通过。离线 fixture 优先（不打真实 API）。
 4. **live 场景纪律**：live 测试只在 `tests/testkit/` 中通过 `tests/cli.ts`（compat-runner）运行，**禁止**放进 `tests/` 根目录的普通单测（会因无 key/网络不可用而破坏 CI）。无 key 时必须 skip 而非 fail。
 5. **断言纪律**：
