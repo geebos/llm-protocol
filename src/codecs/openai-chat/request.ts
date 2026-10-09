@@ -14,6 +14,7 @@ import { unsupportedError, validationError } from "../../errors.js";
 import type { CodecContext, RequestCodec } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
+import { recordExtensionDisposition } from "../extension-evidence.js";
 
 const IR_MAPPED_FIELDS = [
   "model",
@@ -81,6 +82,8 @@ export function createOpenAiChatRequestCodec(
   const reasoningField = profile.capabilities.reasoningField;
 
   return {
+    supportsExtensionReport: true,
+
     detectStreaming(payload: unknown): boolean {
       const p = payload as { stream?: unknown };
       return p?.stream === true;
@@ -221,6 +224,10 @@ export function createOpenAiChatRequestCodec(
             field: `extensions.${key}`,
           });
         }
+      }
+      for (const key of Object.keys(ext)) {
+        const forwarded = key === "reasoning_effort" || EXTENSION_FIELDS.includes(key);
+        recordExtensionDisposition(ctx, key, ext[key], forwarded);
       }
 
       // TH-004: never silently drop a thinking configuration request. Only

@@ -10,6 +10,7 @@
 import { createPlaceholderMatcher, type PlaceholderMatcher } from "./trie.js";
 import {
   parsePlaceholder,
+  partialPlaceholderStart,
   scanTemplateShape,
   type CompiledTemplate,
 } from "./template.js";
@@ -77,12 +78,10 @@ export function restoreText(
       pos = shapeEnd;
       continue;
     }
-    if (!options.final) {
-      const partial = matcher.partialPrefixStart(buffer.slice(pos));
-      if (partial < buffer.length - pos) {
-        out += buffer.slice(pos, pos + partial);
-        return holdTail(pos + partial);
-      }
+    const tailStart = partialPlaceholderStart(compiled, buffer, pos);
+    if (tailStart < buffer.length) {
+      out += buffer.slice(pos, tailStart);
+      return holdTail(tailStart);
     }
     out += buffer[pos];
     pos++;

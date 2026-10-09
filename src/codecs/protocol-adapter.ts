@@ -17,6 +17,11 @@ import type { CanonicalStreamEvent } from "../streams/types.js";
 /** Collector for fidelity warnings produced during a single translation. */
 export interface CodecContext {
   warnings: TranslationWarning[];
+  /**
+   * Extension fields the codec rendered, with kind and whether they were
+   * forwarded (PR-014 evidence 1). Populated by `renderRequest`.
+   */
+  extensionDispositions?: import("../privacy/types.js").RenderedExtensionDisposition[];
 }
 
 export function newCodecContext(): CodecContext {
@@ -51,6 +56,8 @@ export interface HeaderCodec {
 }
 
 export interface RequestCodec {
+  /** Whether this codec reports extension forwarding evidence (PR-014). */
+  readonly supportsExtensionReport?: boolean;
   detectStreaming(payload: unknown): boolean;
   parseRequest(payload: unknown, ctx?: CodecContext): CanonicalRequest;
   renderRequest(

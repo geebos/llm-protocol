@@ -17,6 +17,8 @@ export interface RequestRegions {
   regions: Region[];
   /** Model-visible strings in default-allow extensions (collision / egress). */
   extraHaystack: string[];
+  /** Extension paths with a non-allow coverage action (PR-014 evidence 2). */
+  extensionsCoverage: { path: string; action: "redact" | "reject" }[];
 }
 
 function textSegments(parts: ContentPart[], indices: number[]): TextSegment[] {
@@ -365,22 +367,67 @@ export function collectRequestRegions(
   });
 
   const extensions = canonical.extensions ?? {};
+  const extensionsCoverage: { path: string; action: "redact" | "reject" }[] = [];
   for (const [key, value] of Object.entries(extensions)) {
     const action = extensionAction(coverage, key);
+    const path = `extensions.${key}`;
     if (action === "allow") {
       collectStrings(value, extraHaystack);
-    } else if (action === "reject") {
+      continue;
+    }
+    extensionsCoverage.push({ path, action });
+    if (action === "reject") {
       regions.push({
         channel: "extensions",
-        path: `extensions.${key}`,
+        path,
         segments: [{ get: () => stringifyShallow(value), set: () => undefined }],
         detectOnly: true,
         rejectCode: "privacy_uncovered_channel",
       });
+      continue;
+    }
+    // redact: operate on the extension's string values (Value-only).
+    if (typeof value === "string") {
+      const holder = { value };
+      regions.push(
+        setRegionAction(
+          {
+            channel: "extensions",
+            path,
+            segments: [
+              {
+                get: () => holder.value,
+                set: (v: string) => {
+                  holder.value = v;
+                },
+              },
+            ],
+            serialize: () => holder.value,
+            write: (text: string) => {
+              extensions[key] = text;
+            },
+          },
+          "redact",
+        ),
+      );
+    } else {
+      const slots = collectJsonSlots(value);
+      if (slots.values.length) {
+        regions.push(
+          setRegionAction(
+            {
+              channel: "extensions",
+              path,
+              segments: slots.values,
+            },
+            "redact",
+          ),
+        );
+      }
     }
   }
 
-  return { regions, extraHaystack };
+  return { regions, extraHaystack, extensionsCoverage };
 }
 
 function collectStrings(value: unknown, out: string[]): void {

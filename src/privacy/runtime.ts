@@ -12,6 +12,7 @@ import type { PrivacyChannel, PrivacyWarning } from "./types.js";
 import { collectRequestRegions } from "./request.js";
 import { redactRegions } from "./redact.js";
 import { buildSystemNotice } from "./system.js";
+import type { ExtensionCoverageEntry } from "./extension-verify.js";
 import type { PrivacySession } from "./session.js";
 
 export interface RequestPrivacyOutcome {
@@ -21,6 +22,8 @@ export interface RequestPrivacyOutcome {
   channels: PrivacyChannel[];
   allowTexts: string[];
   warnings: PrivacyWarning[];
+  extensionsCoverage: ExtensionCoverageEntry[];
+  transformedExtensions: string[];
 }
 
 /** Redact every redactable channel of a canonical request in place. */
@@ -29,7 +32,10 @@ export async function redactCanonicalRequest(
   config: ResolvedPrivacyConfig,
   session: PrivacySession,
 ): Promise<RequestPrivacyOutcome> {
-  const { regions, extraHaystack } = collectRequestRegions(canonical, config.coverage);
+  const { regions, extraHaystack, extensionsCoverage } = collectRequestRegions(
+    canonical,
+    config.coverage,
+  );
   const result = await redactRegions(regions, session, config, extraHaystack);
   return {
     redacted: result.redacted,
@@ -37,7 +43,9 @@ export async function redactCanonicalRequest(
     degraded: result.degraded,
     channels: [...result.channels] as PrivacyChannel[],
     allowTexts: result.allowTexts,
-    warnings: [...config.warnings, ...result.warnings],
+    warnings: result.warnings,
+    extensionsCoverage,
+    transformedExtensions: result.transformedExtensions,
   };
 }
 

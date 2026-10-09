@@ -19,6 +19,7 @@ import {
 } from "./content.js";
 import { normalizeAnthropicTurns } from "./normalize.js";
 import { isEphemeralCacheControl } from "../../cache/anthropic/cache-control.js";
+import { recordExtensionDisposition } from "../extension-evidence.js";
 
 /** Anthropic requires an explicit max_tokens; OpenAI Chat does not. */
 const DEFAULT_MAX_TOKENS = 1024;
@@ -144,6 +145,8 @@ function parseThinking(
 }
 
 export const anthropicRequestCodec: RequestCodec = {
+  supportsExtensionReport: true,
+
   detectStreaming(payload: unknown): boolean {
     const p = payload as { stream?: unknown };
     return p?.stream === true;
@@ -270,6 +273,10 @@ export const anthropicRequestCodec: RequestCodec = {
           field: `extensions.${key}`,
         });
       }
+    }
+    for (const key of Object.keys(ext)) {
+      const forwarded = key === "topK" || key === "metadata" || key === "service_tier";
+      recordExtensionDisposition(ctx, key, ext[key], forwarded);
     }
 
     if (canonical.thinking) {

@@ -39,6 +39,8 @@ export interface RedactResult {
   allowTexts: string[];
   /** Sanitized warnings produced during redaction. */
   warnings: PrivacyWarning[];
+  /** Extension paths whose string values were actually transformed. */
+  transformedExtensions: string[];
 }
 
 interface Replacement {
@@ -203,6 +205,7 @@ export async function redactRegions(
   let redacted = 0;
   const channels = new Set<string>();
   const allowTexts: string[] = [];
+  const transformedExtensions = new Set<string>();
 
   for (const region of regions) {
     const entry = collected.get(region);
@@ -236,6 +239,7 @@ export async function redactRegions(
     if (reps.length) {
       applyReplacements(region.segments, reps);
       if (region.serialize && region.write) region.write(region.serialize());
+      if (region.channel === "extensions") transformedExtensions.add(region.path);
     }
   }
 
@@ -253,6 +257,7 @@ export async function redactRegions(
     channels,
     allowTexts: [...allowTexts, ...extraHaystack],
     warnings: state.warnings,
+    transformedExtensions: [...transformedExtensions],
   };
 }
 

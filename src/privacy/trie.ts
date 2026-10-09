@@ -19,8 +19,6 @@ function newNode(): TrieNode {
 export interface PlaceholderMatcher {
   root: TrieNode;
   matchAt(buffer: string, start: number, final: boolean): MatchResult;
-  /** Earliest index at which `buffer` ends with a partial template prefix. */
-  partialPrefixStart(buffer: string): number;
 }
 
 export type MatchResult =
@@ -65,14 +63,5 @@ export function createPlaceholderMatcher(
     return accepted ?? { kind: "no_match" };
   }
 
-  function partialPrefixStart(buffer: string): number {
-    const prefix = compiled.prefix;
-    const max = Math.min(prefix.length - 1, buffer.length);
-    for (let len = max; len >= 1; len--) {
-      if (buffer.endsWith(prefix.slice(0, len))) return buffer.length - len;
-    }
-    return buffer.length;
-  }
-
-  return { root, matchAt, partialPrefixStart };
+  return { root, matchAt };
 }

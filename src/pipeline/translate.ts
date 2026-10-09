@@ -28,13 +28,16 @@ import type { TranslationTrace, TranslateOptions, ForwardTranslator } from "./ty
 import { createSSEParser, createCanonicalValidator, withAnthropicKeepAlive } from "../streams/index.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
-import { resolveCacheAffinity, DEFAULT_CACHE_RESOLVERS } from "../cache/resolver.js";
+import { resolveCacheAffinity, resolvePrivacySafeCacheAffinity, DEFAULT_CACHE_RESOLVERS } from "../cache/resolver.js";
+import type { CacheAffinity } from "../cache/types.js";
+import { createAnthropicPrivacySafeCacheResolver } from "../cache/anthropic/privacy-safe-cache.js";
 import { applyOpenAIChatCacheAffinity } from "../cache/openai-chat/apply-cache-affinity.js";
 import { resolvePrivacyConfig, type ResolvedPrivacyConfig } from "../privacy/config.js";
 import { PrivacySession } from "../privacy/session.js";
 import { PrivacyGuardError } from "../privacy/errors.js";
 import { redactCanonicalRequest, injectSystemNotice } from "../privacy/runtime.js";
 import { verifyEgress } from "../privacy/egress.js";
+import { verifyExtensions, type ExtensionCoverageEntry } from "../privacy/extension-verify.js";
 import { restoreResponse } from "../privacy/response.js";
 import { restoreString } from "../privacy/restore.js";
 import { createPrivacyStreamRestore } from "../privacy/stream.js";
@@ -45,10 +48,17 @@ import type {
 } from "../privacy/types.js";
 
 async function readErrorPayload(response: Response): Promise<unknown> {
+  // Read once: `response.json()` would consume the body even when it fails,
+  // making a later `response.text()` unusable.
+  let text: string;
   try {
-    return await response.json();
+    text = await response.text();
   } catch {
-    const text = await response.text();
+    return { message: "upstream error" };
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
     return { message: text || "upstream error" };
   }
 }
@@ -128,6 +138,8 @@ export function translate<
 
     let privacySession: PrivacySession | undefined;
     let allowTexts: string[] = [];
+    let extensionsCoverage: ExtensionCoverageEntry[] = [];
+    let transformedExtensions: string[] = [];
     let privacyFinalized = false;
     const reportState: PrivacyReportState | undefined = privacyConfig
       ? {
@@ -215,6 +227,7 @@ export function translate<
       const canonicalRequest = source.request.parseRequest(sourcePayload, ctx);
 
       if (privacyConfig && reportState) {
+        for (const warning of privacyConfig.warnings) pushPrivacyWarning(warning);
         privacySession = await materializePrivacySession();
         const outcome = await redactCanonicalRequest(
           canonicalRequest,
@@ -225,32 +238,60 @@ export function translate<
         reportState.invalidDetections = outcome.invalidDetections;
         reportState.degraded = reportState.degraded || outcome.degraded;
         allowTexts = outcome.allowTexts;
+        extensionsCoverage = outcome.extensionsCoverage;
+        transformedExtensions = outcome.transformedExtensions;
         for (const warning of outcome.warnings) pushPrivacyWarning(warning);
         injectSystemNotice(canonicalRequest, privacyConfig);
       }
 
       // Prompt-cache affinity (Anthropic cache_control -> OpenAI Chat
-      // prompt_cache_key). Derive the identity from the *source* body and the
-      // raw request, never by scanning the converted target request. When
-      // privacy is enabled, request-reading (legacy) resolvers require an
-      // explicit opt-in (PR-025).
-      let cacheEnabled = options.cache !== undefined && target.format === "openai-chat";
-      if (cacheEnabled && privacyConfig && !privacyConfig.allowLegacyCacheResolvers) {
-        pushPrivacyWarning({
-          code: "privacy_untrusted_cache_resolver",
-          message:
-            "Cache affinity resolvers that read the raw request are disabled under privacy unless explicitly authorized",
-        });
-        cacheEnabled = false;
-      }
-      const cacheAffinity = cacheEnabled
-        ? await resolveCacheAffinity(
+      // prompt_cache_key). Without privacy, derive from the raw source body.
+      // With privacy, only privacy-safe resolvers (redacted canonical) run by
+      // default; legacy request-reading resolvers require explicit opt-in
+      // (PR-021/PR-025). The privacy-safe identity is an HMAC digest, so the
+      // outbound key never exposes an enumerable hash of raw anchors.
+      const cacheEnabled = options.cache !== undefined && target.format === "openai-chat";
+      let cacheAffinity: CacheAffinity | undefined;
+      if (cacheEnabled) {
+        if (privacyConfig) {
+          const safeResolvers = [
+            ...(options.cache?.privacySafeResolvers ?? []),
+            ...(options.cache?.key
+              ? [
+                  createAnthropicPrivacySafeCacheResolver({
+                    key: options.cache.key,
+                    namespace: options.cache.namespace ?? "",
+                  }),
+                ]
+              : []),
+          ];
+          cacheAffinity = await resolvePrivacySafeCacheAffinity(
+            safeResolvers,
+            canonicalRequest,
+          );
+          if (!cacheAffinity && privacyConfig.allowLegacyCacheResolvers) {
+            cacheAffinity = await resolveCacheAffinity(
+              options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
+              request,
+              sourcePayload,
+              canonicalRequest,
+            );
+          } else if (!cacheAffinity && safeResolvers.length === 0) {
+            pushPrivacyWarning({
+              code: "privacy_untrusted_cache_resolver",
+              message:
+                "Cache affinity legacy resolvers are disabled under privacy unless explicitly authorized",
+            });
+          }
+        } else {
+          cacheAffinity = await resolveCacheAffinity(
             options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
             request,
             sourcePayload,
             canonicalRequest,
-          )
-        : undefined;
+          );
+        }
+      }
 
       const targetUrl = target.endpoint.fromCanonical(endpoint, sourceUrl);
       const credential = source.headers.parseCredential(request.headers);
@@ -275,6 +316,12 @@ export function translate<
 
       if (privacyConfig && privacySession) {
         try {
+          verifyExtensions(
+            target.request.supportsExtensionReport === true,
+            ctx.extensionDispositions,
+            extensionsCoverage,
+            transformedExtensions,
+          );
           verifyEgress(outboundPayload, privacySession, privacyConfig, allowTexts);
         } catch (err) {
           throw normalizePrivacyError(err);

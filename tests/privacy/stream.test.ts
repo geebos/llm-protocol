@@ -147,4 +147,111 @@ describe("streaming restore", () => {
     expect(deltas(result.events)).toBe("x <private_placeholder_a_42> y");
     expect(result.warnings.some((w) => w.code === "privacy_unknown_placeholder")).toBe(true);
   });
+
+  it("rejects on buffer overflow in strict mode (PT-14)", async () => {
+    const config = resolvePrivacyConfig({
+      recognizers: [{ priority: 1, recognize: () => [] }],
+      streaming: { maxTextPendingBytes: 5 },
+    });
+    const session = new PrivacySession("overflow", {
+      compiled: config.template,
+      tagMode: config.tagMode,
+      tagBytes: config.tagBytes,
+      namespace: config.namespace,
+    });
+    await expect(
+      run(
+        [
+          { type: "text_start", index: 0 },
+          { type: "text_delta", index: 0, text: "<private_placeholder_" },
+          { type: "text_end", index: 0 },
+          { type: "message_end" },
+        ],
+        session,
+        config,
+      ),
+    ).rejects.toMatchObject({ code: "privacy_buffer_overflow" });
+  });
+
+  it("flushes raw on overflow in best_effort mode (PT-14)", async () => {
+    const config = resolvePrivacyConfig({
+      recognizers: [{ priority: 1, recognize: () => [] }],
+      securityMode: "best_effort",
+      streaming: { maxTextPendingBytes: 5, overflowAction: "flush_raw" },
+    });
+    const session = new PrivacySession("flush", {
+      compiled: config.template,
+      tagMode: config.tagMode,
+      tagBytes: config.tagBytes,
+      namespace: config.namespace,
+    });
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "<private_placeholder_" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toContain("<private_placeholder_");
+    expect(result.warnings.some((w) => w.code === "privacy_buffer_overflow")).toBe(true);
+  });
+
+  it("emits an incomplete placeholder as-is at EOF with a warning (PT-36)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "tail <private_placeholder_a_1" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe("tail <private_placeholder_a_1");
+    expect(result.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("aborts on an incomplete placeholder when strictStreaming is set (PT-36)", async () => {
+    const config = resolvePrivacyConfig({
+      recognizers: [{ priority: 1, recognize: () => [] }],
+      streaming: { strictStreaming: true },
+    });
+    const session = new PrivacySession("strict-stream", {
+      compiled: config.template,
+      tagMode: config.tagMode,
+      tagBytes: config.tagBytes,
+      namespace: config.namespace,
+    });
+    await expect(
+      run(
+        [
+          { type: "text_start", index: 0 },
+          { type: "text_delta", index: 0, text: "x <private_placeholder_" },
+          { type: "text_end", index: 0 },
+          { type: "message_end" },
+        ],
+        session,
+        config,
+      ),
+    ).rejects.toMatchObject({ code: "privacy_unknown_placeholder" });
+  });
+
+  it("drops buffered text when an error event terminates the stream", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "partial <private_placeholder_a_1" },
+        { type: "error", error: { kind: "upstream", message: "boom" } },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).not.toContain("<private_placeholder");
+    expect(result.events.some((e) => e.type === "error")).toBe(true);
+  });
 });

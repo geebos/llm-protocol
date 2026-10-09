@@ -5,7 +5,7 @@ import type { ApiFormat } from "../formats.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import type { ProviderProfile } from "../capabilities/provider-profile.js";
 import type { TranslationPolicies } from "../ir/policies.js";
-import type { CacheAffinityResolver } from "../cache/resolver.js";
+import type { CacheAffinityResolver, PrivacySafeCacheAffinityResolver } from "../cache/resolver.js";
 import type { CacheTranslationReport } from "../cache/types.js";
 import type { PrivacyCompletionReport, PrivacyOptions } from "../privacy/types.js";
 
@@ -62,7 +62,20 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
    * is gated by the target profile's `capabilities.cache.promptCacheKey`.
    */
   cache?: {
+    /** Legacy resolvers that read the raw request/source body. */
     resolvers?: CacheAffinityResolver[];
+    /**
+     * Privacy-safe resolvers that only read the redacted canonical request.
+     * Mounted by `strict` privacy mode (PR-025).
+     */
+    privacySafeResolvers?: PrivacySafeCacheAffinityResolver[];
+    /**
+     * Tenant HMAC key for the built-in privacy-safe resolver. When supplied,
+     * a redacted-canonical anchor resolver is mounted automatically.
+     */
+    key?: () => Uint8Array | Promise<Uint8Array>;
+    /** Tenant namespace mixed into the HMAC seed. */
+    namespace?: string;
   };
 
   /**

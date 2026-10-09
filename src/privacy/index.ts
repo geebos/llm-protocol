@@ -70,6 +70,10 @@ export { restoreResponse, type RestoreCounts } from "./response.js";
 export { createPrivacyStreamRestore, type StreamRestoreHandle, type StreamRestoreStats } from "./stream.js";
 export { buildSystemNotice, DEFAULT_SYSTEM_NOTICE } from "./system.js";
 export { verifyEgress } from "./egress.js";
+export {
+  verifyExtensions,
+  type ExtensionCoverageEntry,
+} from "./extension-verify.js";
 export { createPrivacyEngine } from "./engine.js";
 export {
   validateDetection,

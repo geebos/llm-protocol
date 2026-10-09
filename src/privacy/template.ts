@@ -18,6 +18,7 @@ export const DEFAULT_TAG_BYTES = 12;
 export const TAG_DOMAIN = "llm-protocol-privacy-v1";
 
 const TYPE_RE = /^[a-z0-9_]+$/;
+const TYPE_CHARS = /[a-z0-9_]/;
 const DIGIT_CHARS = /[0-9]/;
 const HEX_CHARS = /[0-9a-fA-F]/;
 
@@ -238,6 +239,58 @@ export function placeholderTag(
 /** Reject type strings that cannot round-trip through the template grammar. */
 export function isValidType(type: string, maxTypeLength: number): boolean {
   return TYPE_RE.test(type) && type.length <= maxTypeLength;
+}
+
+/**
+ * Earliest index at which `text` ends with a partial placeholder (a proper
+ * prefix of the literal, or the full literal followed by a partial core).
+ * Returns `text.length` when the tail is not a possible placeholder start.
+ * Used as the shared unknown-syntax safety boundary (INV-17).
+ */
+export function partialPlaceholderStart(
+  compiled: CompiledTemplate,
+  text: string,
+  from: number,
+): number {
+  const pre = compiled.prefix;
+  let best = text.length;
+  const max = Math.min(pre.length - 1, text.length - from);
+  for (let len = max; len >= 1; len--) {
+    if (text.endsWith(pre.slice(0, len))) {
+      best = text.length - len;
+      break;
+    }
+  }
+  let idx = text.lastIndexOf(pre, text.length - 1);
+  while (idx !== -1 && idx >= from) {
+    if (isPartialCore(compiled, text.slice(idx + pre.length)) && idx < best) {
+      best = idx;
+      break;
+    }
+    idx = text.lastIndexOf(pre, idx - 1);
+  }
+  return best;
+}
+
+function isPartialCore(compiled: CompiledTemplate, rest: string): boolean {
+  if (rest === "") return true;
+  let i = 0;
+  while (i < rest.length && TYPE_CHARS.test(rest[i])) i++;
+  if (i === rest.length) return true;
+  const afterType = rest.slice(i);
+  if (compiled.mid1.startsWith(afterType)) return true;
+  if (!afterType.startsWith(compiled.mid1)) return false;
+  const afterMid1 = afterType.slice(compiled.mid1.length);
+  if (afterMid1 === "") return true;
+  let j = 0;
+  while (j < afterMid1.length && DIGIT_CHARS.test(afterMid1[j])) j++;
+  if (j === afterMid1.length) return true;
+  if (!compiled.tagMode) return false;
+  const afterN = afterMid1.slice(j);
+  if (compiled.mid2.startsWith(afterN)) return true;
+  if (!afterN.startsWith(compiled.mid2)) return false;
+  const hex = afterN.slice(compiled.mid2.length);
+  return hex.length <= compiled.tagBytes * 2 && [...hex].every((c) => HEX_CHARS.test(c));
 }
 
 /**

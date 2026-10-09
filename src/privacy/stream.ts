@@ -75,7 +75,7 @@ export function createPrivacyStreamRestore(
         case "tool_arguments_delta": {
           const pending = (pendingTool.get(event.index) ?? "") + event.partialJson;
           if (pending.length > config.streaming.maxToolArgumentBytes) {
-            overflow("tool_arguments", event.index, controller);
+            handleOverflow(pending, "tool_arguments", event.index, controller);
             pendingTool.set(event.index, "");
           } else {
             pendingTool.set(event.index, pending);
@@ -168,7 +168,7 @@ export function createPrivacyStreamRestore(
   ): void {
     const pending = pendingText.get(index) ?? "";
     if (pending.length > config.streaming.maxTextPendingBytes) {
-      overflow("text", index, controller);
+      handleOverflow(pending, "text", index, controller);
       pendingText.set(index, "");
       return;
     }
@@ -201,7 +201,8 @@ export function createPrivacyStreamRestore(
     pendingText.set(index, result.rest);
   }
 
-  function overflow(
+  function handleOverflow(
+    pending: string,
     kind: string,
     index: number,
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
@@ -218,7 +219,15 @@ export function createPrivacyStreamRestore(
       code: "privacy_buffer_overflow",
       message: `Privacy ${kind} buffer overflowed; buffered content flushed raw`,
     });
-    void index;
+    if (kind === "text") {
+      emitText(index, pending, controller);
+    } else {
+      controller.enqueue({
+        type: "tool_arguments_delta",
+        index,
+        partialJson: pending,
+      });
+    }
   }
 
   return { stream, stats };

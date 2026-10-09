@@ -51,6 +51,18 @@ export async function resolveCacheAffinity(
   return undefined;
 }
 
+/** Run privacy-safe resolvers (redacted canonical only) in order. */
+export async function resolvePrivacySafeCacheAffinity(
+  resolvers: PrivacySafeCacheAffinityResolver[],
+  canonical: CanonicalRequest,
+): Promise<CacheAffinity | undefined> {
+  for (const resolver of resolvers) {
+    const result = await resolver.resolve(canonical);
+    if (result?.key) return result;
+  }
+  return undefined;
+}
+
 export function composeCacheResolvers(
   resolvers: CacheAffinityResolver[],
 ): CacheAffinityResolver {

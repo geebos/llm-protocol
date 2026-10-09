@@ -70,6 +70,7 @@ export type {
 } from "./cache/resolver.js";
 export {
   resolveCacheAffinity,
+  resolvePrivacySafeCacheAffinity,
   composeCacheResolvers,
   explicitCacheKeyResolver,
   DEFAULT_CACHE_RESOLVERS,
@@ -80,12 +81,19 @@ export {
   deriveAnthropicCacheKey,
 } from "./cache/anthropic/cache-control.js";
 export {
+  createAnthropicPrivacySafeCacheResolver,
+  extractCanonicalCacheAnchors,
+  derivePrivacySafeCacheKey,
+} from "./cache/anthropic/privacy-safe-cache.js";
+export {
   applyOpenAIChatCacheAffinity,
   type CacheApplication,
 } from "./cache/openai-chat/apply-cache-affinity.js";
 
 // Privacy transform (docs/privacy-transform.md).
 export { createPrivacyEngine } from "./privacy/engine.js";
+export { restoreString, restoreJsonText } from "./privacy/restore.js";
+export { createPrivacyStreamRestore } from "./privacy/stream.js";
 export {
   compileTemplate,
   parsePlaceholder,
@@ -99,6 +107,7 @@ export {
 } from "./privacy/template.js";
 export type { CompiledTemplate, ParsedPlaceholder } from "./privacy/template.js";
 export { PrivacyGuardError } from "./privacy/errors.js";
+export { verifyExtensions } from "./privacy/extension-verify.js";
 export { PrivacySession } from "./privacy/session.js";
 export { resolvePrivacyConfig } from "./privacy/config.js";
 export type { ResolvedPrivacyConfig, SecurityMode } from "./privacy/config.js";
