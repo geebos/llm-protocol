@@ -154,4 +154,68 @@ describe("privacy security invariants", () => {
     const body = (await response.json()) as { error: { message: string } };
     expect(body.error.message).toBe("not json at all");
   });
+
+  it("rejects a range crossing a cache breakpoint (PT-67)", async () => {
+    const cap = capturingFetch(okAnthropic);
+    const forward = translate({
+      from: "anthropic-messages",
+      to: "openai-chat",
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+    });
+    const request = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "sk", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 100,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: PHONE.slice(0, 5) },
+              {
+                type: "text",
+                text: PHONE.slice(5),
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    await expect(forward(request)).rejects.toMatchObject({
+      kind: "privacy",
+      code: "privacy_cross_part_cache_break",
+    });
+  });
+
+  it("redacts the same split when no cache breakpoint is present (PT-67)", async () => {
+    const cap = capturingFetch(okAnthropic);
+    const forward = translate({
+      from: "anthropic-messages",
+      to: "openai-chat",
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+    });
+    const request = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "sk", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 100,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: PHONE.slice(0, 5) },
+              { type: "text", text: PHONE.slice(5) },
+            ],
+          },
+        ],
+      }),
+    });
+    await expect(forward(request)).resolves.toBeDefined();
+    expect(JSON.stringify(cap.lastBody())).not.toContain(PHONE);
+  });
 });

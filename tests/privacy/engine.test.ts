@@ -171,4 +171,19 @@ describe("privacy engine", () => {
     const b: PrivacyRecognizer = { priority: 1, recognize: () => [] };
     await expect(engine.redact("x", session, [a, b])).rejects.toThrow();
   });
+
+  it("isolates mappings between sessions (PT-11)", async () => {
+    const engine = createPrivacyEngine();
+    const one = engine.createSession("req-1");
+    const two = engine.createSession("req-2");
+    const redactedOne = await engine.redact("call 13800138000", one, [phoneRecognizer()]);
+    const redactedTwo = await engine.redact("call 13800138000", two, [phoneRecognizer()]);
+    expect(redactedOne).toBe("call <private_placeholder_phone_1>");
+    expect(redactedTwo).toBe("call <private_placeholder_phone_1>");
+    expect(engine.getSession("req-1")).toBeDefined();
+    engine.destroySession("req-1");
+    expect(engine.getSession("req-1")).toBeUndefined();
+    // The surviving session's mapping is unaffected.
+    expect(engine.restore(redactedTwo, two)).toBe("call 13800138000");
+  });
 });

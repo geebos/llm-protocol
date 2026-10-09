@@ -29,6 +29,7 @@ function textSegments(parts: ContentPart[], indices: number[]): TextSegment[] {
       set: (v: string) => {
         part.text = v;
       },
+      cache: part.cache !== undefined,
     };
   });
 }

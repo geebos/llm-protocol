@@ -12,9 +12,34 @@ import { PrivacyGuardError, guard } from "./errors.js";
 import { resolveSpans, validated, type ValidatedDetection } from "./detection.js";
 import type { PrivacySession } from "./session.js";
 
+/**
+ * A detection spanning more than one text part where any overlapped part
+ * carries a `cache` breakpoint cannot be redacted safely (V1 does not reorder
+ * cache boundaries), so it is rejected (§7.2 rule 5).
+ */
+function crossesCachedPart(region: Region, start: number, end: number): boolean {
+  const segments = region.segments;
+  let offset = 0;
+  let overlapped = 0;
+  let cached = false;
+  for (const segment of segments) {
+    const segmentLength = segment.get().length;
+    const segmentEnd = offset + segmentLength;
+    if (segmentEnd > start && offset < end) {
+      overlapped++;
+      if (segment.cache) cached = true;
+    }
+    offset = segmentEnd;
+    if (offset >= end) break;
+  }
+  return overlapped > 1 && cached;
+}
+
 export interface TextSegment {
   get(): string;
   set(value: string): void;
+  /** Whether this part carries prompt-cache metadata (PR-017). */
+  cache?: boolean;
 }
 
 export interface Region {
@@ -214,6 +239,13 @@ export async function redactRegions(
     for (const detection of entry.detections) {
       const original = entry.text.slice(detection.start, detection.end);
       if (original === "") continue;
+      if (crossesCachedPart(region, detection.start, detection.end)) {
+        guard(
+          "privacy_cross_part_cache_break",
+          "A sensitive range crosses a prompt-cache breakpoint",
+          region.path,
+        );
+      }
       // Already-registered placeholder literal occurring as source text is
       // skipped (never re-mapped) with a warning (Appendix C rule 2).
       if (session.lookupPlaceholder(original)) {

@@ -24,6 +24,8 @@ export interface StreamRestoreStats {
 export interface StreamRestoreHandle {
   stream: TransformStream<CanonicalStreamEvent, CanonicalStreamEvent>;
   stats: StreamRestoreStats;
+  /** Drop state and release the session reference on cancellation. */
+  abort(): void;
 }
 
 export function createPrivacyStreamRestore(
@@ -230,5 +232,13 @@ export function createPrivacyStreamRestore(
     }
   }
 
-  return { stream, stats };
+  return {
+    stream,
+    stats,
+    abort(): void {
+      pendingText.clear();
+      pendingTool.clear();
+      release();
+    },
+  };
 }

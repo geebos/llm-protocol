@@ -254,4 +254,78 @@ describe("streaming restore", () => {
     expect(deltas(result.events)).not.toContain("<private_placeholder");
     expect(result.events.some((e) => e.type === "error")).toBe(true);
   });
+
+  it("keeps per-index buffers independent (PT-06)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_start", index: 1 },
+        { type: "text_delta", index: 0, text: "<private_placeholder_a_1" },
+        { type: "text_delta", index: 1, text: "other <private_placeholder_a_2" },
+        { type: "text_delta", index: 0, text: "0>" },
+        { type: "text_delta", index: 1, text: ">" },
+        { type: "text_end", index: 0 },
+        { type: "text_end", index: 1 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    const byIndex = (index: number): string =>
+      result.events
+        .filter(
+          (e): e is Extract<CanonicalStreamEvent, { type: "text_delta" }> =>
+            e.type === "text_delta" && e.index === index,
+        )
+        .map((e) => e.text)
+        .join("");
+    expect(byIndex(0)).toBe("x10");
+    expect(byIndex(1)).toBe("other x2");
+  });
+
+  it("preserves restore state across an unknown event (PT-53)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", index: 0 },
+        { type: "text_delta", index: 0, text: "<private_placeholder_a_1" },
+        { type: "unknown", sourceType: "ping", raw: { type: "ping" } },
+        { type: "text_delta", index: 0, text: "0> tail" },
+        { type: "text_end", index: 0 },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe("x10 tail");
+    expect(result.events.some((e) => e.type === "unknown")).toBe(true);
+  });
+
+  it("releases the stream reference count on completion (PT-13)", async () => {
+    const { session, config } = makeSession(1);
+    expect(session.activeStreams).toBe(0);
+    const handle = createPrivacyStreamRestore(session, config, () => undefined);
+    expect(session.activeStreams).toBe(1);
+    const input = new ReadableStream<CanonicalStreamEvent>({
+      start(controller) {
+        controller.enqueue({ type: "message_end" });
+        controller.close();
+      },
+    });
+    const reader = input.pipeThrough(handle.stream).getReader();
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+    expect(session.activeStreams).toBe(0);
+  });
+
+  it("releases state when the consumer cancels (PT-30/41)", async () => {
+    const { session, config } = makeSession(10);
+    const handle = createPrivacyStreamRestore(session, config, () => undefined);
+    expect(session.activeStreams).toBe(1);
+    handle.abort();
+    expect(session.activeStreams).toBe(0);
+  });
 });

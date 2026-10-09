@@ -566,20 +566,39 @@ function translateStreamingResponse({
       source.format === "anthropic-messages"
         ? withAnthropicKeepAlive(rendered, keepAliveIntervalMs)
         : rendered;
-    stream = clientStream.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({
-        flush() {
-          if (privacyHandle && reportState) {
-            reportState.restored += privacyHandle.stats.restored;
-            reportState.unknown += privacyHandle.stats.unknown;
-            reportState.overflowed =
-              reportState.overflowed || privacyHandle.stats.overflowed;
-            reportState.jsonParseFailures += privacyHandle.stats.jsonParseFailures;
-          }
+    const commitStats = (): void => {
+      if (privacyHandle && reportState) {
+        reportState.restored += privacyHandle.stats.restored;
+        reportState.unknown += privacyHandle.stats.unknown;
+        reportState.overflowed = reportState.overflowed || privacyHandle.stats.overflowed;
+        reportState.jsonParseFailures += privacyHandle.stats.jsonParseFailures;
+      }
+    };
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    stream = new ReadableStream<Uint8Array>({
+      start() {
+        reader = clientStream.getReader();
+      },
+      async pull(controller) {
+        const { done, value } = await reader!.read();
+        if (done) {
+          commitStats();
           finalizePrivacy?.("completed");
-        },
-      }),
-    );
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      },
+      async cancel(reason) {
+        privacyHandle?.abort();
+        try {
+          await reader?.cancel(reason);
+        } catch {
+          // upstream cancellation errors are not surfaced to the caller
+        }
+        finalizePrivacy?.("cancelled");
+      },
+    });
   } catch (err) {
     finalizePrivacy?.("errored");
     throw err;

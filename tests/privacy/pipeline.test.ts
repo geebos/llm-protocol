@@ -339,4 +339,49 @@ describe("privacy through translate()", () => {
     expect(report?.status).toBe("completed");
     expect(report?.restored).toBeGreaterThanOrEqual(1);
   });
+
+  it("reports cancellation when the client stops consuming (PT-30/41)", async () => {
+    const initial =
+      anthropicFrame("message_start", {
+        type: "message_start",
+        message: { id: "msg_1", type: "message", role: "assistant", content: [], usage: {} },
+      }) +
+      anthropicFrame("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }) +
+      anthropicFrame("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "hi" },
+      });
+    const cap = capturingFetch(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(initial));
+              // Never closes: simulates a long-lived stream.
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    let report: PrivacyCompletionReport | undefined;
+    const forward = translate({
+      from: "openai-chat",
+      to: "anthropic-messages",
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+      onPrivacyComplete: (r) => {
+        report = r;
+      },
+    });
+    const response = await forward(openaiRequest({ stream: true }));
+    const reader = response.body!.getReader();
+    await reader.read();
+    await reader.cancel("client gone");
+    expect(report?.status).toBe("cancelled");
+  });
 });
