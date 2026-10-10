@@ -24,7 +24,8 @@ import {
   type CodecContext,
   type ProtocolAdapter,
 } from "../codecs/protocol-adapter.js";
-import type { TranslationTrace, TranslateOptions, ForwardTranslator } from "./types.js";
+import type { TranslationTrace, TranslateOptions, ForwardTranslator, DebugSseCapture, DebugSseOptions } from "./types.js";
+import { DebugSseCollector } from "./debug-sse.js";
 import { createSSEParser, createCanonicalValidator, withAnthropicKeepAlive } from "../streams/index.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
@@ -98,14 +99,42 @@ export function translate<
   const privacyConfig: ResolvedPrivacyConfig | undefined = options.privacy
     ? resolvePrivacyConfig(options.privacy)
     : undefined;
+  const debugOptions: DebugSseOptions | undefined = options.debug;
+  const retained: { latest: DebugSseCapture | undefined } = { latest: undefined };
+  const createCollector = (
+    traceId: string,
+    startedAt: number,
+  ): DebugSseCollector | undefined => {
+    if (!debugOptions) return undefined;
+    const wrapped: DebugSseOptions = debugOptions.retain
+      ? {
+          ...debugOptions,
+          onComplete: (capture) => {
+            retained.latest = capture;
+            debugOptions.onComplete?.(capture);
+          },
+        }
+      : debugOptions;
+    return new DebugSseCollector(wrapped, traceId, startedAt);
+  };
 
   /** Same-protocol fast path: no parse, no rewrite (FR-006, 9.11). */
   if ((options.from as string) === (options.to as string) && !privacyConfig) {
-    return async (request: Request): Promise<Response> => {
+    const fastHandler = (async (request: Request): Promise<Response> => {
       const started = performance.now();
+      const traceId = crypto.randomUUID();
+      const collector = createCollector(traceId, started);
       const response = await execute(request);
+      const sourceBody = response.body;
+      let outBody: ReadableStream<Uint8Array<ArrayBuffer>> | null = sourceBody;
+      if (collector && sourceBody) {
+        let body: ReadableStream<Uint8Array<ArrayBuffer>> = sourceBody;
+        if (collector.enabled("upstream")) body = collector.observe(body, "upstream");
+        if (collector.enabled("client")) body = collector.observe(body, "client");
+        outBody = body;
+      }
       trace?.({
-        traceId: crypto.randomUUID(),
+        traceId,
         sourceFormat: options.from,
         targetFormat: options.to,
         sourceEndpoint: request.url,
@@ -116,13 +145,23 @@ export function translate<
         fidelity: "EXACT",
         warnings: [],
       });
+      if (collector && sourceBody && outBody) {
+        return new Response(outBody, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
       return response;
-    };
+    }) as ForwardTranslator;
+    fastHandler.getRawSse = () => retained.latest;
+    return fastHandler;
   }
 
-  return async (request: Request): Promise<Response> => {
+  const handler = (async (request: Request): Promise<Response> => {
     const started = performance.now();
     const traceId = crypto.randomUUID();
+    const collector = createCollector(traceId, started);
     const emitTrace = (partial: Omit<TranslationTrace, "traceId" | "durationMs" | "fidelity">): void => {
       trace?.({
         traceId,
@@ -424,6 +463,7 @@ export function translate<
           reportState,
           pushPrivacyWarning,
           finalizePrivacy,
+          collector,
         });
       }
 
@@ -460,9 +500,12 @@ export function translate<
       });
     } catch (err) {
       finalizePrivacy("errored");
+      collector?.finalize();
       throw err instanceof PrivacyGuardError ? normalizePrivacyError(err) : err;
     }
-  };
+  }) as ForwardTranslator;
+  handler.getRawSse = () => retained.latest;
+  return handler;
 }
 
 /** Convert a privacy guard error into a sanitized `privacy` TranslationError. */
@@ -513,6 +556,7 @@ interface StreamingContext {
   reportState?: PrivacyReportState;
   pushPrivacyWarning?: (warning: PrivacyWarning) => void;
   finalizePrivacy?: (status: PrivacyCompletionReport["status"]) => void;
+  collector?: DebugSseCollector;
 }
 
 /**
@@ -533,6 +577,7 @@ function translateStreamingResponse({
   reportState,
   pushPrivacyWarning,
   finalizePrivacy,
+  collector,
 }: StreamingContext): Response {
   if (!targetResponse.body) {
     throw new TranslationError({
@@ -545,12 +590,16 @@ function translateStreamingResponse({
   const report = (warning: TranslationWarning): void => {
     ctx.warnings.push(warning);
   };
+  const rawBody = targetResponse.body;
 
   let stream: ReadableStream<Uint8Array>;
   let privacyHandle: import("../privacy/stream.js").StreamRestoreHandle | undefined;
   try {
     let events: ReadableStream<import("../streams/types.js").CanonicalStreamEvent> | undefined;
-    const parsed = targetResponse.body
+    const upstreamBody = collector
+      ? collector.observe(rawBody, "upstream")
+      : rawBody;
+    const parsed = upstreamBody
       .pipeThrough(createSSEParser())
       .pipeThrough(target.stream.createParse(report))
       .pipeThrough(createCanonicalValidator());
@@ -597,6 +646,7 @@ function translateStreamingResponse({
       },
       async cancel(reason) {
         privacyHandle?.abort();
+        collector?.finalize();
         try {
           await reader?.cancel(reason);
         } catch {
@@ -605,8 +655,12 @@ function translateStreamingResponse({
         finalizePrivacy?.("cancelled");
       },
     });
+    if (collector?.enabled("client")) {
+      stream = collector.observe(stream, "client");
+    }
   } catch (err) {
     finalizePrivacy?.("errored");
+    collector?.finalize();
     throw err;
   }
 

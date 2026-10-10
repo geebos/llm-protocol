@@ -86,6 +86,14 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
   privacy?: PrivacyOptions;
 
   /**
+   * Opt-in debug capture of the raw SSE byte streams (PR debug). Disabled by
+   * default. Captured data is never written to the trace/report; it is handed
+   * to the caller via callbacks and/or `getRawSse()`. The caller is
+   * responsible for the sensitivity of captured content.
+   */
+  debug?: DebugSseOptions;
+
+  /**
    * Privacy completion report, invoked once per request with sanitized
    * statistics only (never raw values or the mapping).
    */
@@ -95,7 +103,52 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
   trace?: (trace: TranslationTrace) => void;
 }
 
-export type ForwardTranslator = (request: Request) => Promise<Response>;
+export type ForwardTranslator = ((request: Request) => Promise<Response>) & {
+  /** Latest retained raw SSE capture (only when `debug.retain` is enabled). */
+  getRawSse?(): DebugSseCapture | undefined;
+};
+
+export type DebugSseSide = "upstream" | "client";
+
+/**
+ * Debug SSE capture options.
+ *
+ * - `capture`: which raw SSE stream(s) to capture (default `"upstream-sse"`).
+ * - `onChunk`: streaming callback for each captured byte chunk.
+ * - `onComplete`: called once per request with the full decoded capture.
+ * - `retain`: keep the latest completed capture for `getRawSse()`.
+ * - `maxBytes`: retention cap per capture (default 5 MiB); the tap keeps
+ *   draining after the cap so the real stream is never blocked.
+ */
+export interface DebugSseOptions {
+  capture?: "upstream-sse" | "client-sse" | "both";
+  onChunk?: (chunk: DebugSseChunk) => void;
+  onComplete?: (capture: DebugSseCapture) => void;
+  retain?: boolean;
+  maxBytes?: number;
+}
+
+export interface DebugSseChunk {
+  traceId: string;
+  side: DebugSseSide;
+  sequence: number;
+  chunk: Uint8Array;
+  atMs: number;
+}
+
+export interface DebugSseCapture {
+  traceId: string;
+  /** Raw upstream SSE text (when captured). */
+  upstream?: string;
+  /** Raw client-facing SSE text (when captured). */
+  client?: string;
+  upstreamBytes: number;
+  clientBytes: number;
+  /** True when a side exceeded `maxBytes` and retention stopped early. */
+  truncated: boolean;
+  durationMs: number;
+  completedAt: number;
+}
 
 export interface TranslationTrace {
   /** Request-scoped trace id (NFR-005). */

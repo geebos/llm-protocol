@@ -10,7 +10,12 @@ export type {
   TranslateOptions,
   ForwardTranslator,
   TranslationTrace,
+  DebugSseOptions,
+  DebugSseChunk,
+  DebugSseCapture,
+  DebugSseSide,
 } from "./pipeline/types.js";
+export { DebugSseCollector } from "./pipeline/debug-sse.js";
 
 export { API_FORMATS, isApiFormat } from "./formats.js";
 export type { ApiFormat } from "./formats.js";
