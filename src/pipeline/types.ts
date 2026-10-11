@@ -79,7 +79,7 @@ export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> 
   };
 
   /**
-   * Privacy recognition/redaction/restore (docs/privacy-transform.md). When
+   * Privacy recognition/redaction/restore (docs/04.privacy-transform.md). When
    * set, the same-protocol passthrough fast path is disabled and field-level
    * cache resolvers that read the raw request require explicit authorization.
    */

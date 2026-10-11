@@ -58,7 +58,7 @@ export function assertToolCall(
 
 /**
  * Assert at least `min` parallel tool calls, each with a distinct id/name and
- * valid-JSON arguments (tech-v2.md STREAM-008 / §20 Parallel Tool).
+ * valid-JSON arguments (02.tech-v2.md STREAM-008 / §20 Parallel Tool).
  */
 export function assertParallelToolCalls(
   ctx: AssertionContext,
@@ -86,7 +86,7 @@ export function assertParallelToolCalls(
 
 /**
  * Assert the stream carried reasoning deltas before any text (structure-only;
- * never asserts private reasoning content — tech-v2.md STREAM-001).
+ * never asserts private reasoning content — 02.tech-v2.md STREAM-001).
  */
 export function assertReasoningThenText(ctx: AssertionContext): void {
   if (!ctx.streamFrames) fail("no stream frames to inspect for reasoning");

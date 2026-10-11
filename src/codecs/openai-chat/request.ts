@@ -37,7 +37,7 @@ const IR_MAPPED_FIELDS = [
 /**
  * Known OpenAI fields with no Canonical-IR home. They are preserved in
  * `extensions` on parse and rendered back verbatim, so nothing is silently
- * dropped (GAP-004 / tech-v2.md 9.2 rule: mapped, preserved, or dropped+warned).
+ * dropped (GAP-004 / 02.tech-v2.md 9.2 rule: mapped, preserved, or dropped+warned).
  */
 const EXTENSION_FIELDS = [
   "stream_options",

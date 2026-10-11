@@ -2,7 +2,7 @@
  * OpenAI Chat SSE -> canonical stream events (target parse).
  *
  * Stateful TransformStream hardened for real OpenAI-compatible providers
- * (tech-v2.md M7.1):
+ * (02.tech-v2.md M7.1):
  * - explicit active-block state machine: switching between reasoning/text/tool
  *   closes the previous block so start/delta/end stay paired (GAP-001);
  * - ToolCallAccumulator: id/name/arguments may arrive in any fragment order;
@@ -49,7 +49,7 @@ interface ChatChunk {
   }>;
 }
 
-/** Accumulator for one tool call (tech-v2.md 7.2). */
+/** Accumulator for one tool call (02.tech-v2.md 7.2). */
 interface ToolCallState {
   sourceIndex: number;
   id?: string;
@@ -67,7 +67,7 @@ export function createOpenAiChatStreamParser(
 ): TransformStream<SSEFrame, CanonicalStreamEvent> {
   const reasoningField = profile.capabilities.reasoningField;
 
-  // Active content-block state (tech-v2.md 6.2).
+  // Active content-block state (02.tech-v2.md 6.2).
   let messageStarted = false;
   let reasoningStarted = false;
   let reasoningEnded = false;
@@ -75,7 +75,7 @@ export function createOpenAiChatStreamParser(
   let textEnded = false;
   const tools = new Map<number, ToolCallState>();
 
-  // Transport terminal state (tech-v2.md 8.2).
+  // Transport terminal state (02.tech-v2.md 8.2).
   let finishObserved = false;
   let doneObserved = false;
   let usageAfterFinish = false;
@@ -443,7 +443,7 @@ function parseUsage(
     if (u[key] !== undefined) details[key] = u[key];
   }
   // Compatible providers may report cache write/creation under other names
-  // (tech-v2.md §13.2). Only read them when the profile declares the dialect.
+  // (02.tech-v2.md §13.2). Only read them when the profile declares the dialect.
   if (caps?.cacheCreation) {
     for (const key of ["cache_creation_tokens", "cache_write_tokens", "cached_creation_tokens"]) {
       if (typeof u[key] === "number") {

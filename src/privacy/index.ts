@@ -1,5 +1,5 @@
 /**
- * Privacy transform module (docs/privacy-transform.md).
+ * Privacy transform module (docs/04.privacy-transform.md).
  */
 export type {
   Detection,

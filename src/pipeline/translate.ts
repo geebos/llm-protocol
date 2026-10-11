@@ -11,7 +11,7 @@
  *   target SSE -> SSE frames -> canonical events -> source SSE
  * with backpressure (Web Streams) and cancellation propagation (SR-007/008).
  *
- * Privacy (docs/privacy-transform.md) is injected between parse and render:
+ * Privacy (docs/04.privacy-transform.md) is injected between parse and render:
  *   parseRequest -> redactRequest -> systemNotice -> cache -> renderRequest
  *   -> verifyEgress -> execute
  * and reversed on the response path (`restoreResponse` / stream restore).

@@ -8,7 +8,7 @@
 import type { ApiFormat } from "../formats.js";
 
 /**
- * Reasoning capability declaration (tech-v2.md §14 / P1-2).
+ * Reasoning capability declaration (02.tech-v2.md §14 / P1-2).
  *
  * Anthropic `thinking.signature` / `signature_delta` is opaque state a model
  * may need to resume thinking next turn; OpenAI Chat has no standard field.
@@ -29,7 +29,7 @@ export interface ReasoningCapability {
 }
 
 /**
- * Usage semantics quirks (tech-v2.md §21, GAP-014).
+ * Usage semantics quirks (02.tech-v2.md §21, GAP-014).
  *
  * Declared provider dialect around token accounting; absence means the
  * standard OpenAI/Anthropic shape is assumed and lossy decisions are warned.
@@ -44,7 +44,7 @@ export interface UsageCapabilities {
 }
 
 /**
- * Streaming dialect quirks (tech-v2.md §21, GAP-014).
+ * Streaming dialect quirks (02.tech-v2.md §21, GAP-014).
  *
  * Provider quirks around SSE framing; absence means standard behavior is
  * assumed. These declarations let the parser tolerate non-standard streams

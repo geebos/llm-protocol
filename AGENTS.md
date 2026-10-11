@@ -1,6 +1,6 @@
 # AGENTS.md — llm-protocol
 
-Clean-room LLM 协议转换内核（Anthropic Messages ↔ OpenAI Chat）。规格见 [`docs/tech.md`](docs/tech.md)（v0.5）。本文件补充项目级约定；全局规则（安全边界、开发分支、提交规范）遵循 `/Users/tongyulong/.pi/agent/AGENTS.md`，两者冲突时以更严格者为准。
+Clean-room LLM 协议转换内核（Anthropic Messages ↔ OpenAI Chat）。规格见 [`docs/01.tech.md`](docs/01.tech.md)（v0.5）。本文件补充项目级约定；全局规则（安全边界、开发分支、提交规范）遵循 `/Users/tongyulong/.pi/agent/AGENTS.md`，两者冲突时以更严格者为准。
 
 ## 项目结构
 
@@ -32,7 +32,7 @@ llm-protocol/
 │   ├── pipeline/               # 主 API
 │   │   ├── types.ts            #   TranslateOptions / TranslationTrace
 │   │   └── translate.ts        #   translate() 透明转换工厂（唯一公开入口）
-│   ├── privacy/                # 隐私识别-替换（P1-P6，docs/privacy-transform.md）
+│   ├── privacy/                # 隐私识别-替换（P1-P6，docs/04.privacy-transform.md）
 │   │   ├── types.ts            #   Detection / Recognizer / Session / PrivacyOptions
 │   │   ├── template.ts         #   占位符模板编译 / HMAC tag
 │   │   ├── detection.ts        #   Span 校验与裁决
@@ -61,7 +61,7 @@ llm-protocol/
 │   │   └── reporters/          #     JSON / JUnit / Markdown 报告
 │   ├── fixtures/               #   离线 fixture 资产（requests/responses/streams）
 │   └── *.test.ts               #   vitest 测试
-├── docs/tech.md                # 需求规格（权威来源）
+├── docs/01.tech.md                # 需求规格（权威来源）
 ├── .github/workflows/          # publish-npm.yml（Trusted Publishing）
 └── package.json                # private 已移除；publishConfig 固定 npmjs 公共源
 ```

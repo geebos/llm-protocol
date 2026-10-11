@@ -1,5 +1,5 @@
 /**
- * Privacy transform public model (docs/privacy-transform.md, PR-001..PR-025).
+ * Privacy transform public model (docs/04.privacy-transform.md, PR-001..PR-025).
  *
  * Recognition is supplied by the caller; this layer owns span resolution,
  * deterministic placeholder allocation, replacement and restoration. Raw

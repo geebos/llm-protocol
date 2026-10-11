@@ -1,5 +1,5 @@
 /**
- * tech-v2.md M7.2/M7.3 compatibility fixtures: NONSTREAM-001 .. NONSTREAM-005
+ * 02.tech-v2.md M7.2/M7.3 compatibility fixtures: NONSTREAM-001 .. NONSTREAM-005
  * plus cache-usage semantics.
  *
  * Covers request-side semantics (parallel_tool_calls, reasoning_effort,

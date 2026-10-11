@@ -1,5 +1,5 @@
 /**
- * tech-v2.md M7.1 compatibility fixtures: STREAM-001 .. STREAM-010.
+ * 02.tech-v2.md M7.1 compatibility fixtures: STREAM-001 .. STREAM-010.
  *
  * L2 stream-state tests for the hardened OpenAI Chat parser: block phase
  * transitions, tool-fragment accumulation in arbitrary order, finish/late-usage

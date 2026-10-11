@@ -95,7 +95,7 @@ export {
   type CacheApplication,
 } from "./cache/openai-chat/apply-cache-affinity.js";
 
-// Privacy transform (docs/privacy-transform.md).
+// Privacy transform (docs/04.privacy-transform.md).
 export { createPrivacyEngine } from "./privacy/engine.js";
 export { restoreString, restoreJsonText } from "./privacy/restore.js";
 export { createPrivacyStreamRestore } from "./privacy/stream.js";
