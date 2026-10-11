@@ -3,7 +3,7 @@
  * Covers PT-21/27/43/45/49/56/59.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import {
   createPrivacyEngine,
   type PrivacyRecognizer,
@@ -53,90 +53,61 @@ const okAnthropic = () =>
     { status: 200, headers: { "content-type": "application/json" } },
   );
 
-const okOpenAi = () =>
-  new Response(
-    JSON.stringify({
-      id: "chatcmpl_1",
-      object: "chat.completion",
-      model: "gpt-4o",
-      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
-    }),
-    { status: 200, headers: { "content-type": "application/json" } },
-  );
-
 describe("privacy configuration", () => {
   it("does not inject a notice when system is false (PT-43)", async () => {
     const cap = capturingFetch(okAnthropic);
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "sk" },
+      body: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()], system: false },
     });
-    await forward(
-      new Request("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
-      }),
-    );
     expect((cap.lastBody() as { system?: unknown }).system).toBeUndefined();
   });
 
   it("injects a custom notice only once (PT-43/44)", async () => {
     const cap = capturingFetch(okAnthropic);
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "sk" },
+      body: {
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: "Custom notice: <private_placeholder_{type}_{N}>" },
+          { role: "user", content: "hi" },
+        ],
+      },
       fetch: cap.fetch,
       privacy: {
         recognizers: [phoneRecognizer()],
         system: "Custom notice: {template}",
       },
     });
-    await forward(
-      new Request("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          messages: [
-            { role: "system", content: "Custom notice: <private_placeholder_{type}_{N}>" },
-            { role: "user", content: "hi" },
-          ],
-        }),
-      }),
-    );
     const system = JSON.stringify((cap.lastBody() as { system?: unknown }).system);
     expect(system.match(/Custom notice/g)?.length).toBe(1);
   });
 
   it("redacts a phone split across two text parts (PT-56)", async () => {
     const cap = capturingFetch(okAnthropic);
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "sk" },
+      body: {
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "call 13800" },
+              { type: "text", text: "138000 now" },
+            ],
+          },
+        ],
+      },
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    await forward(
-      new Request("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: "call 13800" },
-                { type: "text", text: "138000 now" },
-              ],
-            },
-          ],
-        }),
-      }),
-    );
     const json = JSON.stringify(cap.lastBody());
     expect(json).not.toContain("13800138000");
     expect(json).toContain("<private_placeholder_phone_1>");
@@ -144,33 +115,27 @@ describe("privacy configuration", () => {
 
   it("preserves Anthropic cache_control through the IR (PT-49/59)", async () => {
     const cap = capturingFetch(okAnthropic);
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "anthropic-messages",
+    await translate.messages.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "sk" },
+      body: {
+        model: "claude-sonnet-4-5",
+        max_tokens: 100,
+        system: [
+          { type: "text", text: "system prompt", cache_control: { type: "ephemeral" } },
+        ],
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "t",
+            input_schema: { type: "object" },
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    await forward(
-      new Request("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "sk", "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-5",
-          max_tokens: 100,
-          system: [
-            { type: "text", text: "system prompt", cache_control: { type: "ephemeral" } },
-          ],
-          messages: [{ role: "user", content: "hi" }],
-          tools: [
-            {
-              name: "t",
-              input_schema: { type: "object" },
-              cache_control: { type: "ephemeral" },
-            },
-          ],
-        }),
-      }),
-    );
     const body = cap.lastBody() as {
       system: { cache_control?: unknown }[];
       tools: { cache_control?: unknown }[];
@@ -191,9 +156,13 @@ describe("privacy configuration", () => {
     const captured: string[] = [];
     const run = async (): Promise<void> => {
       const cap = capturingFetch(okAnthropic);
-      const forward = translate({
-        from: "openai-chat",
-        to: "anthropic-messages",
+      await translate.chat.messages({
+        url: "https://api.anthropic.com/v1/messages",
+        headers: { "x-api-key": "sk" },
+        body: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "call 13800138000" }],
+        },
         fetch: cap.fetch,
         privacy: {
           recognizers: [phoneRecognizer()],
@@ -202,16 +171,6 @@ describe("privacy configuration", () => {
           tagNamespace: "tenant-1",
         },
       });
-      await forward(
-        new Request("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model: "gpt-4o",
-            messages: [{ role: "user", content: "call 13800138000" }],
-          }),
-        }),
-      );
       captured.push(JSON.stringify(cap.lastBody()));
     };
     await run();

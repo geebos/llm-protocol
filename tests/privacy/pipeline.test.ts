@@ -1,9 +1,9 @@
 /**
- * Privacy transform through the public translate() API (P2/P3/P5).
+ * Privacy transform through the public translate API (P2/P3/P5).
  * Covers PT-01/03/04/07/16/17/31/42/50.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import {
   createSSEParser,
   type SSEFrame,
@@ -58,17 +58,21 @@ function capturingFetch(
   };
 }
 
-function openaiRequest(overrides: Record<string, unknown> = {}): Request {
-  return new Request("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer sk-key", "content-type": "application/json" },
-    body: JSON.stringify({
+function openaiOptions(overrides: Record<string, unknown> = {}): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk-key" },
+    body: {
       model: "gpt-4o",
       max_tokens: 256,
       messages: [{ role: "user", content: "please call 13800138000 today" }],
       ...overrides,
-    }),
-  });
+    },
+  };
 }
 
 const anthropicResponse = {
@@ -145,7 +149,7 @@ function bytesStream(text: string): ReadableStream<Uint8Array> {
   });
 }
 
-describe("privacy through translate()", () => {
+describe("privacy through translate", () => {
   it("redacts the upstream request and restores the response (PT-01/03)", async () => {
     const cap = capturingFetch(
       () =>
@@ -154,13 +158,11 @@ describe("privacy through translate()", () => {
           headers: { "content-type": "application/json" },
         }),
     );
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    const response = await forward(openaiRequest());
     const outbound = JSON.stringify(cap.lastBody());
     expect(outbound).not.toContain("13800138000");
     expect(outbound).toContain("<private_placeholder_phone_1>");
@@ -181,13 +183,11 @@ describe("privacy through translate()", () => {
           headers: { "content-type": "application/json" },
         }),
     );
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    await forward(openaiRequest());
     const body = cap.lastBody() as { system?: unknown };
     const system = JSON.stringify(body.system);
     expect(system).toContain("Privacy notice");
@@ -214,14 +214,12 @@ describe("privacy through translate()", () => {
         ),
     );
     const traces: PrivacyWarning[][] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "openai-chat",
+    const response = await translate.chat.chat({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       trace: (t) => traces.push(t.warnings),
     });
-    const response = await forward(openaiRequest());
     const body = (await response.json()) as { choices: { message: { content: string } }[] };
     expect(body.choices[0].message.content).toBe("call 13800138000");
     expect(traces[0].some((w) => w.code === "privacy_passthrough_disabled")).toBe(true);
@@ -236,16 +234,14 @@ describe("privacy through translate()", () => {
         }),
     );
     let traceJson = "";
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       trace: (t) => {
         traceJson = JSON.stringify(t);
       },
     });
-    await forward(openaiRequest());
     expect(traceJson).not.toContain("13800138000");
   });
 
@@ -258,16 +254,14 @@ describe("privacy through translate()", () => {
         }),
     );
     let privacy: import("../../src/index.js").TranslationTrace["privacy"];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       trace: (t) => {
         privacy = t.privacy;
       },
     });
-    await forward(openaiRequest());
     expect(privacy?.redacted).toBeGreaterThan(0);
     expect(privacy?.channelsCovered).toContain("message_text");
     expect(JSON.stringify(privacy)).not.toContain("13800138000");
@@ -282,16 +276,14 @@ describe("privacy through translate()", () => {
         }),
     );
     let report: PrivacyCompletionReport | undefined;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       onPrivacyComplete: (r) => {
         report = r;
       },
     });
-    await forward(openaiRequest());
     expect(report?.status).toBe("completed");
     expect(report?.securityMode).toBe("strict");
     expect(report?.redacted).toBeGreaterThan(0);
@@ -310,13 +302,11 @@ describe("privacy through translate()", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         ),
     );
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiOptions(),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    const response = await forward(openaiRequest());
     const body = (await response.json()) as { choices: { message: { content: string } }[] };
     expect(body.choices[0].message.content).toBe("see <private_placeholder_phone_9>");
   });
@@ -336,16 +326,14 @@ describe("privacy through translate()", () => {
         ),
     );
     let report: PrivacyCompletionReport | undefined;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiOptions({ stream: true }),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       onPrivacyComplete: (r) => {
         report = r;
       },
     });
-    const response = await forward(openaiRequest({ stream: true }));
     const frames = await collectSSEFrames(response.body);
     const text = frames
       .map((f) => {
@@ -393,16 +381,14 @@ describe("privacy through translate()", () => {
         ),
     );
     let report: PrivacyCompletionReport | undefined;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiOptions({ stream: true }),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       onPrivacyComplete: (r) => {
         report = r;
       },
     });
-    const response = await forward(openaiRequest({ stream: true }));
     const reader = response.body!.getReader();
     await reader.read();
     await reader.cancel("client gone");

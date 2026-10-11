@@ -2,7 +2,7 @@
  * Debug SSE capture (opt-in): raw upstream and raw client SSE retention.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "./support/request-translate.js";
+import { translate } from "../src/index.js";
 import { createSSEParser } from "../src/streams/index.js";
 import type { DebugSseCapture, PrivacyRecognizer } from "../src/index.js";
 
@@ -64,16 +64,20 @@ const anthropicStream =
   }) +
   anthropicFrame("message_stop", { type: "message_stop" });
 
-function openaiStreamRequest(): Request {
-  return new Request("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+function openaiStreamOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk" },
+    body: {
       model: "gpt-4o",
       stream: true,
       messages: [{ role: "user", content: "call 13800138000" }],
-    }),
-  });
+    },
+  };
 }
 
 function phoneRecognizer(): PrivacyRecognizer {
@@ -109,9 +113,8 @@ describe("debug SSE capture", () => {
   it("captures the raw upstream SSE", async () => {
     const cap = waitCapture();
     const chunks: { side: string; sequence: number }[] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiStreamOptions(),
       fetch: fetchUpstream,
       debug: {
         capture: "upstream-sse",
@@ -119,7 +122,6 @@ describe("debug SSE capture", () => {
         onComplete: cap.onComplete,
       },
     });
-    const response = await forward(openaiStreamRequest());
     await drain(response.body);
     const capture = await cap.promise;
     expect(capture.upstream).toBe(anthropicStream);
@@ -130,14 +132,12 @@ describe("debug SSE capture", () => {
 
   it("captures the raw client SSE including restored values", async () => {
     const cap = waitCapture();
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiStreamOptions(),
       fetch: fetchUpstream,
       privacy: { recognizers: [phoneRecognizer()] },
       debug: { capture: "client-sse", onComplete: cap.onComplete },
     });
-    const response = await forward(openaiStreamRequest());
     await drain(response.body);
     const capture = await cap.promise;
     // The restored original only exists on the client side.
@@ -148,14 +148,12 @@ describe("debug SSE capture", () => {
 
   it("captures both sides via onComplete", async () => {
     const cap = waitCapture();
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiStreamOptions(),
       fetch: fetchUpstream,
       privacy: { recognizers: [phoneRecognizer()] },
       debug: { capture: "both", onComplete: cap.onComplete },
     });
-    const response = await forward(openaiStreamRequest());
     await drain(response.body);
     const capture = await cap.promise;
     // Upstream keeps the placeholder, client has the restored value.
@@ -165,13 +163,11 @@ describe("debug SSE capture", () => {
 
   it("stops retaining after maxBytes but keeps draining", async () => {
     const cap = waitCapture();
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiStreamOptions(),
       fetch: fetchUpstream,
       debug: { capture: "upstream-sse", maxBytes: 32, onComplete: cap.onComplete },
     });
-    const response = await forward(openaiStreamRequest());
     // Full client stream must still be delivered despite the capture cap.
     const clientText = await drain(response.body);
     expect(clientText).toContain("call");
@@ -182,18 +178,13 @@ describe("debug SSE capture", () => {
 
   it("captures on the same-protocol passthrough path", async () => {
     const cap = waitCapture();
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "anthropic-messages",
+    const response = await translate.messages.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "sk" },
+      body: { model: "claude", stream: true, messages: [] },
       fetch: fetchUpstream,
       debug: { capture: "upstream-sse", onComplete: cap.onComplete },
     });
-    const request = new Request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude", stream: true, messages: [] }),
-    });
-    const response = await forward(request);
     await drain(response.body);
     const capture = await cap.promise;
     expect(capture.upstream).toBe(anthropicStream);

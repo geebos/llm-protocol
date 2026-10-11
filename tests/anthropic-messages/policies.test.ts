@@ -8,24 +8,31 @@
  * silently dropped; every decision lands in the TranslationReport.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import { TranslationError } from "../../src/errors.js";
 import type { TranslationPolicies } from "../../src/ir/policies.js";
 import type { TranslationTrace } from "../../src/pipeline/types.js";
 
-/** Anthropic-format request carrying a thinking config. */
-function anthropicThinkingRequest(): Request {
-  return new Request("https://api.openai.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": "sk-key", "content-type": "application/json" },
-    body: JSON.stringify({
+const TARGET_URL = "https://api.openai.com/v1/chat/completions";
+const HEADERS = { authorization: "Bearer sk-key" };
+
+/** Anthropic-format request options carrying a thinking config. */
+function anthropicThinkingOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: TARGET_URL,
+    headers: HEADERS,
+    body: {
       model: "gpt-4o",
       stream: false,
       max_tokens: 2000,
       thinking: { type: "enabled", budget_tokens: 1000 },
       messages: [{ role: "user", content: "solve it" }],
-    }),
-  });
+    },
+  };
 }
 
 function openAiSuccessResponse(): Response {
@@ -49,27 +56,23 @@ describe("request-side thinking config (target = openai-chat)", () => {
       return openAiSuccessResponse();
     }) as typeof fetch;
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+
+    await translate.messages.chat({
+      ...anthropicThinkingOptions(),
       fetch,
       trace: (t) => traces.push(t),
     });
-
-    await forward(anthropicThinkingRequest());
     expect(captured.thinking).toBeUndefined();
     expect(traces[0].warnings.some((w) => w.code === "thinking_dropped")).toBe(true);
   });
 
   it("reject policy throws a typed unsupported error", async () => {
     const fetch = (async () => openAiSuccessResponse()) as typeof fetch;
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    const err = await translate.messages.chat({
+      ...anthropicThinkingOptions(),
       fetch,
       policies: { reasoning: "reject" } as TranslationPolicies,
-    });
-    const err = await forward(anthropicThinkingRequest()).catch((e: unknown) => e);
+    }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("unsupported");
   });
@@ -82,15 +85,13 @@ describe("request-side thinking config (target = openai-chat)", () => {
       return openAiSuccessResponse();
     }) as typeof fetch;
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+
+    await translate.messages.chat({
+      ...anthropicThinkingOptions(),
       fetch,
       policies: { reasoning: "provider_metadata" } as TranslationPolicies,
       trace: (t) => traces.push(t),
     });
-
-    await forward(anthropicThinkingRequest());
     expect(captured.metadata).toEqual({
       llm_protocol_thinking: { mode: "enabled", budgetTokens: 1000 },
     });

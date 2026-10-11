@@ -6,7 +6,7 @@
  * canonical pipeline -> source SSE on Response.body.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();
@@ -50,17 +50,21 @@ const openaiTextStream =
   openaiFrame({ id: "chatcmpl-1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 8, completion_tokens: 5, total_tokens: 13 } }) +
   openaiFrame("[DONE]");
 
-function anthropicMessagesStreamRequest(): Request {
-  return new Request("https://api.openai.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": "sk-key", "content-type": "application/json" },
-    body: JSON.stringify({
+function anthropicMessagesOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.openai.com/v1/chat/completions",
+    headers: { authorization: "Bearer sk-key" },
+    body: {
       model: "gpt-4o",
       stream: true,
       max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
-    }),
-  });
+    },
+  };
 }
 
 describe("anthropic-messages -> openai-chat streaming", () => {
@@ -71,8 +75,7 @@ describe("anthropic-messages -> openai-chat streaming", () => {
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
 
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const response = await forward(anthropicMessagesStreamRequest());
+    const response = await translate.messages.chat({ ...anthropicMessagesOptions(), fetch });
     const frames = await collectSSEFrames(response.body);
     const events = frames.map((f) => f.event);
 
@@ -105,8 +108,7 @@ describe("anthropic-messages -> openai-chat streaming", () => {
         JSON.stringify({ error: { type: "invalid_request_error", message: "bad model", code: "bad" } }),
         { status: 400, headers: { "content-type": "application/json" } },
       )) as typeof fetch;
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const response = await forward(anthropicMessagesStreamRequest());
+    const response = await translate.messages.chat({ ...anthropicMessagesOptions(), fetch });
     expect(response.status).toBe(400);
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = (await response.json()) as Record<string, unknown>;
@@ -134,13 +136,11 @@ describe("keepalive pings (GAP-013)", () => {
     const fetch = (async () =>
       new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
 
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    const response = await translate.messages.chat({
+      ...anthropicMessagesOptions(),
       fetch,
       keepAliveIntervalMs: 30,
     });
-    const response = await forward(anthropicMessagesStreamRequest());
     const reader = response.body!.getReader();
     let buffer = "";
     let sawPing = false;

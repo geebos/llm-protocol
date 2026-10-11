@@ -3,7 +3,7 @@
  * and egress posture. Covers PT-39/47/56 and generalizes PT-66.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import type { PrivacyRecognizer } from "../../src/index.js";
 
 const PHONE = "13800138000";
@@ -52,33 +52,33 @@ const okAnthropic = () =>
     { status: 200, headers: { "content-type": "application/json" } },
   );
 
-function openaiContentRequest(content: unknown): Request {
-  return new Request("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+function openaiContentOptions(content: unknown): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk" },
+    body: {
       model: "gpt-4o",
       messages: [{ role: "user", content }],
-    }),
-  });
+    },
+  };
 }
 
 describe("privacy security invariants", () => {
   it("never leaks a phone split across two text parts (PT-56 generalized)", async () => {
     for (let split = 1; split < PHONE.length; split++) {
       const cap = capturingFetch(okAnthropic);
-      const forward = translate({
-        from: "openai-chat",
-        to: "anthropic-messages",
-        fetch: cap.fetch,
-        privacy: { recognizers: [phoneRecognizer()] },
-      });
-      await forward(
-        openaiContentRequest([
+      await translate.chat.messages({
+        ...openaiContentOptions([
           { type: "text", text: PHONE.slice(0, split) },
           { type: "text", text: PHONE.slice(split) },
         ]),
-      );
+        fetch: cap.fetch,
+        privacy: { recognizers: [phoneRecognizer()] },
+      });
       expect(JSON.stringify(cap.lastBody())).not.toContain(PHONE);
     }
   });
@@ -97,13 +97,11 @@ describe("privacy security invariants", () => {
           { status: 400, headers: { "content-type": "application/json" } },
         ),
     );
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiContentOptions(`call ${PHONE}`),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    const response = await forward(openaiContentRequest(`call ${PHONE}`));
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: { message: string } };
     expect(body.error.message).toContain("<private_placeholder_phone_1>");
@@ -124,13 +122,11 @@ describe("privacy security invariants", () => {
           { status: 400, headers: { "content-type": "application/json" } },
         ),
     );
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiContentOptions(`call ${PHONE}`),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()], errorRestore: "trusted_client" },
     });
-    const response = await forward(openaiContentRequest(`call ${PHONE}`));
     const body = (await response.json()) as { error: { message: string } };
     expect(body.error.message).toContain(PHONE);
   });
@@ -143,13 +139,11 @@ describe("privacy security invariants", () => {
           headers: { "content-type": "text/plain" },
         }),
     );
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiContentOptions(`call ${PHONE}`),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
     });
-    const response = await forward(openaiContentRequest(`call ${PHONE}`));
     expect(response.status).toBe(500);
     const body = (await response.json()) as { error: { message: string } };
     expect(body.error.message).toBe("not json at all");
@@ -179,9 +173,8 @@ describe("privacy security invariants", () => {
         ),
     );
     let overflowed = false;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiContentOptions(`call ${PHONE}`),
       fetch: cap.fetch,
       privacy: {
         recognizers: [phoneRecognizer()],
@@ -191,7 +184,6 @@ describe("privacy security invariants", () => {
         overflowed = report.warnings.some((w) => w.code === "privacy_buffer_overflow");
       },
     });
-    const response = await forward(openaiContentRequest(`call ${PHONE}`));
     const body = (await response.json()) as {
       choices: { message: { tool_calls?: { function: { arguments: string } }[] } };
     };
@@ -203,34 +195,31 @@ describe("privacy security invariants", () => {
 
   it("rejects a range crossing a cache breakpoint (PT-67)", async () => {
     const cap = capturingFetch(okAnthropic);
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
-      fetch: cap.fetch,
-      privacy: { recognizers: [phoneRecognizer()] },
-    });
-    const request = new Request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": "sk", "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 100,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: PHONE.slice(0, 5) },
-              {
-                type: "text",
-                text: PHONE.slice(5),
-                cache_control: { type: "ephemeral" },
-              },
-            ],
-          },
-        ],
+    await expect(
+      translate.messages.chat({
+        url: "https://api.openai.com/v1/chat/completions",
+        headers: { authorization: "Bearer sk" },
+        body: {
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: PHONE.slice(0, 5) },
+                {
+                  type: "text",
+                  text: PHONE.slice(5),
+                  cache_control: { type: "ephemeral" },
+                },
+              ],
+            },
+          ],
+        },
+        fetch: cap.fetch,
+        privacy: { recognizers: [phoneRecognizer()] },
       }),
-    });
-    await expect(forward(request)).rejects.toMatchObject({
+    ).rejects.toMatchObject({
       kind: "privacy",
       code: "privacy_cross_part_cache_break",
     });
@@ -238,30 +227,27 @@ describe("privacy security invariants", () => {
 
   it("redacts the same split when no cache breakpoint is present (PT-67)", async () => {
     const cap = capturingFetch(okAnthropic);
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
-      fetch: cap.fetch,
-      privacy: { recognizers: [phoneRecognizer()] },
-    });
-    const request = new Request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": "sk", "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 100,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: PHONE.slice(0, 5) },
-              { type: "text", text: PHONE.slice(5) },
-            ],
-          },
-        ],
+    await expect(
+      translate.messages.chat({
+        url: "https://api.openai.com/v1/chat/completions",
+        headers: { authorization: "Bearer sk" },
+        body: {
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: PHONE.slice(0, 5) },
+                { type: "text", text: PHONE.slice(5) },
+              ],
+            },
+          ],
+        },
+        fetch: cap.fetch,
+        privacy: { recognizers: [phoneRecognizer()] },
       }),
-    });
-    await expect(forward(request)).resolves.toBeDefined();
+    ).resolves.toBeDefined();
     expect(JSON.stringify(cap.lastBody())).not.toContain(PHONE);
   });
 });

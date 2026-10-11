@@ -62,9 +62,8 @@ llm-protocol/
 │   │   ├── runner.ts           #     矩阵执行器（能力门控 / 预算 / live 两轮）
 │   │   ├── scenarios/          #     离线 Fixture + live smoke 场景
 │   │   └── reporters/          #     JSON / JUnit / Markdown 报告
-│   ├── support/                #   测试适配器（Request -> translate.<source>.<target>）
 │   ├── fixtures/               #   离线 fixture 资产（requests/responses/streams）
-│   └── *.test.ts               #   vitest 测试
+│   └── *.test.ts               #   vitest 测试（端到端直用 translate.<source>.<target>）
 ├── docs/                        # 设计文档（按创建时间编号 NN.title.md）
 ├── .github/workflows/          # publish-npm.yml（Trusted Publishing）
 └── package.json                # private 已移除；publishConfig 固定 npmjs 公共源

@@ -8,7 +8,7 @@
  * factory; focused round-trips use the codecs directly.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import { createAnthropicAdapter, anthropicDefaultProfile, normalizeAnthropicTurns } from "../../src/codecs/anthropic-messages/index.js";
 import { createOpenAiChatAdapter } from "../../src/codecs/openai-chat/index.js";
 import { newCodecContext } from "../../src/codecs/protocol-adapter.js";
@@ -17,12 +17,16 @@ import type { CanonicalMessage } from "../../src/ir/types.js";
 const anthropic = createAnthropicAdapter(anthropicDefaultProfile);
 const openai = createOpenAiChatAdapter();
 
-function openaiChatRequest(body: Record<string, unknown>): Request {
-  return new Request("https://api.anthropic.com/v1/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer sk-key", "content-type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-5", stream: false, ...body }),
-  });
+function openaiChatOptions(body: Record<string, unknown>): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk-key" },
+    body: { model: "claude-sonnet-4-5", stream: false, ...body },
+  };
 }
 
 async function translateCapturing(
@@ -35,8 +39,7 @@ async function translateCapturing(
     captured = (await req.json()) as Record<string, unknown>;
     return fetchImpl(req);
   }) as typeof fetch;
-  const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-  await forward(openaiChatRequest(body));
+  await translate.chat.messages({ ...openaiChatOptions(body), fetch });
   return captured;
 }
 

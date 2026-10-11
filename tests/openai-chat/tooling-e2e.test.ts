@@ -1,14 +1,15 @@
 /**
- * M3 tool-calling tests through translate().
+ * M3 tool-calling tests through the public translate entry.
  *
  * TC-006 multi-turn tool result re-injection, TC-008 parallel tool calls,
- * TR-002 synthesized tool ids reported, TC-021 reused factory never leaks
+ * TR-002 synthesized tool ids reported, TC-021 reused call never leaks
  * per-stream state, and official SDK tool-call stream parsing.
  */
 import { describe, expect, it } from "vitest";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
+import type { TranslateOptions } from "../../src/index.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 import type { TranslationTrace } from "../../src/pipeline/types.js";
 
@@ -56,20 +57,37 @@ function anthropicToolStream(...blocks: Array<{ id: string; name: string }>): st
   return s;
 }
 
-function openaiChatStreamRequest(messages: unknown[]): Request {
-  return new Request("https://api.anthropic.com/v1/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer sk-key", "content-type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-5", stream: true, messages }),
-  });
+function chatOptions(messages: unknown[], stream: boolean): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk-key" },
+    body: { model: "claude-sonnet-4-5", stream, messages },
+  };
 }
 
-function openaiChatNonStreamRequest(messages: unknown[]): Request {
-  return new Request("https://api.anthropic.com/v1/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer sk-key", "content-type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-5", stream: false, messages }),
-  });
+/**
+ * Adapter for the official SDKs' `fetch` signature: the SDK hands us a
+ * WHATWG `Request`, which we unpack into the new options-based entry.
+ */
+function sdkFetch(
+  call: (options: TranslateOptions) => Promise<Response>,
+  base: Omit<TranslateOptions, "url" | "headers" | "body">,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
+    const text = await req.text();
+    return call({
+      ...base,
+      url: req.url,
+      headers: req.headers,
+      body: text ? JSON.parse(text) : {},
+      ...(req.signal ? { signal: req.signal } : {}),
+    });
+  }) as typeof fetch;
 }
 
 describe("TC-008 parallel tool calls (Anthropic upstream)", () => {
@@ -81,8 +99,10 @@ describe("TC-008 parallel tool calls (Anthropic upstream)", () => {
     const fetch = (async () =>
       new Response(bytesStream(stream), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatStreamRequest([{ role: "user", content: "weather and time" }]));
+    const response = await translate.chat.messages({
+      ...chatOptions([{ role: "user", content: "weather and time" }], true),
+      fetch,
+    });
     const frames = await collectSSEFrames(response.body);
     const chunks = frames
       .filter((f) => f.data !== "[DONE]")
@@ -116,8 +136,10 @@ describe("TC-006 multi-turn tool result re-injection", () => {
     const toolStream = anthropicToolStream({ id: "toolu_1", name: "get_weather" });
     const turn1Fetch = (async () =>
       new Response(bytesStream(toolStream), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-    const forward1 = translate({ from: "openai-chat", to: "anthropic-messages", fetch: turn1Fetch });
-    const resp1 = await forward1(openaiChatStreamRequest([{ role: "user", content: "Paris weather?" }]));
+    const resp1 = await translate.chat.messages({
+      ...chatOptions([{ role: "user", content: "Paris weather?" }], true),
+      fetch: turn1Fetch,
+    });
     const frames1 = await collectSSEFrames(resp1.body);
 
     // Client (an OpenAI SDK user) sees a tool_calls chunk.
@@ -135,20 +157,24 @@ describe("TC-006 multi-turn tool result re-injection", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }) as typeof fetch;
-    const forward2 = translate({ from: "openai-chat", to: "anthropic-messages", fetch: turn2Fetch });
 
-    const request2 = openaiChatNonStreamRequest([
-      { role: "user", content: "Paris weather?" },
-      {
-        role: "assistant",
-        content: null,
-        tool_calls: [
-          { id: "toolu_1", type: "function", function: { name: "get_weather", arguments: '{"city":"Paris"}' } },
+    const resp2 = await translate.chat.messages({
+      ...chatOptions(
+        [
+          { role: "user", content: "Paris weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "toolu_1", type: "function", function: { name: "get_weather", arguments: '{"city":"Paris"}' } },
+            ],
+          },
+          { role: "tool", tool_call_id: "toolu_1", content: "sunny, 25C" },
         ],
-      },
-      { role: "tool", tool_call_id: "toolu_1", content: "sunny, 25C" },
-    ]);
-    const resp2 = await forward2(request2);
+        false,
+      ),
+      fetch: turn2Fetch,
+    });
 
     // The Anthropic target received a tool_result block linked to the same id.
     const msgs = capturedTargetBody.messages as Array<{ role: string; content: unknown }>;
@@ -165,7 +191,7 @@ describe("TC-006 multi-turn tool result re-injection", () => {
     expect(((body2.choices as Array<Record<string, unknown>>)[0].message as Record<string, unknown>).content).toBe("25C");
   });
 
-  it("keeps is_error semantics when a tool result failed (TR-004)", async () => {
+  it("passes a failed tool result through as tool_result content (TR-004)", async () => {
     let capturedTargetBody: Record<string, unknown> = {};
     const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
@@ -175,19 +201,23 @@ describe("TC-006 multi-turn tool result re-injection", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
 
-    const request = openaiChatStreamRequest([
-      {
-        role: "assistant",
-        content: null,
-        tool_calls: [{ id: "call_9", type: "function", function: { name: "api", arguments: "{}" } }],
-      },
-      // OpenAI has no is_error; the failure is expressed by the caller wrapping
-      // the tool content — the test asserts the message is passed through.
-      { role: "tool", tool_call_id: "call_9", content: "ERROR: api unavailable" },
-    ]);
-    await forward(request);
+    await translate.chat.messages({
+      ...chatOptions(
+        [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{ id: "call_9", type: "function", function: { name: "api", arguments: "{}" } }],
+          },
+          // OpenAI has no is_error; the failure is expressed by the caller wrapping
+          // the tool content — the test asserts the message is passed through.
+          { role: "tool", tool_call_id: "call_9", content: "ERROR: api unavailable" },
+        ],
+        true,
+      ),
+      fetch,
+    });
     const msgs = capturedTargetBody.messages as Array<{ content: unknown }>;
     const block = (msgs[1].content as Array<Record<string, unknown>>)[0];
     expect(block.type).toBe("tool_result");
@@ -207,14 +237,13 @@ describe("Anthropic user turn with text + tool_result keeps OpenAI tool adjacenc
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }) as typeof fetch;
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
 
     // Claude Code style turn: assistant tool_use, then a user turn carrying
     // both the tool_result and follow-up text.
-    const request = new Request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { authorization: "Bearer sk-ant", "content-type": "application/json" },
-      body: JSON.stringify({
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer sk-ant" },
+      body: {
         model: "claude-sonnet-4-5",
         max_tokens: 256,
         messages: [
@@ -234,9 +263,9 @@ describe("Anthropic user turn with text + tool_result keeps OpenAI tool adjacenc
             ],
           },
         ],
-      }),
+      },
+      fetch,
     });
-    await forward(request);
 
     const msgs = capturedTargetBody.messages as Array<Record<string, unknown>>;
     const assistantIdx = msgs.findIndex(
@@ -263,13 +292,11 @@ describe("TR-002 synthesized tool ids are reported", () => {
       new Response(bytesStream(stream), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
 
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...chatOptions([{ role: "user", content: "go" }], true),
       fetch,
       trace: (t) => traces.push(t),
     });
-    const response = await forward(openaiChatStreamRequest([{ role: "user", content: "go" }]));
     const frames = await collectSSEFrames(response.body);
 
     // synthesized id reached the client as toolu_0
@@ -283,9 +310,9 @@ describe("TR-002 synthesized tool ids are reported", () => {
   });
 });
 
-describe("TC-021 reused factory never leaks per-stream state", () => {
+describe("TC-021 sequential calls never leak per-stream state", () => {
   it("handles two sequential streaming calls with isolated block state", async () => {
-    // First call: one tool; second call: text. Same translate() instance.
+    // First call: one tool; second call: text. Same call site / shared fetch.
     let call = 0;
     const fetch = (async () => {
       call += 1;
@@ -305,13 +332,18 @@ describe("TC-021 reused factory never leaks per-stream state", () => {
       return new Response(bytesStream(textStream), { status: 200, headers: { "content-type": "text/event-stream" } });
     }) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const resp1 = await forward(openaiChatStreamRequest([{ role: "user", content: "a" }]));
+    const resp1 = await translate.chat.messages({
+      ...chatOptions([{ role: "user", content: "a" }], true),
+      fetch,
+    });
     const frames1 = await collectSSEFrames(resp1.body);
     const chunks1 = frames1.filter((f) => f.data !== "[DONE]").map((f) => JSON.parse(f.data));
     expect(chunks1.some((c) => c.choices?.[0]?.delta?.tool_calls)).toBe(true);
 
-    const resp2 = await forward(openaiChatStreamRequest([{ role: "user", content: "b" }]));
+    const resp2 = await translate.chat.messages({
+      ...chatOptions([{ role: "user", content: "b" }], true),
+      fetch,
+    });
     const frames2 = await collectSSEFrames(resp2.body);
     const chunks2 = frames2.filter((f) => f.data !== "[DONE]").map((f) => JSON.parse(f.data));
     // second call must NOT inherit the first call's tool block
@@ -331,11 +363,10 @@ describe("official SDK parses streamed tool calls (NFR-007)", () => {
         status: 200,
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch: anthropicFetch });
     const client = new OpenAI({
       apiKey: "sk-test",
       baseURL: "https://api.anthropic.com/v1",
-      fetch: (url: RequestInfo | URL, init?: RequestInit) => forward(new Request(url, init)),
+      fetch: sdkFetch(translate.chat.messages, { fetch: anthropicFetch }),
     });
 
     const stream = await client.chat.completions.create({
@@ -363,10 +394,9 @@ describe("official SDK parses streamed tool calls (NFR-007)", () => {
       openaiFrame("[DONE]");
     const openaiFetch = (async () =>
       new Response(bytesStream(toolStream), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch: openaiFetch });
     const client = new Anthropic({
       apiKey: "sk-ant-test",
-      fetch: (url: RequestInfo | URL, init?: RequestInit) => forward(new Request(url, init)),
+      fetch: sdkFetch(translate.messages.chat, { fetch: openaiFetch }),
     });
 
     const stream = client.messages.stream({

@@ -3,11 +3,11 @@
  * Anthropic Messages direction (TC-002/005/010/012/013/014/015/016/020,
  * SR-009 first-event latency).
  *
- * Every test goes through the public handler: source Request -> target SSE ->
+ * Every test goes through the public entry: source options -> target SSE ->
  * canonical pipeline -> source SSE on Response.body.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();
@@ -70,16 +70,20 @@ const openaiTextStream =
   openaiFrame({ id: "chatcmpl-1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 8, completion_tokens: 5, total_tokens: 13 } }) +
   openaiFrame("[DONE]");
 
-function openaiChatStreamRequest(): Request {
-  return new Request("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { authorization: "Bearer sk-key", "content-type": "application/json" },
-    body: JSON.stringify({
+function openaiChatOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk-key" },
+    body: {
       model: "claude-sonnet-4-5",
       stream: true,
       messages: [{ role: "user", content: "hi" }],
-    }),
-  });
+    },
+  };
 }
 
 describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
@@ -96,8 +100,7 @@ describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
       });
     }) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatStreamRequest());
+    const response = await translate.chat.messages({ ...openaiChatOptions(), fetch });
 
     // TC-020: execute saw the target protocol
     expect(capturedUrl).toBe("https://api.anthropic.com/v1/messages");
@@ -142,8 +145,7 @@ describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatStreamRequest());
+    const response = await translate.chat.messages({ ...openaiChatOptions(), fetch });
     const frames = await collectSSEFrames(response.body);
     const chunks = await collectOpenAiChunks(frames);
 
@@ -190,13 +192,11 @@ describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
       },
       defaultHeaders: {},
     };
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiChatOptions(),
       fetch,
       profiles: { "openai-chat": reasoningProfile },
     });
-    const response = await forward(openaiChatStreamRequest());
     const frames = await collectSSEFrames(response.body);
     const chunks = await collectOpenAiChunks(frames);
 
@@ -226,8 +226,7 @@ describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatStreamRequest());
+    const response = await translate.chat.messages({ ...openaiChatOptions(), fetch });
     const frames = await collectSSEFrames(response.body);
     const chunks = await collectOpenAiChunks(frames);
     const errorChunk = chunks.find((c) => c.error);
@@ -258,10 +257,8 @@ describe("first-event latency and fragmentation (SR-009, TC-016)", () => {
     const fetch = (async () =>
       new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = openaiChatStreamRequest();
     const t0 = Date.now();
-    const response = await forward(request);
+    const response = await translate.chat.messages({ ...openaiChatOptions(), fetch });
     const reader = response.body!.getReader();
     let buffer = "";
     let earlyElapsed = -1;
@@ -294,8 +291,7 @@ describe("first-event latency and fragmentation (SR-009, TC-016)", () => {
       return new Response(fragmented, { status: 200, headers: { "content-type": "text/event-stream" } });
     }) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatStreamRequest());
+    const response = await translate.chat.messages({ ...openaiChatOptions(), fetch });
     const frames = await collectSSEFrames(response.body);
     const chunks = await collectOpenAiChunks(frames);
     const content = chunks
@@ -323,8 +319,7 @@ describe("client cancellation (TC-015, SR-008)", () => {
     const fetch = (async () =>
       new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatStreamRequest());
+    const response = await translate.chat.messages({ ...openaiChatOptions(), fetch });
     const reader = response.body!.getReader();
     await reader.read();
     await reader.cancel();
@@ -343,11 +338,12 @@ describe("client cancellation (TC-015, SR-008)", () => {
       });
     }) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
     const controller = new AbortController();
-    const request = openaiChatStreamRequest();
-    const requestWithSignal = new Request(request, { signal: controller.signal });
-    const response = await forward(requestWithSignal);
+    const response = await translate.chat.messages({
+      ...openaiChatOptions(),
+      fetch,
+      signal: controller.signal,
+    });
     const reader = response.body!.getReader();
     await reader.read();
     controller.abort();

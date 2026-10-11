@@ -4,7 +4,7 @@
  * tests live under tests/<source-protocol>/.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "./support/request-translate.js";
+import { translate } from "../src/index.js";
 import { TranslationError } from "../src/errors.js";
 
 interface CapturedRequest {
@@ -51,18 +51,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe("translate: same-protocol passthrough (TC-024, FR-006)", () => {
   it("does not parse or rewrite the body, and preserves URL/headers", async () => {
     const rawBody = JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
-    const { fetch, lastRequest } = fakeFetch((req) => {
+    const { fetch, lastRequest } = fakeFetch(() => {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "content-type": "application/json" },
       });
     });
-    const forward = translate({ from: "openai-chat", to: "openai-chat", fetch });
-    const request = new Request("https://api.example.com/v1/chat/completions", {
-      method: "POST",
+    const response = await translate.chat.chat({
+      url: "https://api.example.com/v1/chat/completions",
       headers: { authorization: "Bearer k", "content-type": "application/json" },
-      body: rawBody,
+      body: JSON.parse(rawBody),
+      fetch,
     });
-    const response = await forward(request);
     const captured = lastRequest();
     expect(captured.url).toBe("https://api.example.com/v1/chat/completions");
     expect(captured.headers.get("authorization")).toBe("Bearer k");

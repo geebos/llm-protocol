@@ -3,7 +3,7 @@
  * Covers PT-10/71.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import type {
   PrivacyCompletionReport,
   PrivacyRecognizer,
@@ -42,26 +42,30 @@ function fetchOk(): typeof fetch {
     )) as typeof fetch;
 }
 
-function openaiRequest(): Request {
-  return new Request("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+function openaiOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "sk" },
+    body: {
       model: "gpt-4o",
       messages: [{ role: "user", content: "hello world" }],
-    }),
-  });
+    },
+  };
 }
 
 describe("privacy runtime modes", () => {
   it("rejects a recognizer failure in strict mode (PT-10)", async () => {
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch: fetchOk(),
-      privacy: { recognizers: [throwingRecognizer()] },
-    });
-    await expect(forward(openaiRequest())).rejects.toMatchObject({
+    await expect(
+      translate.chat.messages({
+        ...openaiOptions(),
+        fetch: fetchOk(),
+        privacy: { recognizers: [throwingRecognizer()] },
+      }),
+    ).rejects.toMatchObject({
       kind: "privacy",
       code: "privacy_recognizer_failed",
     });
@@ -69,20 +73,20 @@ describe("privacy runtime modes", () => {
 
   it("degrades with a warning in best_effort mode (PT-10/71)", async () => {
     let report: PrivacyCompletionReport | undefined;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch: fetchOk(),
-      privacy: {
-        recognizers: [throwingRecognizer()],
-        securityMode: "best_effort",
-        recognition: { onRecognizerError: "passthrough_with_warning" },
-      },
-      onPrivacyComplete: (r) => {
-        report = r;
-      },
-    });
-    await expect(forward(openaiRequest())).resolves.toBeDefined();
+    await expect(
+      translate.chat.messages({
+        ...openaiOptions(),
+        fetch: fetchOk(),
+        privacy: {
+          recognizers: [throwingRecognizer()],
+          securityMode: "best_effort",
+          recognition: { onRecognizerError: "passthrough_with_warning" },
+        },
+        onPrivacyComplete: (r) => {
+          report = r;
+        },
+      }),
+    ).resolves.toBeDefined();
     expect(report?.degraded).toBe(true);
     expect(report?.securityMode).toBe("best_effort");
     expect(report?.warnings.some((w) => w.code === "privacy_recognizer_failed")).toBe(true);
@@ -90,40 +94,40 @@ describe("privacy runtime modes", () => {
 
   it("drops invalid detections with a warning in best_effort mode", async () => {
     let report: PrivacyCompletionReport | undefined;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch: fetchOk(),
-      privacy: {
-        recognizers: [invalidRecognizer()],
-        securityMode: "best_effort",
-        recognition: { onInvalidDetection: "drop_with_warning" },
-      },
-      onPrivacyComplete: (r) => {
-        report = r;
-      },
-    });
-    await expect(forward(openaiRequest())).resolves.toBeDefined();
+    await expect(
+      translate.chat.messages({
+        ...openaiOptions(),
+        fetch: fetchOk(),
+        privacy: {
+          recognizers: [invalidRecognizer()],
+          securityMode: "best_effort",
+          recognition: { onInvalidDetection: "drop_with_warning" },
+        },
+        onPrivacyComplete: (r) => {
+          report = r;
+        },
+      }),
+    ).resolves.toBeDefined();
     expect(report?.invalidDetections).toBe(1);
     expect(report?.degraded).toBe(true);
   });
 
   it("ignores configured downgrades in strict mode and warns (PT-71)", async () => {
     let report: PrivacyCompletionReport | undefined;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch: fetchOk(),
-      privacy: {
-        recognizers: [{ priority: 1, recognize: () => [] }],
-        securityMode: "strict",
-        recognition: { onRecognizerError: "passthrough_with_warning" },
-      },
-      onPrivacyComplete: (r) => {
-        report = r;
-      },
-    });
-    await expect(forward(openaiRequest())).resolves.toBeDefined();
+    await expect(
+      translate.chat.messages({
+        ...openaiOptions(),
+        fetch: fetchOk(),
+        privacy: {
+          recognizers: [{ priority: 1, recognize: () => [] }],
+          securityMode: "strict",
+          recognition: { onRecognizerError: "passthrough_with_warning" },
+        },
+        onPrivacyComplete: (r) => {
+          report = r;
+        },
+      }),
+    ).resolves.toBeDefined();
     expect(report?.securityMode).toBe("strict");
     expect(report?.warnings.some((w) => w.code === "privacy_degraded_mode")).toBe(true);
   });

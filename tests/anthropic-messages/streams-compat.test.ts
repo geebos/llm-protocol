@@ -396,7 +396,8 @@ describe("GAP-014 provider dialect declarations", () => {
 // ---- full-pipeline / SDK coverage for the hardened parser (L4/L5) ----
 
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
+import type { TranslateOptions } from "../../src/index.js";
 
 async function collectFrames(body: ReadableStream<Uint8Array> | null): Promise<SSEFrame[]> {
   if (!body) return [];
@@ -414,17 +415,21 @@ function openAiUpstreamFrame(data: unknown): string {
   return openaiFrame(data);
 }
 
-function anthropicClientStreamRequest(): Request {
-  return new Request("https://api.openai.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": "sk-ant", "content-type": "application/json" },
-    body: JSON.stringify({
+function anthropicClientOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.openai.com/v1/chat/completions",
+    headers: { authorization: "Bearer sk-ant" },
+    body: {
       model: "gpt-4o",
       stream: true,
       max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
-    }),
-  });
+    },
+  };
 }
 
 function openAiUpstream(text: string): typeof fetch {
@@ -435,6 +440,24 @@ function openAiUpstream(text: string): typeof fetch {
     })) as typeof fetch;
 }
 
+/** Adapter for the official SDK `fetch` signature (Request -> options). */
+function sdkFetch(
+  call: (options: TranslateOptions) => Promise<Response>,
+  base: Omit<TranslateOptions, "url" | "headers" | "body">,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
+    const text = await req.text();
+    return call({
+      ...base,
+      url: req.url,
+      headers: req.headers,
+      body: text ? JSON.parse(text) : {},
+      ...(req.signal ? { signal: req.signal } : {}),
+    });
+  }) as typeof fetch;
+}
+
 describe("e2e: late usage through translate() (STREAM-005)", () => {
   it("delivers finish_reason + late usage as a valid Anthropic terminal", async () => {
     const upstream =
@@ -442,8 +465,10 @@ describe("e2e: late usage through translate() (STREAM-005)", () => {
       openAiUpstreamFrame({ id: "c", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) +
       openAiUpstreamFrame({ id: "c", choices: [], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } }) +
       openAiUpstreamFrame("[DONE]");
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch: openAiUpstream(upstream) });
-    const response = await forward(anthropicClientStreamRequest());
+    const response = await translate.messages.chat({
+      ...anthropicClientOptions(),
+      fetch: openAiUpstream(upstream),
+    });
     const frames = await collectFrames(response.body);
     const messageDelta = frames.find((f) => f.event === "message_delta");
     expect(JSON.parse(messageDelta!.data)).toMatchObject({
@@ -458,8 +483,10 @@ describe("e2e: EOF without [DONE] through translate() (STREAM-006)", () => {
   it("still finalizes cleanly for the Anthropic client", async () => {
     const upstream =
       openAiUpstreamFrame({ id: "c", choices: [{ index: 0, delta: { role: "assistant", content: "partial" }, finish_reason: null }] });
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch: openAiUpstream(upstream) });
-    const response = await forward(anthropicClientStreamRequest());
+    const response = await translate.messages.chat({
+      ...anthropicClientOptions(),
+      fetch: openAiUpstream(upstream),
+    });
     const frames = await collectFrames(response.body);
     expect(frames[frames.length - 1].event).toBe("message_stop");
     const messageDelta = frames.find((f) => f.event === "message_delta");
@@ -475,10 +502,9 @@ describe("L5: Anthropic SDK parses deferred tool metadata", () => {
       openAiUpstreamFrame({ id: "c", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "get_weather" } }] }, finish_reason: null }] }) +
       openAiUpstreamFrame({ id: "c", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }) +
       openAiUpstreamFrame("[DONE]");
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch: openAiUpstream(upstream) });
     const client = new Anthropic({
       apiKey: "sk-ant-test",
-      fetch: (url: RequestInfo | URL, init?: RequestInit) => forward(new Request(url, init)),
+      fetch: sdkFetch(translate.messages.chat, { fetch: openAiUpstream(upstream) }),
     });
     const stream = client.messages.stream({
       model: "gpt-4o",

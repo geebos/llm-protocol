@@ -1,5 +1,5 @@
 /**
- * translate() factory tests, Anthropic Messages -> OpenAI Chat direction
+ * translate entry tests, Anthropic Messages -> OpenAI Chat direction
  * (M1, section 9.13, TC-019/021/023/024).
  *
  * Each test injects a fake fetch that captures the target Request and returns
@@ -7,8 +7,7 @@
  * restored on the way out.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
-import { TranslationError } from "../../src/errors.js";
+import { translate } from "../../src/index.js";
 
 interface CapturedRequest {
   url: string;
@@ -67,31 +66,29 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+const TARGET_URL = "https://api.openai.com/v1/chat/completions";
+const HEADERS = { authorization: "Bearer sk-openai-secret" };
+
 describe("translate: Anthropic Messages -> OpenAI Chat", () => {
   it("uses the url/headers verbatim and converts the body (TC-019)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
 
-    const request = new Request("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer sk-openai-secret",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
+    const response = await translate.messages.chat({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: {
         model: "gpt-4o",
         max_tokens: 512,
         system: "Be brief.",
         messages: [{ role: "user", content: "Hi" }],
-      }),
+      },
+      fetch,
     });
-
-    const response = await forward(request);
     const captured = lastRequest();
 
     // 9.1/9.2: URL and headers are final and used verbatim (no path rewrite or
     // credential move); the caller supplies the target-shaped headers.
-    expect(captured.url).toBe("https://api.openai.com/v1/chat/completions");
+    expect(captured.url).toBe(TARGET_URL);
     expect(captured.headers.get("authorization")).toBe("Bearer sk-openai-secret");
     expect(captured.headers.get("content-type")).toBe("application/json");
 
@@ -130,18 +127,17 @@ describe("translate: Anthropic Messages -> OpenAI Chat", () => {
         headers: { "content-type": "application/json" },
       }),
     );
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const request = new Request("https://api.openai.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": "key", "content-type": "application/json" },
-      body: JSON.stringify({
+
+    const response = await translate.messages.chat({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: {
         model: "gpt-4o",
         max_tokens: 10,
         messages: [{ role: "user", content: "hi" }],
-      }),
+      },
+      fetch,
     });
-
-    const response = await forward(request);
     expect(response.status).toBe(429);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.type).toBe("error");
@@ -149,7 +145,7 @@ describe("translate: Anthropic Messages -> OpenAI Chat", () => {
     expect((body.error as Record<string, unknown>).request_id).toBe("req_abc");
   });
 
-  it("converts Anthropic thinking blocks into provider reasoning field when declared", async () => {
+  it("converts Anthropic thinking blocks into a provider reasoning field when declared", async () => {
     const profile = {
       protocol: "openai-chat" as const,
       capabilities: {
@@ -161,15 +157,12 @@ describe("translate: Anthropic Messages -> OpenAI Chat", () => {
       },
       defaultHeaders: {},
     };
-    const openaiWithReasoning = await import("../../src/codecs/openai-chat/index.js");
-    const adapter = openaiWithReasoning.createOpenAiChatAdapter(profile);
     const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
 
-    const request = new Request("https://api.openai.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": "key", "content-type": "application/json" },
-      body: JSON.stringify({
+    await translate.messages.chat({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: {
         model: "gpt-4o",
         max_tokens: 10,
         messages: [
@@ -181,8 +174,9 @@ describe("translate: Anthropic Messages -> OpenAI Chat", () => {
             ],
           },
         ],
-      }),
+      },
+      profiles: { "openai-chat": profile },
+      fetch,
     });
-    await forward(request);
   });
 });

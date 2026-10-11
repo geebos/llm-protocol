@@ -5,7 +5,7 @@
  * translate() integration with the golden fixture.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import {
   deriveAnthropicCacheKey,
   extractAnthropicCacheAnchors,
@@ -474,19 +474,13 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
 
   it("injects a stable prompt_cache_key from source cache_control anchors (golden)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    const response = await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer key" },
+      body: goldenRequest,
       fetch,
       cache: {},
     });
-    const response = await forward(
-      new Request("https://api.openai.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "key", "content-type": "application/json" },
-        body: JSON.stringify(goldenRequest),
-      }),
-    );
     expect(response.status).toBe(200);
     const captured = lastRequest();
     expect(captured.body).toMatchObject({
@@ -505,20 +499,14 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
   it("reports the cache summary and warning in the trace", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer key" },
+      body: goldenRequest,
       fetch,
       cache: {},
       trace: (t) => traces.push({ ...t }),
     });
-    await forward(
-      new Request("https://api.openai.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "key", "content-type": "application/json" },
-        body: JSON.stringify(goldenRequest),
-      }),
-    );
     const report = traces[0].cache as Record<string, unknown>;
     expect(report).toMatchObject({
       detected: true,
@@ -535,24 +523,18 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
   it("injects nothing when the source has no cache_control", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer key" },
+      body: {
+        model: "m",
+        max_tokens: 10,
+        messages: [{ role: "user", content: "hi" }],
+      },
       fetch,
       cache: {},
       trace: (t) => traces.push({ ...t }),
     });
-    await forward(
-      new Request("https://api.openai.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "key", "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "m",
-          max_tokens: 10,
-          messages: [{ role: "user", content: "hi" }],
-        }),
-      }),
-    );
     expect(lastRequest().body.prompt_cache_key).toBeUndefined();
     expect((traces[0].cache as Record<string, unknown>).detected).toBe(false);
     expect(traces[0].warnings).not.toContainEqual(
@@ -562,35 +544,27 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
 
   it("is fully opt-in: default translate() never adds prompt_cache_key", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    await forward(
-      new Request("https://api.openai.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "key", "content-type": "application/json" },
-        body: JSON.stringify(goldenRequest),
-      }),
-    );
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer key" },
+      body: goldenRequest,
+      fetch,
+    });
     expect(lastRequest().body.prompt_cache_key).toBeUndefined();
   });
 
   it("does not inject when the target profile does not declare prompt_cache_key", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer key" },
+      body: goldenRequest,
       fetch,
       profiles: { "openai-chat": chatProfile(false) },
       cache: {},
       trace: (t) => traces.push({ ...t }),
     });
-    await forward(
-      new Request("https://api.openai.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "key", "content-type": "application/json" },
-        body: JSON.stringify(goldenRequest),
-      }),
-    );
     expect(lastRequest().body.prompt_cache_key).toBeUndefined();
     expect((traces[0].cache as Record<string, unknown>).targetKeyInjected).toBe(false);
     expect(traces[0].warnings).toContainEqual(
@@ -600,18 +574,16 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
 
   it("honors an explicit x-llm-prompt-cache-key header over anchors (forwarded verbatim)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch, cache: {} });
-    await forward(
-      new Request("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          authorization: "Bearer key",
-          "content-type": "application/json",
-          "x-llm-prompt-cache-key": "explicit-session-key",
-        },
-        body: JSON.stringify(goldenRequest),
-      }),
-    );
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: {
+        authorization: "Bearer key",
+        "x-llm-prompt-cache-key": "explicit-session-key",
+      },
+      body: goldenRequest,
+      fetch,
+      cache: {},
+    });
     expect(lastRequest().body.prompt_cache_key).toBe("explicit-session-key");
     // 9.2: headers are final; the caller-supplied header is forwarded verbatim.
     expect(lastRequest().headers.get("x-llm-prompt-cache-key")).toBe(
@@ -622,20 +594,14 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
   it("traces never leak the cache key, anchor text or prompt content", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer TOP_SECRET_KEY" },
+      body: goldenRequest,
       fetch,
       cache: {},
       trace: (t) => traces.push({ ...t }),
     });
-    await forward(
-      new Request("https://api.openai.com/v1/messages", {
-        method: "POST",
-        headers: { "x-api-key": "TOP_SECRET_KEY", "content-type": "application/json" },
-        body: JSON.stringify(goldenRequest),
-      }),
-    );
     const serialized = JSON.stringify(traces);
     expect(serialized).not.toContain("f1a6c616742c039a29db85132d256f4a");
     expect(serialized).not.toContain("project instructions");

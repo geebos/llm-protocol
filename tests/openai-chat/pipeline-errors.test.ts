@@ -5,16 +5,20 @@
  * not-yet-implemented openai-responses adapter, and error codec fallbacks.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../support/request-translate.js";
+import { translate } from "../../src/index.js";
 import { TranslationError } from "../../src/errors.js";
 import { getAdapter } from "../../src/codecs/registry.js";
 
-function openaiChatRequest(url = "https://api.anthropic.com/v1/chat/completions"): Request {
-  return new Request(url, {
-    method: "POST",
-    headers: { authorization: "Bearer key" },
-    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
-  });
+function openaiChatOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: { "x-api-key": "key" },
+    body: { model: "m", messages: [{ role: "user", content: "hi" }] },
+  };
 }
 
 describe("translate: upstream failures", () => {
@@ -22,8 +26,9 @@ describe("translate: upstream failures", () => {
     const fetch = (async () => {
       throw new TypeError("socket hang up");
     }) as unknown as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const err = await forward(openaiChatRequest()).catch((e: unknown) => e);
+    const err = await translate.chat
+      .messages({ ...openaiChatOptions(), fetch })
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("upstream");
   });
@@ -32,13 +37,11 @@ describe("translate: upstream failures", () => {
     const fetch = (async () => {
       throw new DOMException("aborted", "AbortError");
     }) as unknown as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
     const controller = new AbortController();
     controller.abort();
-    const request = openaiChatRequest();
-    // attach a fresh signal so the handler sees an aborted signal
-    const req = new Request(request, { signal: controller.signal });
-    const err = await forward(req).catch((e: unknown) => e);
+    const err = await translate.chat
+      .messages({ ...openaiChatOptions(), fetch, signal: controller.signal })
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("cancelled");
   });
@@ -49,8 +52,9 @@ describe("translate: upstream failures", () => {
         status: 200,
         headers: { "content-type": "text/html" },
       })) as unknown as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const err = await forward(openaiChatRequest()).catch((e: unknown) => e);
+    const err = await translate.chat
+      .messages({ ...openaiChatOptions(), fetch })
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("upstream");
   });
