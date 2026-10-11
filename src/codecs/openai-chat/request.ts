@@ -118,6 +118,21 @@ export function createOpenAiChatRequestCodec(
         }
       }
 
+      // `stream_options.include_usage` is the IR `includeUsage` hint; lift it
+      // out so it round-trips through the canonical field (05.translate-api.md
+      // §9.4) while other stream_options keys stay preserved as extensions.
+      let includeUsage: boolean | undefined;
+      const rawStreamOptions = extensions.stream_options;
+      if (rawStreamOptions && typeof rawStreamOptions === "object") {
+        const so = { ...(rawStreamOptions as Record<string, unknown>) };
+        if (typeof so.include_usage === "boolean") {
+          includeUsage = so.include_usage;
+        }
+        delete so.include_usage;
+        if (Object.keys(so).length) extensions.stream_options = so;
+        else delete extensions.stream_options;
+      }
+
       const generation: CanonicalGenerationOptions = {};
       if (typeof p.max_completion_tokens === "number") {
         generation.maxTokens = p.max_completion_tokens;
@@ -156,6 +171,7 @@ export function createOpenAiChatRequestCodec(
         generation,
         thinking,
         parallelToolCalls,
+        includeUsage,
         extensions,
       };
     },
@@ -213,6 +229,17 @@ export function createOpenAiChatRequestCodec(
       const ext = canonical.extensions ?? {};
       for (const key of EXTENSION_FIELDS) {
         if (ext[key] !== undefined) body[key] = ext[key];
+      }
+      // includeUsage is best-effort: only OpenAI Chat streaming carries it.
+      // `false` removes any inherited flag; unsupported shapes are ignored.
+      if (canonical.includeUsage !== undefined && streaming) {
+        const streamOptions = {
+          ...((body.stream_options as Record<string, unknown> | undefined) ?? {}),
+        };
+        if (canonical.includeUsage) streamOptions.include_usage = true;
+        else delete streamOptions.include_usage;
+        if (Object.keys(streamOptions).length) body.stream_options = streamOptions;
+        else delete body.stream_options;
       }
       for (const key of Object.keys(ext)) {
         if (key === "reasoning_effort") continue; // handled explicitly above

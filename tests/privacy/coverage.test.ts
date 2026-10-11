@@ -2,7 +2,7 @@
  * Coverage Policy and EgressVerify (P2/P6). Covers PT-18/29/33/38/52/62/66.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import type { PrivacyRecognizer } from "../../src/index.js";
 
 function phoneRecognizer(): PrivacyRecognizer {

@@ -3,7 +3,7 @@
  * Covers PT-01/03/04/07/16/17/31/42/50.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import {
   createSSEParser,
   type SSEFrame,

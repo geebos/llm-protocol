@@ -112,6 +112,12 @@ export interface CanonicalRequest {
    * `parallel_tool_calls`, Anthropic `tool_choice.disable_parallel_tool_use`).
    */
   parallelToolCalls?: boolean;
+  /**
+   * Best-effort request to include usage in the response
+   * (05.translate-api.md §9.4). Rendered natively where the target supports it
+   * (OpenAI `stream_options.include_usage`); silently dropped otherwise.
+   */
+  includeUsage?: boolean;
   /** Unrecognized / provider-specific fields, preserved opaque (FR-004). */
   extensions?: Record<string, unknown>;
 }

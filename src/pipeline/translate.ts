@@ -1,17 +1,17 @@
 /**
- * Transparent translation factory (FR-005A/005C/005D, 9.1-9.9).
+ * Unified `translate` entry (05.translate-api.md).
  *
- * `translate({ from, to })` returns a `Request -> Promise<Response>` handler:
- * - input  is a WHATWG Request in `from` protocol (path, headers, body);
- * - output is a WHATWG Response in `from` protocol: JSON for non-streaming,
+ * `translateCall(from, to, options)` runs one translation:
+ * - input  is the source-protocol body/url/headers supplied via `options`;
+ * - output is a WHATWG Response in the source protocol: JSON for non-streaming,
  *   live SSE on `Response.body` for streaming (never buffered).
  *
- * The `to` protocol lives entirely inside the factory and never leaks to the
- * caller. Streaming uses the canonical event pipeline
+ * Every conversion goes through the Canonical IR and `CanonicalStreamEvent`;
+ * the target protocol never leaks to the caller. Streaming uses
  *   target SSE -> SSE frames -> canonical events -> source SSE
  * with backpressure (Web Streams) and cancellation propagation (SR-007/008).
  *
- * Privacy (docs/04.privacy-transform.md) is injected between parse and render:
+ * Privacy (04.privacy-transform.md) is injected between parse and render:
  *   parseRequest -> redactRequest -> systemNotice -> cache -> renderRequest
  *   -> verifyEgress -> execute
  * and reversed on the response path (`restoreResponse` / stream restore).
@@ -24,12 +24,23 @@ import {
   type CodecContext,
   type ProtocolAdapter,
 } from "../codecs/protocol-adapter.js";
-import type { TranslationTrace, TranslateOptions, ForwardTranslator, DebugSseCapture, DebugSseOptions } from "./types.js";
+import type { TranslateOptions, TranslationTrace } from "./types.js";
+import { CompletionRecorder } from "./completion.js";
+import { toUnifiedUsage } from "./usage.js";
 import { DebugSseCollector } from "./debug-sse.js";
-import { createSSEParser, createCanonicalValidator, withAnthropicKeepAlive } from "../streams/index.js";
+import {
+  createSSEParser,
+  createCanonicalValidator,
+  withAnthropicKeepAlive,
+} from "../streams/index.js";
+import type { CanonicalStreamEvent } from "../streams/types.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
-import { resolveCacheAffinity, resolvePrivacySafeCacheAffinity, DEFAULT_CACHE_RESOLVERS } from "../cache/resolver.js";
+import {
+  resolveCacheAffinity,
+  resolvePrivacySafeCacheAffinity,
+  DEFAULT_CACHE_RESOLVERS,
+} from "../cache/resolver.js";
 import type { CacheAffinity } from "../cache/types.js";
 import { createAnthropicPrivacySafeCacheResolver } from "../cache/anthropic/privacy-safe-cache.js";
 import { applyOpenAIChatCacheAffinity } from "../cache/openai-chat/apply-cache-affinity.js";
@@ -44,10 +55,694 @@ import { restoreString } from "../privacy/restore.js";
 import { createPrivacyStreamRestore } from "../privacy/stream.js";
 import { toTranslationWarning } from "../privacy/config.js";
 import type {
+  ExtensionPrivacyProof,
   PrivacyCompletionReport,
   PrivacyRequestTrace,
   PrivacyWarning,
 } from "../privacy/types.js";
+
+export async function translateCall(
+  from: ApiFormat,
+  to: ApiFormat,
+  options: TranslateOptions,
+): Promise<Response> {
+  const logid = options.logid ?? crypto.randomUUID();
+  const recorder = new CompletionRecorder({
+    logid,
+    from,
+    to,
+    onComplete: options.onComplete,
+  });
+  const startedAt = performance.now();
+
+  // Resolve adapters inside the try so `responses` combinations surface a
+  // normalized `unsupported` error and still notify `onComplete` once.
+  const execute = options.fetch ?? globalThis.fetch;
+  const trace = options.trace;
+  const maxBodyBytes = options.maxBodyBytes ?? 10 * 1024 * 1024;
+  const timeoutMs = options.timeoutMs;
+  const keepAliveIntervalMs = options.keepAliveIntervalMs ?? 15_000;
+  const privacyConfig: ResolvedPrivacyConfig | undefined = options.privacy
+    ? resolvePrivacyConfig(options.privacy)
+    : undefined;
+  const collector = options.debug
+    ? new DebugSseCollector(options.debug, logid, startedAt)
+    : undefined;
+
+  // ---- request-side state ----
+  const ctx: CodecContext = newCodecContext();
+  let privacySession: PrivacySession | undefined;
+  let allowTexts: string[] = [];
+  let extensionProofs: ExtensionPrivacyProof[] = [];
+  let privacyRequestTrace: PrivacyRequestTrace | undefined;
+  let privacyFinalized = false;
+  const reportState: PrivacyReportState | undefined = privacyConfig
+    ? {
+        sessionId: logid,
+        redacted: 0,
+        restored: 0,
+        unknown: 0,
+        invalidDetections: 0,
+        overflowed: false,
+        jsonParseFailures: 0,
+        degraded: false,
+        warnings: [],
+      }
+    : undefined;
+
+  const pushPrivacyWarning = (warning: PrivacyWarning): void => {
+    ctx.warnings.push(toTranslationWarning(warning));
+    reportState?.warnings.push(warning);
+  };
+
+  const finalizePrivacy = (status: PrivacyCompletionReport["status"]): void => {
+    if (!privacyConfig || !reportState || privacyFinalized || !options.onPrivacyComplete) {
+      return;
+    }
+    privacyFinalized = true;
+    options.onPrivacyComplete({
+      sessionId: reportState.sessionId,
+      redacted: reportState.redacted,
+      restored: reportState.restored,
+      unknownPlaceholders: reportState.unknown,
+      invalidDetections: reportState.invalidDetections,
+      overflowed: reportState.overflowed,
+      jsonParseFailures: reportState.jsonParseFailures,
+      status,
+      securityMode: privacyConfig.securityMode,
+      degraded: reportState.degraded,
+      warnings: reportState.warnings,
+    });
+  };
+
+  const emitTrace = (
+    partial: Omit<TranslationTrace, "traceId" | "logid" | "durationMs" | "fidelity">,
+  ): void => {
+    trace?.({
+      traceId: logid,
+      logid,
+      durationMs: performance.now() - startedAt,
+      fidelity: worstFidelity(partial.warnings),
+      ...partial,
+    });
+  };
+
+  try {
+    const source = getAdapter(from, options.profiles?.[from], options.policies ?? DEFAULT_POLICIES);
+    const target = getAdapter(to, options.profiles?.[to], options.policies ?? DEFAULT_POLICIES);
+    const url = parseUrl(options.url);
+    const headers = buildHeaders(options.headers);
+    const sourcePayload = parseRequestBody(options.body);
+    const sourceBytes = new TextEncoder().encode(JSON.stringify(sourcePayload)).byteLength;
+    if (sourceBytes > maxBodyBytes) {
+      throw validationError(`Request body exceeds the ${maxBodyBytes}-byte limit`);
+    }
+
+    const streaming = options.stream ?? source.request.detectStreaming(sourcePayload);
+    const upstreamSignal = buildSignal(options.signal, timeoutMs);
+
+    const baseTrace: Omit<
+      TranslationTrace,
+      "streaming" | "traceId" | "logid" | "durationMs" | "fidelity"
+    > = {
+      sourceFormat: from,
+      targetFormat: to,
+      sourceEndpoint: url.pathname,
+      targetEndpoint: url.pathname,
+      passthrough: false,
+      warnings: ctx.warnings,
+    };
+
+    // Same-protocol fast path (FR-006, §9.7): no IR parse, no rewrite.
+    if (from === to && !privacyConfig) {
+      return await runPassthrough({
+        url,
+        headers,
+        sourcePayload,
+        streaming,
+        signal: upstreamSignal,
+        execute,
+        recorder,
+        collector,
+        emitTrace,
+        baseTrace,
+        finalizePrivacy,
+      });
+    }
+
+    if (privacyConfig && from === to) {
+      pushPrivacyWarning({
+        code: "privacy_passthrough_disabled",
+        message: "Same-protocol passthrough is disabled while privacy is enabled",
+      });
+    }
+
+    const canonicalRequest = parseCanonicalRequest(
+      source,
+      sourcePayload,
+      options.model,
+      ctx,
+    );
+    if (options.includeUsage !== undefined) {
+      canonicalRequest.includeUsage = options.includeUsage;
+    }
+
+    if (privacyConfig && reportState) {
+      for (const warning of privacyConfig.warnings) pushPrivacyWarning(warning);
+      privacySession = await materializePrivacySession(privacyConfig, logid);
+      const outcome = await redactCanonicalRequest(
+        canonicalRequest,
+        privacyConfig,
+        privacySession,
+      );
+      reportState.redacted = outcome.redacted;
+      reportState.invalidDetections = outcome.invalidDetections;
+      reportState.degraded = reportState.degraded || outcome.degraded;
+      allowTexts = outcome.allowTexts;
+      extensionProofs = outcome.extensionProofs;
+      privacyRequestTrace = {
+        sessionId: logid,
+        redacted: outcome.redacted,
+        channelsCovered: outcome.channels,
+      };
+      for (const warning of outcome.warnings) pushPrivacyWarning(warning);
+      injectSystemNotice(canonicalRequest, privacyConfig);
+    }
+
+    const cacheEnabled = options.cache !== undefined && target.format === "openai-chat";
+    let cacheAffinity: CacheAffinity | undefined;
+    if (cacheEnabled) {
+      if (privacyConfig) {
+        const safeResolvers = [
+          ...(options.cache?.privacySafeResolvers ?? []),
+          ...(options.cache?.key
+            ? [
+                createAnthropicPrivacySafeCacheResolver({
+                  key: options.cache.key,
+                  namespace: options.cache.namespace ?? "",
+                }),
+              ]
+            : []),
+        ];
+        cacheAffinity = await resolvePrivacySafeCacheAffinity(safeResolvers, canonicalRequest);
+        if (!cacheAffinity && privacyConfig.allowLegacyCacheResolvers) {
+          cacheAffinity = await resolveCacheAffinity(
+            options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
+            syntheticRequest(url, headers),
+            sourcePayload,
+            canonicalRequest,
+          );
+        } else if (!cacheAffinity && safeResolvers.length === 0) {
+          pushPrivacyWarning({
+            code: "privacy_untrusted_cache_resolver",
+            message:
+              "Cache affinity legacy resolvers are disabled under privacy unless explicitly authorized",
+          });
+        }
+      } else {
+        cacheAffinity = await resolveCacheAffinity(
+          options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
+          syntheticRequest(url, headers),
+          sourcePayload,
+          canonicalRequest,
+        );
+      }
+    }
+
+    const targetPayload = target.request.renderRequest(canonicalRequest, streaming, ctx);
+    const cacheApplication = cacheEnabled
+      ? applyOpenAIChatCacheAffinity(targetPayload, cacheAffinity, target.profile, ctx)
+      : undefined;
+    const outboundPayload = cacheApplication?.body ?? targetPayload;
+
+    if (privacyConfig && privacySession) {
+      try {
+        verifyExtensions(
+          target.request.supportsExtensionReport === true,
+          ctx.extensionDispositions,
+          extensionProofs,
+        );
+        verifyEgress(outboundPayload, privacySession, privacyConfig, allowTexts);
+      } catch (err) {
+        throw normalizePrivacyError(err);
+      }
+    }
+
+    const outboundText = JSON.stringify(outboundPayload);
+    if (privacyRequestTrace) baseTrace.privacy = privacyRequestTrace;
+    if (cacheApplication) baseTrace.cache = cacheApplication.report;
+    recorder.setRequestBody(outboundPayload);
+
+    const targetRequest = new Request(url, {
+      method: "POST",
+      headers,
+      body: outboundText,
+      signal: upstreamSignal,
+    });
+
+    let targetResponse: Response;
+    try {
+      targetResponse = await execute(targetRequest);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "TimeoutError") {
+        throw new TranslationError({
+          kind: "timeout",
+          message: `Upstream request timed out after ${timeoutMs}ms`,
+          cause: err,
+        });
+      }
+      if (options.signal?.aborted) {
+        throw new TranslationError({
+          kind: "cancelled",
+          message: "Translation cancelled by caller",
+          cause: err,
+        });
+      }
+      throw new TranslationError({
+        kind: "upstream",
+        message: "Upstream fetch failed",
+        cause: err,
+      });
+    }
+    recorder.setResponseMeta(targetResponse.headers, targetResponse.status);
+
+    if (targetResponse.status >= 400) {
+      // Upstream rejected before streaming: reverse-translate the error body.
+      const errPayload = await readErrorPayload(targetResponse);
+      const canonicalError = target.error.parseError(errPayload, targetResponse.status);
+      if (privacyConfig && privacySession && privacyConfig.errorRestore === "trusted_client") {
+        canonicalError.message = restoreClientErrorText(
+          canonicalError.message,
+          privacySession,
+          privacyConfig,
+        );
+      }
+      const sourcePayloadError = source.error.renderError(canonicalError);
+      recorder.setError(canonicalError);
+      emitTrace({ ...baseTrace, streaming: false });
+      finalizePrivacy("errored");
+      recorder.finish("completed");
+      return new Response(JSON.stringify(sourcePayloadError), {
+        status: mapStatus(targetResponse.status),
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    }
+
+    if (streaming) {
+      return buildStreamingResponse({
+        targetResponse,
+        source,
+        target,
+        ctx,
+        baseTrace,
+        emitTrace,
+        keepAliveIntervalMs,
+        privacyConfig,
+        privacySession,
+        reportState,
+        pushPrivacyWarning,
+        finalizePrivacy,
+        collector,
+        recorder,
+      });
+    }
+
+    let targetPayloadJson: unknown;
+    try {
+      targetPayloadJson = await targetResponse.json();
+    } catch {
+      throw new TranslationError({
+        kind: "upstream",
+        message: "Upstream returned a non-JSON body for a non-streaming request",
+        status: targetResponse.status,
+      });
+    }
+    const canonicalResponse = target.response.parseResponse(targetPayloadJson, ctx);
+    recorder.setUsage(toUnifiedUsage(canonicalResponse.usage));
+    // Q2/Q10: source-protocol shape rendered BEFORE privacy restore. Warnings
+    // are recorded from this render; the client-facing render uses a scratch
+    // context so they are not duplicated.
+    recorder.setResponseBody(source.response.renderResponse(canonicalResponse, ctx));
+    if (privacyConfig && privacySession && reportState) {
+      const counts = restoreResponse(
+        canonicalResponse,
+        privacySession,
+        privacyConfig.template,
+        privacyConfig.streaming.maxPlaceholderLength,
+        privacyConfig.streaming.maxToolArgumentBytes,
+      );
+      reportState.restored += counts.restored;
+      reportState.unknown += counts.unknown;
+      reportState.jsonParseFailures += counts.jsonParseFailures;
+      for (const warning of counts.warnings) pushPrivacyWarning(warning);
+    }
+    const sourcePayloadJson = source.response.renderResponse(
+      canonicalResponse,
+      newCodecContext(),
+    );
+    emitTrace({ ...baseTrace, streaming: false });
+    finalizePrivacy("completed");
+    recorder.finish("completed");
+    return new Response(JSON.stringify(sourcePayloadJson), {
+      status: mapStatus(targetResponse.status),
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  } catch (err) {
+    const normalized = normalizeError(err);
+    recorder.setError(toCanonicalError(normalized));
+    const status = normalized.kind === "cancelled" ? "cancelled" : "errored";
+    recorder.finish(status);
+    finalizePrivacy(status);
+    collector?.finalize();
+    throw normalized;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Request-side helpers
+// ---------------------------------------------------------------------------
+
+function parseUrl(value: string | URL): URL {
+  try {
+    return value instanceof URL ? value : new URL(value);
+  } catch {
+    throw validationError("url must be a valid absolute URL");
+  }
+}
+
+function buildHeaders(init: HeadersInit | undefined): Headers {
+  const headers = new Headers(init);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  return headers;
+}
+
+function parseRequestBody(body: unknown): unknown {
+  if (typeof body === "string") {
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw validationError("body must be valid JSON");
+    }
+  }
+  if (body && typeof body === "object" && !ArrayBuffer.isView(body)) {
+    return body;
+  }
+  throw validationError("body must be a JSON object or a JSON string");
+}
+
+function buildSignal(caller: AbortSignal | undefined, timeoutMs: number | undefined): AbortSignal {
+  if (timeoutMs === undefined) return caller ?? new AbortController().signal;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return caller ? AbortSignal.any([caller, timeout]) : timeout;
+}
+
+/**
+ * Apply `options.model` before parsing when the source body omits it, so a
+ * model override works for body shapes that would otherwise fail validation.
+ */
+function parseCanonicalRequest(
+  source: ProtocolAdapter,
+  payload: unknown,
+  modelOverride: string | undefined,
+  ctx: CodecContext,
+) {
+  let input = payload;
+  if (
+    modelOverride !== undefined &&
+    payload &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    (payload as { model?: unknown }).model === undefined
+  ) {
+    input = { ...(payload as Record<string, unknown>), model: modelOverride };
+  }
+  const canonical = source.request.parseRequest(input, ctx);
+  if (modelOverride !== undefined) canonical.model = modelOverride;
+  return canonical;
+}
+
+async function materializePrivacySession(
+  config: ResolvedPrivacyConfig,
+  sessionId: string,
+): Promise<PrivacySession> {
+  const tagKey = config.resolveTagKey ? await config.resolveTagKey() : undefined;
+  return new PrivacySession(sessionId, {
+    compiled: config.template,
+    tagMode: config.tagMode,
+    tagBytes: config.tagBytes,
+    namespace: config.namespace,
+    tagKey,
+  });
+}
+
+/** Legacy (raw-request) resolvers read headers such as the cache-key header. */
+function syntheticRequest(url: URL, headers: Headers): Request {
+  return new Request(url, { method: "POST", headers });
+}
+
+// ---------------------------------------------------------------------------
+// Passthrough
+// ---------------------------------------------------------------------------
+
+interface PassthroughContext {
+  url: URL;
+  headers: Headers;
+  sourcePayload: unknown;
+  streaming: boolean;
+  signal: AbortSignal;
+  execute: typeof globalThis.fetch;
+  recorder: CompletionRecorder;
+  collector?: DebugSseCollector;
+  emitTrace: (partial: Omit<TranslationTrace, "traceId" | "logid" | "durationMs" | "fidelity">) => void;
+  baseTrace: Omit<TranslationTrace, "streaming" | "traceId" | "logid" | "durationMs" | "fidelity">;
+  finalizePrivacy: (status: PrivacyCompletionReport["status"]) => void;
+}
+
+async function runPassthrough({
+  url,
+  headers,
+  sourcePayload,
+  streaming,
+  signal,
+  execute,
+  recorder,
+  collector,
+  emitTrace,
+  baseTrace,
+  finalizePrivacy,
+}: PassthroughContext): Promise<Response> {
+  recorder.setRequestBody(sourcePayload);
+  const request = new Request(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(sourcePayload),
+    signal,
+  });
+  const response = await execute(request);
+  recorder.setResponseMeta(response.headers, response.status);
+
+  // Observe the non-streaming body from a clone BEFORE any debug tee locks the
+  // real body stream.
+  let observedBody: unknown;
+  if (!streaming) {
+    try {
+      observedBody = await response.clone().json();
+    } catch {
+      // Non-JSON passthrough bodies are not observable as JSON.
+    }
+  }
+
+  const rawBody = response.body;
+  let outBody: ReadableStream<Uint8Array> | null = rawBody;
+  if (collector && rawBody) {
+    let body: ReadableStream<Uint8Array> = rawBody;
+    if (collector.enabled("upstream")) body = collector.observe(body, "upstream");
+    if (collector.enabled("client")) body = collector.observe(body, "client");
+    outBody = body;
+  }
+
+  emitTrace({ ...baseTrace, streaming, passthrough: true });
+  finalizePrivacy("completed");
+
+  if (!streaming && observedBody !== undefined) {
+    recorder.setResponseBody(observedBody);
+  }
+  recorder.finish("completed");
+
+  if (collector && rawBody && outBody) {
+    return new Response(outBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+  return response;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+interface StreamingContext {
+  targetResponse: Response;
+  source: ProtocolAdapter;
+  target: ProtocolAdapter;
+  ctx: CodecContext;
+  baseTrace: Omit<TranslationTrace, "streaming" | "traceId" | "logid" | "durationMs" | "fidelity">;
+  emitTrace: (partial: Omit<TranslationTrace, "traceId" | "logid" | "durationMs" | "fidelity">) => void;
+  keepAliveIntervalMs?: number;
+  privacyConfig?: ResolvedPrivacyConfig;
+  privacySession?: PrivacySession;
+  reportState?: PrivacyReportState;
+  pushPrivacyWarning?: (warning: PrivacyWarning) => void;
+  finalizePrivacy?: (status: PrivacyCompletionReport["status"]) => void;
+  collector?: DebugSseCollector;
+  recorder: CompletionRecorder;
+}
+
+function buildStreamingResponse({
+  targetResponse,
+  source,
+  target,
+  ctx,
+  baseTrace,
+  emitTrace,
+  keepAliveIntervalMs,
+  privacyConfig,
+  privacySession,
+  reportState,
+  pushPrivacyWarning,
+  finalizePrivacy,
+  collector,
+  recorder,
+}: StreamingContext): Response {
+  if (!targetResponse.body) {
+    throw new TranslationError({
+      kind: "stream_protocol",
+      message: "Upstream returned an empty body for a streaming request",
+      status: targetResponse.status,
+    });
+  }
+
+  const report = (warning: TranslationWarning): void => {
+    ctx.warnings.push(warning);
+  };
+  const rawBody = targetResponse.body;
+
+  let stream: ReadableStream<Uint8Array>;
+  let privacyHandle: import("../privacy/stream.js").StreamRestoreHandle | undefined;
+  try {
+    const upstreamBody = collector ? collector.observe(rawBody, "upstream") : rawBody;
+    const parsed = upstreamBody
+      .pipeThrough(createSSEParser())
+      .pipeThrough(target.stream.createParse(report))
+      .pipeThrough(createCanonicalValidator());
+    // Q3/Q10: buffer canonical events before privacy restore (placeholder view).
+    const observed = parsed.pipeThrough(
+      new TransformStream<CanonicalStreamEvent, CanonicalStreamEvent>({
+        transform(event, controller) {
+          recorder.pushEvent(event);
+          if (event.type === "usage") recorder.setUsage(toUnifiedUsage(event.usage));
+          controller.enqueue(event);
+        },
+      }),
+    );
+    let events: ReadableStream<CanonicalStreamEvent> = observed;
+    if (privacyConfig && privacySession && reportState) {
+      const handle = createPrivacyStreamRestore(
+        privacySession,
+        privacyConfig,
+        (warning) => {
+          pushPrivacyWarning?.(warning);
+        },
+      );
+      privacyHandle = handle;
+      events = observed.pipeThrough(handle.stream);
+    }
+    const rendered = events.pipeThrough(source.stream.createRender(report));
+    const clientStream =
+      source.format === "anthropic-messages"
+        ? withAnthropicKeepAlive(rendered, keepAliveIntervalMs)
+        : rendered;
+    const commitStats = (): void => {
+      if (privacyHandle && reportState) {
+        reportState.restored += privacyHandle.stats.restored;
+        reportState.unknown += privacyHandle.stats.unknown;
+        reportState.overflowed = reportState.overflowed || privacyHandle.stats.overflowed;
+        reportState.jsonParseFailures += privacyHandle.stats.jsonParseFailures;
+      }
+    };
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    stream = new ReadableStream<Uint8Array>({
+      start() {
+        reader = clientStream.getReader();
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = await reader!.read();
+          if (done) {
+            commitStats();
+            finalizePrivacy?.("completed");
+            recorder.finish("completed");
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        } catch (err) {
+          commitStats();
+          collector?.finalize();
+          finalizePrivacy?.("errored");
+          recorder.finish("errored");
+          controller.error(err);
+        }
+      },
+      async cancel(reason) {
+        privacyHandle?.abort();
+        collector?.finalize();
+        try {
+          await reader?.cancel(reason);
+        } catch {
+          // upstream cancellation errors are not surfaced to the caller
+        }
+        finalizePrivacy?.("cancelled");
+        recorder.finish("cancelled");
+      },
+    });
+    if (collector?.enabled("client")) {
+      stream = collector.observe(stream, "client");
+    }
+  } catch (err) {
+    finalizePrivacy?.("errored");
+    recorder.finish("errored");
+    collector?.finalize();
+    throw err;
+  }
+
+  emitTrace({ ...baseTrace, streaming: true });
+  return new Response(stream, {
+    status: mapStatus(targetResponse.status),
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+interface PrivacyReportState {
+  sessionId: string;
+  redacted: number;
+  restored: number;
+  unknown: number;
+  invalidDetections: number;
+  overflowed: boolean;
+  jsonParseFailures: number;
+  degraded: boolean;
+  warnings: PrivacyWarning[];
+}
 
 async function readErrorPayload(response: Response): Promise<unknown> {
   // Read once: `response.json()` would consume the body even when it fails,
@@ -65,449 +760,6 @@ async function readErrorPayload(response: Response): Promise<unknown> {
   }
 }
 
-interface PrivacyReportState {
-  sessionId: string;
-  redacted: number;
-  restored: number;
-  unknown: number;
-  invalidDetections: number;
-  overflowed: boolean;
-  jsonParseFailures: number;
-  degraded: boolean;
-  warnings: PrivacyWarning[];
-}
-
-export function translate<
-  From extends ApiFormat,
-  To extends ApiFormat,
->(options: TranslateOptions<From, To>): ForwardTranslator {
-  const source = getAdapter(
-    options.from,
-    options.profiles?.[options.from],
-    options.policies ?? DEFAULT_POLICIES,
-  );
-  const target = getAdapter(
-    options.to,
-    options.profiles?.[options.to],
-    options.policies ?? DEFAULT_POLICIES,
-  );
-  const execute = options.fetch ?? globalThis.fetch;
-  const trace = options.trace;
-  const maxBodyBytes = options.maxBodyBytes ?? 10 * 1024 * 1024;
-  const timeoutMs = options.timeoutMs;
-  const keepAliveIntervalMs = options.keepAliveIntervalMs ?? 15_000;
-  const privacyConfig: ResolvedPrivacyConfig | undefined = options.privacy
-    ? resolvePrivacyConfig(options.privacy)
-    : undefined;
-  const debugOptions: DebugSseOptions | undefined = options.debug;
-  const retained: { latest: DebugSseCapture | undefined } = { latest: undefined };
-  const createCollector = (
-    traceId: string,
-    startedAt: number,
-  ): DebugSseCollector | undefined => {
-    if (!debugOptions) return undefined;
-    const wrapped: DebugSseOptions = debugOptions.retain
-      ? {
-          ...debugOptions,
-          onComplete: (capture) => {
-            retained.latest = capture;
-            debugOptions.onComplete?.(capture);
-          },
-        }
-      : debugOptions;
-    return new DebugSseCollector(wrapped, traceId, startedAt);
-  };
-
-  /** Same-protocol fast path: no parse, no rewrite (FR-006, 9.11). */
-  if ((options.from as string) === (options.to as string) && !privacyConfig) {
-    const fastHandler = (async (request: Request): Promise<Response> => {
-      const started = performance.now();
-      const traceId = crypto.randomUUID();
-      const collector = createCollector(traceId, started);
-      const response = await execute(request);
-      const sourceBody = response.body;
-      let outBody: ReadableStream<Uint8Array<ArrayBuffer>> | null = sourceBody;
-      if (collector && sourceBody) {
-        let body: ReadableStream<Uint8Array<ArrayBuffer>> = sourceBody;
-        if (collector.enabled("upstream")) body = collector.observe(body, "upstream");
-        if (collector.enabled("client")) body = collector.observe(body, "client");
-        outBody = body;
-      }
-      trace?.({
-        traceId,
-        sourceFormat: options.from,
-        targetFormat: options.to,
-        sourceEndpoint: request.url,
-        targetEndpoint: request.url,
-        streaming: false,
-        passthrough: true,
-        durationMs: performance.now() - started,
-        fidelity: "EXACT",
-        warnings: [],
-      });
-      if (collector && sourceBody && outBody) {
-        return new Response(outBody, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
-      }
-      return response;
-    }) as ForwardTranslator;
-    fastHandler.getRawSse = () => retained.latest;
-    return fastHandler;
-  }
-
-  const handler = (async (request: Request): Promise<Response> => {
-    const started = performance.now();
-    const traceId = crypto.randomUUID();
-    const collector = createCollector(traceId, started);
-    const emitTrace = (partial: Omit<TranslationTrace, "traceId" | "durationMs" | "fidelity">): void => {
-      trace?.({
-        traceId,
-        durationMs: performance.now() - started,
-        fidelity: worstFidelity(partial.warnings),
-        ...partial,
-      });
-    };
-    if (request.bodyUsed) {
-      throw validationError("Request body has already been consumed");
-    }
-    const ctx: CodecContext = newCodecContext();
-    const sourceUrl = new URL(request.url);
-
-    let privacySession: PrivacySession | undefined;
-    let allowTexts: string[] = [];
-    let extensionProofs: import("../privacy/types.js").ExtensionPrivacyProof[] = [];
-    let privacyRequestTrace: PrivacyRequestTrace | undefined;
-    let privacyFinalized = false;
-    const reportState: PrivacyReportState | undefined = privacyConfig
-      ? {
-          sessionId: traceId,
-          redacted: 0,
-          restored: 0,
-          unknown: 0,
-          invalidDetections: 0,
-          overflowed: false,
-          jsonParseFailures: 0,
-          degraded: false,
-          warnings: [],
-        }
-      : undefined;
-
-    const pushPrivacyWarning = (warning: PrivacyWarning): void => {
-      ctx.warnings.push(toTranslationWarning(warning));
-      reportState?.warnings.push(warning);
-    };
-
-    const finalizePrivacy = (
-      status: PrivacyCompletionReport["status"],
-    ): void => {
-      if (!privacyConfig || !reportState || privacyFinalized || !options.onPrivacyComplete) {
-        return;
-      }
-      privacyFinalized = true;
-      options.onPrivacyComplete({
-        sessionId: reportState.sessionId,
-        redacted: reportState.redacted,
-        restored: reportState.restored,
-        unknownPlaceholders: reportState.unknown,
-        invalidDetections: reportState.invalidDetections,
-        overflowed: reportState.overflowed,
-        jsonParseFailures: reportState.jsonParseFailures,
-        status,
-        securityMode: privacyConfig.securityMode,
-        degraded: reportState.degraded,
-        warnings: reportState.warnings,
-      });
-    };
-
-    const materializePrivacySession = async (): Promise<PrivacySession> => {
-      if (!privacyConfig) throw new Error("privacy is not enabled");
-      const tagKey = privacyConfig.resolveTagKey
-        ? await privacyConfig.resolveTagKey()
-        : undefined;
-      return new PrivacySession(traceId, {
-        compiled: privacyConfig.template,
-        tagMode: privacyConfig.tagMode,
-        tagBytes: privacyConfig.tagBytes,
-        namespace: privacyConfig.namespace,
-        tagKey,
-      });
-    };
-
-    try {
-      if (!source.endpoint.matches(sourceUrl)) {
-        throw validationError(
-          `URL path "${sourceUrl.pathname}" does not match ${options.from} endpoint`,
-        );
-      }
-
-      if (privacyConfig && (options.from as string) === (options.to as string)) {
-        pushPrivacyWarning({
-          code: "privacy_passthrough_disabled",
-          message: "Same-protocol passthrough is disabled while privacy is enabled",
-        });
-      }
-
-      const endpoint = source.endpoint.toCanonical(sourceUrl);
-      const bodyBytes = await request.arrayBuffer();
-      if (bodyBytes.byteLength > maxBodyBytes) {
-        throw validationError(
-          `Request body exceeds the ${maxBodyBytes}-byte limit`,
-        );
-      }
-      let sourcePayload: unknown;
-      try {
-        sourcePayload = JSON.parse(new TextDecoder().decode(bodyBytes));
-      } catch {
-        throw validationError("Request body must be valid JSON");
-      }
-      const streaming = source.request.detectStreaming(sourcePayload);
-      const canonicalRequest = source.request.parseRequest(sourcePayload, ctx);
-
-      if (privacyConfig && reportState) {
-        for (const warning of privacyConfig.warnings) pushPrivacyWarning(warning);
-        privacySession = await materializePrivacySession();
-        const outcome = await redactCanonicalRequest(
-          canonicalRequest,
-          privacyConfig,
-          privacySession,
-        );
-        reportState.redacted = outcome.redacted;
-        reportState.invalidDetections = outcome.invalidDetections;
-        reportState.degraded = reportState.degraded || outcome.degraded;
-        allowTexts = outcome.allowTexts;
-        extensionProofs = outcome.extensionProofs;
-        privacyRequestTrace = {
-          sessionId: traceId,
-          redacted: outcome.redacted,
-          channelsCovered: outcome.channels,
-        };
-        for (const warning of outcome.warnings) pushPrivacyWarning(warning);
-        injectSystemNotice(canonicalRequest, privacyConfig);
-      }
-
-      // Prompt-cache affinity (Anthropic cache_control -> OpenAI Chat
-      // prompt_cache_key). Without privacy, derive from the raw source body.
-      // With privacy, only privacy-safe resolvers (redacted canonical) run by
-      // default; legacy request-reading resolvers require explicit opt-in
-      // (PR-021/PR-025). The privacy-safe identity is an HMAC digest, so the
-      // outbound key never exposes an enumerable hash of raw anchors.
-      const cacheEnabled = options.cache !== undefined && target.format === "openai-chat";
-      let cacheAffinity: CacheAffinity | undefined;
-      if (cacheEnabled) {
-        if (privacyConfig) {
-          const safeResolvers = [
-            ...(options.cache?.privacySafeResolvers ?? []),
-            ...(options.cache?.key
-              ? [
-                  createAnthropicPrivacySafeCacheResolver({
-                    key: options.cache.key,
-                    namespace: options.cache.namespace ?? "",
-                  }),
-                ]
-              : []),
-          ];
-          cacheAffinity = await resolvePrivacySafeCacheAffinity(
-            safeResolvers,
-            canonicalRequest,
-          );
-          if (!cacheAffinity && privacyConfig.allowLegacyCacheResolvers) {
-            cacheAffinity = await resolveCacheAffinity(
-              options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
-              request,
-              sourcePayload,
-              canonicalRequest,
-            );
-          } else if (!cacheAffinity && safeResolvers.length === 0) {
-            pushPrivacyWarning({
-              code: "privacy_untrusted_cache_resolver",
-              message:
-                "Cache affinity legacy resolvers are disabled under privacy unless explicitly authorized",
-            });
-          }
-        } else {
-          cacheAffinity = await resolveCacheAffinity(
-            options.cache?.resolvers ?? DEFAULT_CACHE_RESOLVERS,
-            request,
-            sourcePayload,
-            canonicalRequest,
-          );
-        }
-      }
-
-      const targetUrl = target.endpoint.fromCanonical(endpoint, sourceUrl);
-      const credential = source.headers.parseCredential(request.headers);
-      const targetHeaders = target.headers.renderTargetHeaders(
-        request.headers,
-        credential,
-      );
-      const targetPayload = target.request.renderRequest(
-        canonicalRequest,
-        streaming,
-        ctx,
-      );
-      const cacheApplication = cacheEnabled
-        ? applyOpenAIChatCacheAffinity(
-            targetPayload,
-            cacheAffinity,
-            target.profile,
-            ctx,
-          )
-        : undefined;
-      const outboundPayload = cacheApplication?.body ?? targetPayload;
-
-      if (privacyConfig && privacySession) {
-        try {
-          verifyExtensions(
-            target.request.supportsExtensionReport === true,
-            ctx.extensionDispositions,
-            extensionProofs,
-          );
-          verifyEgress(outboundPayload, privacySession, privacyConfig, allowTexts);
-        } catch (err) {
-          throw normalizePrivacyError(err);
-        }
-      }
-
-      const upstreamSignal =
-        timeoutMs !== undefined
-          ? AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)])
-          : request.signal;
-
-      const targetRequest = new Request(targetUrl, {
-        method: request.method,
-        headers: targetHeaders,
-        body: JSON.stringify(outboundPayload),
-        signal: upstreamSignal,
-      });
-
-      const baseTrace: Omit<
-        TranslationTrace,
-        "streaming" | "traceId" | "durationMs" | "fidelity"
-      > = {
-        sourceFormat: options.from,
-        targetFormat: options.to,
-        sourceEndpoint: sourceUrl.pathname,
-        targetEndpoint: targetUrl.pathname,
-        passthrough: false,
-        warnings: ctx.warnings,
-        ...(privacyRequestTrace ? { privacy: privacyRequestTrace } : {}),
-        ...(cacheApplication ? { cache: cacheApplication.report } : {}),
-      };
-
-      let targetResponse: Response;
-      try {
-        targetResponse = await execute(targetRequest);
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "TimeoutError") {
-          throw new TranslationError({
-            kind: "timeout",
-            message: `Upstream request timed out after ${timeoutMs}ms`,
-            cause: err,
-          });
-        }
-        if (request.signal?.aborted) {
-          throw new TranslationError({
-            kind: "cancelled",
-            message: "Translation cancelled by caller",
-            cause: err,
-          });
-        }
-        throw new TranslationError({
-          kind: "upstream",
-          message: "Upstream fetch failed",
-          cause: err,
-        });
-      }
-
-      if (targetResponse.status >= 400) {
-        // Upstream rejected before streaming: reverse-translate the error body.
-        const errPayload = await readErrorPayload(targetResponse);
-        const canonicalError = target.error.parseError(
-          errPayload,
-          targetResponse.status,
-        );
-        if (
-          privacyConfig &&
-          privacySession &&
-          privacyConfig.errorRestore === "trusted_client"
-        ) {
-          canonicalError.message = restoreClientErrorText(
-            canonicalError.message,
-            privacySession,
-            privacyConfig,
-          );
-        }
-        const sourcePayloadError = source.error.renderError(canonicalError);
-        emitTrace({ ...baseTrace, streaming: false });
-        finalizePrivacy("errored");
-        return new Response(JSON.stringify(sourcePayloadError), {
-          status: mapStatus(targetResponse.status),
-          headers: { "content-type": "application/json; charset=utf-8" },
-        });
-      }
-
-      if (streaming) {
-        return translateStreamingResponse({
-          targetResponse,
-          source,
-          target,
-          ctx,
-          baseTrace,
-          emitTrace,
-          keepAliveIntervalMs,
-          privacyConfig,
-          privacySession,
-          reportState,
-          pushPrivacyWarning,
-          finalizePrivacy,
-          collector,
-        });
-      }
-
-      let targetPayloadJson: unknown;
-      try {
-        targetPayloadJson = await targetResponse.json();
-      } catch {
-        throw new TranslationError({
-          kind: "upstream",
-          message: "Upstream returned a non-JSON body for a non-streaming request",
-          status: targetResponse.status,
-        });
-      }
-      const canonicalResponse = target.response.parseResponse(targetPayloadJson, ctx);
-      if (privacyConfig && privacySession && reportState) {
-        const counts = restoreResponse(
-          canonicalResponse,
-          privacySession,
-          privacyConfig.template,
-          privacyConfig.streaming.maxPlaceholderLength,
-          privacyConfig.streaming.maxToolArgumentBytes,
-        );
-        reportState.restored += counts.restored;
-        reportState.unknown += counts.unknown;
-        reportState.jsonParseFailures += counts.jsonParseFailures;
-        for (const warning of counts.warnings) pushPrivacyWarning(warning);
-      }
-      const sourcePayloadJson = source.response.renderResponse(canonicalResponse, ctx);
-      emitTrace({ ...baseTrace, streaming: false });
-      finalizePrivacy("completed");
-      return new Response(JSON.stringify(sourcePayloadJson), {
-        status: mapStatus(targetResponse.status),
-        headers: { "content-type": "application/json; charset=utf-8" },
-      });
-    } catch (err) {
-      finalizePrivacy("errored");
-      collector?.finalize();
-      throw err instanceof PrivacyGuardError ? normalizePrivacyError(err) : err;
-    }
-  }) as ForwardTranslator;
-  handler.getRawSse = () => retained.latest;
-  return handler;
-}
-
 /** Convert a privacy guard error into a sanitized `privacy` TranslationError. */
 function normalizePrivacyError(err: unknown): TranslationError {
   if (err instanceof PrivacyGuardError) {
@@ -516,6 +768,26 @@ function normalizePrivacyError(err: unknown): TranslationError {
   return err instanceof TranslationError
     ? err
     : new TranslationError({ kind: "privacy", message: "Privacy transform failed" });
+}
+
+function normalizeError(err: unknown): TranslationError {
+  if (err instanceof PrivacyGuardError) return normalizePrivacyError(err);
+  if (err instanceof TranslationError) return err;
+  return new TranslationError({
+    kind: "upstream",
+    message: err instanceof Error ? err.message : "Translation failed",
+  });
+}
+
+function toCanonicalError(err: TranslationError) {
+  return {
+    kind: err.kind,
+    message: err.message,
+    ...(err.status !== undefined ? { status: err.status } : {}),
+    ...(err.providerCode !== undefined ? { providerCode: err.providerCode } : {}),
+    ...(err.code !== undefined ? { code: err.code } : {}),
+    ...(err.requestId !== undefined ? { requestId: err.requestId } : {}),
+  };
 }
 
 function restoreClientErrorText(
@@ -541,137 +813,6 @@ function worstFidelity(warnings: TranslationWarning[]): Fidelity {
     else if (w.fidelity === "COMPATIBLE" && worst === "EXACT") worst = "COMPATIBLE";
   }
   return worst;
-}
-
-interface StreamingContext {
-  targetResponse: Response;
-  source: ProtocolAdapter;
-  target: ProtocolAdapter;
-  ctx: CodecContext;
-  baseTrace: Omit<TranslationTrace, "streaming" | "traceId" | "durationMs" | "fidelity">;
-  emitTrace: (partial: Omit<TranslationTrace, "traceId" | "durationMs" | "fidelity">) => void;
-  keepAliveIntervalMs?: number;
-  privacyConfig?: ResolvedPrivacyConfig;
-  privacySession?: PrivacySession;
-  reportState?: PrivacyReportState;
-  pushPrivacyWarning?: (warning: PrivacyWarning) => void;
-  finalizePrivacy?: (status: PrivacyCompletionReport["status"]) => void;
-  collector?: DebugSseCollector;
-}
-
-/**
- * Streaming path (9.7, 9.9): pipe the upstream SSE body through
- * target-parse -> canonical validate -> [privacy restore] -> source-render
- * without buffering. Cancellation propagates through the Web Streams pipe.
- */
-function translateStreamingResponse({
-  targetResponse,
-  source,
-  target,
-  ctx,
-  baseTrace,
-  emitTrace,
-  keepAliveIntervalMs,
-  privacyConfig,
-  privacySession,
-  reportState,
-  pushPrivacyWarning,
-  finalizePrivacy,
-  collector,
-}: StreamingContext): Response {
-  if (!targetResponse.body) {
-    throw new TranslationError({
-      kind: "stream_protocol",
-      message: "Upstream returned an empty body for a streaming request",
-      status: targetResponse.status,
-    });
-  }
-
-  const report = (warning: TranslationWarning): void => {
-    ctx.warnings.push(warning);
-  };
-  const rawBody = targetResponse.body;
-
-  let stream: ReadableStream<Uint8Array>;
-  let privacyHandle: import("../privacy/stream.js").StreamRestoreHandle | undefined;
-  try {
-    let events: ReadableStream<import("../streams/types.js").CanonicalStreamEvent> | undefined;
-    const upstreamBody = collector
-      ? collector.observe(rawBody, "upstream")
-      : rawBody;
-    const parsed = upstreamBody
-      .pipeThrough(createSSEParser())
-      .pipeThrough(target.stream.createParse(report))
-      .pipeThrough(createCanonicalValidator());
-    if (privacyConfig && privacySession && reportState) {
-      const handle = createPrivacyStreamRestore(
-        privacySession,
-        privacyConfig,
-        (warning) => {
-          pushPrivacyWarning?.(warning);
-        },
-      );
-      privacyHandle = handle;
-      events = parsed.pipeThrough(handle.stream);
-    } else {
-      events = parsed;
-    }
-    let rendered = events.pipeThrough(source.stream.createRender(report));
-    const clientStream =
-      source.format === "anthropic-messages"
-        ? withAnthropicKeepAlive(rendered, keepAliveIntervalMs)
-        : rendered;
-    const commitStats = (): void => {
-      if (privacyHandle && reportState) {
-        reportState.restored += privacyHandle.stats.restored;
-        reportState.unknown += privacyHandle.stats.unknown;
-        reportState.overflowed = reportState.overflowed || privacyHandle.stats.overflowed;
-        reportState.jsonParseFailures += privacyHandle.stats.jsonParseFailures;
-      }
-    };
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-    stream = new ReadableStream<Uint8Array>({
-      start() {
-        reader = clientStream.getReader();
-      },
-      async pull(controller) {
-        const { done, value } = await reader!.read();
-        if (done) {
-          commitStats();
-          finalizePrivacy?.("completed");
-          controller.close();
-          return;
-        }
-        controller.enqueue(value);
-      },
-      async cancel(reason) {
-        privacyHandle?.abort();
-        collector?.finalize();
-        try {
-          await reader?.cancel(reason);
-        } catch {
-          // upstream cancellation errors are not surfaced to the caller
-        }
-        finalizePrivacy?.("cancelled");
-      },
-    });
-    if (collector?.enabled("client")) {
-      stream = collector.observe(stream, "client");
-    }
-  } catch (err) {
-    finalizePrivacy?.("errored");
-    collector?.finalize();
-    throw err;
-  }
-
-  emitTrace({ ...baseTrace, streaming: true });
-  return new Response(stream, {
-    status: mapStatus(targetResponse.status),
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache",
-    },
-  });
 }
 
 /** Keep target status where it is protocol-meaningful; never fabricate 2xx. */

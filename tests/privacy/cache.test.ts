@@ -2,7 +2,7 @@
  * Privacy-safe cache affinity (PR-021/PR-025). Covers PT-57/58/70.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import {
   deriveAnthropicCacheKey,
   explicitCacheKeyResolver,

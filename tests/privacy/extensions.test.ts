@@ -2,7 +2,7 @@
  * Extension double-evidence (PR-014). Covers PT-29/33/48/61/69.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import {
   PrivacyGuardError,
   verifyExtensions,

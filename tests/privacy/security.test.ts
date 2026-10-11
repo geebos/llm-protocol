@@ -3,7 +3,7 @@
  * and egress posture. Covers PT-39/47/56 and generalizes PT-66.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import type { PrivacyRecognizer } from "../../src/index.js";
 
 const PHONE = "13800138000";

@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../src/pipeline/translate.js";
+import { translate } from "./support/request-translate.js";
 
 const encoder = new TextEncoder();
 

@@ -3,7 +3,7 @@
  * Covers PT-21/27/43/45/49/56/59.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import {
   createPrivacyEngine,
   type PrivacyRecognizer,

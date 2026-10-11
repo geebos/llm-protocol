@@ -7,7 +7,7 @@
  * canonical pipeline -> source SSE on Response.body.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();
@@ -71,7 +71,7 @@ const openaiTextStream =
   openaiFrame("[DONE]");
 
 function openaiChatStreamRequest(): Request {
-  return new Request("https://api.anthropic.com/v1/chat/completions", {
+  return new Request("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { authorization: "Bearer sk-key", "content-type": "application/json" },
     body: JSON.stringify({

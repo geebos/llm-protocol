@@ -2,7 +2,7 @@
  * Debug SSE capture (opt-in): raw upstream and raw client SSE retention.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../src/pipeline/translate.js";
+import { translate } from "./support/request-translate.js";
 import { createSSEParser } from "../src/streams/index.js";
 import type { DebugSseCapture, PrivacyRecognizer } from "../src/index.js";
 
@@ -146,22 +146,21 @@ describe("debug SSE capture", () => {
     expect(capture.upstream).toBeUndefined();
   });
 
-  it("captures both sides and retains the latest for retrieval", async () => {
+  it("captures both sides via onComplete", async () => {
+    const cap = waitCapture();
     const forward = translate({
       from: "openai-chat",
       to: "anthropic-messages",
       fetch: fetchUpstream,
       privacy: { recognizers: [phoneRecognizer()] },
-      debug: { capture: "both", retain: true },
+      debug: { capture: "both", onComplete: cap.onComplete },
     });
     const response = await forward(openaiStreamRequest());
     await drain(response.body);
-    await new Promise((r) => setTimeout(r, 20));
-    const capture = forward.getRawSse?.();
-    expect(capture).toBeDefined();
+    const capture = await cap.promise;
     // Upstream keeps the placeholder, client has the restored value.
-    expect(capture?.upstream).toContain("<private_placeholder_phone_1>");
-    expect(capture?.client).toContain("13800138000");
+    expect(capture.upstream).toContain("<private_placeholder_phone_1>");
+    expect(capture.client).toContain("13800138000");
   });
 
   it("stops retaining after maxBytes but keeps draining", async () => {

@@ -7,7 +7,7 @@
  * dropped; every decision lands in the TranslationReport.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import { TranslationError } from "../../src/errors.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 import type { TranslationPolicies } from "../../src/ir/policies.js";

@@ -3,7 +3,7 @@
  * Covers PT-10/71.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import type {
   PrivacyCompletionReport,
   PrivacyRecognizer,

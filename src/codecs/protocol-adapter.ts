@@ -34,6 +34,14 @@ export interface CanonicalEndpoint {
   query: Record<string, string>;
 }
 
+/**
+ * Endpoint identity codec.
+ *
+ * @deprecated The unified `translate` entry uses the caller-supplied URL
+ * verbatim (05.translate-api.md §9.1), so `matches`/`toCanonical`/
+ * `fromCanonical` are no longer called on the main path. Retained for
+ * compatibility with existing codec tests; scheduled for removal.
+ */
 export interface EndpointCodec {
   matches(url: URL): boolean;
   toCanonical(url: URL): CanonicalEndpoint;

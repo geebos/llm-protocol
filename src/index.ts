@@ -5,16 +5,22 @@
  * and the transparent `translate(...)` factory for non-streaming forwarding.
  * SSE streaming (M2) is next.
  */
-export { translate } from "./pipeline/translate.js";
+export { translate, buildTranslateNamespace } from "./pipeline/namespace.js";
 export type {
   TranslateOptions,
-  ForwardTranslator,
+  TranslateCall,
+  TranslateTargets,
+  TranslateNamespace,
+  TranslateCompletion,
+  UnifiedUsage,
   TranslationTrace,
   DebugSseOptions,
   DebugSseChunk,
   DebugSseCapture,
   DebugSseSide,
 } from "./pipeline/types.js";
+export { CompletionRecorder, DEFAULT_MAX_SSE_EVENTS } from "./pipeline/completion.js";
+export { toUnifiedUsage } from "./pipeline/usage.js";
 export { DebugSseCollector } from "./pipeline/debug-sse.js";
 
 export { API_FORMATS, isApiFormat } from "./formats.js";

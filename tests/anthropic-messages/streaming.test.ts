@@ -6,7 +6,7 @@
  * canonical pipeline -> source SSE on Response.body.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();

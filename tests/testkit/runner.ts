@@ -8,7 +8,7 @@
  */
 import type { ApiFormat } from "../../src/formats.js";
 import type { ProviderProfile } from "../../src/capabilities/provider-profile.js";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../../src/index.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 import type { TranslationTrace } from "../../src/pipeline/types.js";
 import {
@@ -30,6 +30,13 @@ const SOURCE_PATH: Record<ApiFormat, string> = {
   "openai-chat": "/v1/chat/completions",
   "anthropic-messages": "/v1/messages",
   "openai-responses": "/v1/responses",
+};
+
+/** Protocol key -> public namespace key (05.translate-api.md §3). */
+const KEY: Record<ApiFormat, "messages" | "chat" | "responses"> = {
+  "anthropic-messages": "messages",
+  "openai-chat": "chat",
+  "openai-responses": "responses",
 };
 
 /**
@@ -171,15 +178,22 @@ async function executeScenario(
     targetRequestBody = body;
   });
 
-  const handler = translate({
-    from,
-    to: provider.protocol,
-    fetch,
-    profiles: profiles as Partial<Record<ApiFormat, ProviderProfile>> | undefined,
-    trace: (t) => {
-      trace = t;
-    },
-  });
+  const call = translate[KEY[from]][KEY[provider.protocol]];
+  const handler = async (request: Request): Promise<Response> => {
+    const text = await request.text();
+    const body: unknown = text ? JSON.parse(text) : {};
+    return call({
+      url: request.url,
+      headers: request.headers,
+      body,
+      fetch,
+      profiles: profiles as Partial<Record<ApiFormat, ProviderProfile>> | undefined,
+      trace: (t: TranslationTrace) => {
+        trace = t;
+      },
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+  };
 
   // Live tool scenario: first turn produces a tool call, we execute it and
   // re-inject the result for a second turn (TC-006). Turn 1 asserts the tool

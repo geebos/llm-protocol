@@ -7,7 +7,7 @@
  * restored on the way out.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import { TranslationError } from "../../src/errors.js";
 
 interface CapturedRequest {
@@ -78,16 +78,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("translate: OpenAI Chat -> Anthropic Messages", () => {
-  it("rewrites URL path, headers and body to the target protocol (TC-019, 9.13#1)", async () => {
+  it("uses the url/headers verbatim and converts the body (TC-019)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(anthropicTextResponse));
     const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
 
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
+    const request = new Request("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        authorization: "Bearer sk-ant-secret",
+        "x-api-key": "sk-ant-secret",
+        "anthropic-version": "2023-06-01",
         "content-type": "application/json",
-        "x-tracing": "should-be-stripped",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
@@ -98,16 +98,13 @@ describe("translate: OpenAI Chat -> Anthropic Messages", () => {
     const response = await forward(request);
     const captured = lastRequest();
 
-    // 9.13#2: origin preserved, pathname converted
+    // 9.1/9.2: URL and headers are final and used verbatim (no path rewrite or
+    // credential move); the caller supplies the target-shaped headers.
     expect(captured.url).toBe("https://api.anthropic.com/v1/messages");
-
-    // 9.13#3: credential value moved to x-api-key
     expect(captured.headers.get("x-api-key")).toBe("sk-ant-secret");
     expect(captured.headers.get("anthropic-version")).toBe("2023-06-01");
-    // 9.13#5: no source auth header leaked, hop-by-hop stripped
     expect(captured.headers.get("authorization")).toBeNull();
-    expect(captured.headers.get("x-tracing")).toBeNull();
-    expect(captured.headers.get("content-length")).toBeNull();
+    expect(captured.headers.get("content-type")).toBe("application/json");
 
     // 9.13#7: body converted
     expect(captured.body).toMatchObject({
@@ -174,26 +171,6 @@ describe("translate: OpenAI Chat -> Anthropic Messages", () => {
     expect((body.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe("tool_calls");
   });
 
-  it("propagates a request body twice without reuse (FR-004 validation)", async () => {
-    const { fetch } = fakeFetch(() => jsonResponse(anthropicTextResponse));
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
-    });
-    await forward(request);
-    await expect(forward(request)).rejects.toThrow(/consumed/);
-  });
-
-  it("rejects a mismatched source pathname with a typed validation error", async () => {
-    const { fetch } = fakeFetch(() => jsonResponse(anthropicTextResponse));
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = new Request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ model: "m", messages: [] }),
-    });
-    await expect(forward(request)).rejects.toThrow(/does not match/);
-  });
 });
 
 describe("translate: upstream error and status handling", () => {
@@ -224,7 +201,7 @@ describe("translate: upstream error and status handling", () => {
 });
 
 describe("translate: factory reuse and credential isolation (TC-021)", () => {
-  it("keeps per-request credentials isolated across calls", async () => {
+  it("keeps per-request credentials isolated across calls (TC-021)", async () => {
     const captured: string[] = [];
     const { fetch } = fakeFetch(async (req) => {
       captured.push(req.headers.get("x-api-key") ?? "");
@@ -233,9 +210,9 @@ describe("translate: factory reuse and credential isolation (TC-021)", () => {
     const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
 
     const mk = (key: string) =>
-      new Request("https://api.anthropic.com/v1/chat/completions", {
+      new Request("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { authorization: `Bearer ${key}` },
+        headers: { "x-api-key": key },
         body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
       });
 

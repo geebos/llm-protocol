@@ -30,8 +30,11 @@ llm-protocol/
 │   │   ├── anthropic/          #   Messages SSE ↔ canonical（parse.ts/render.ts）
 │   │   └── openai/             #   Chat SSE ↔ canonical（parse.ts/render.ts）
 │   ├── pipeline/               # 主 API
-│   │   ├── types.ts            #   TranslateOptions / TranslationTrace
-│   │   └── translate.ts        #   translate() 透明转换工厂（唯一公开入口）
+│   │   ├── types.ts            #   TranslateOptions / TranslateCompletion / TranslationTrace
+│   │   ├── namespace.ts        #   translate.<source>.<target（公开入口）
+│   │   ├── translate.ts        #   translateCall(from, to, options) 透明转换
+│   │   ├── completion.ts       #   onComplete 完成态聚合（恰好一次）
+│   │   └── usage.ts            #   CanonicalUsage -> UnifiedUsage
 │   ├── privacy/                # 隐私识别-替换（P1-P6，docs/04.privacy-transform.md）
 │   │   ├── types.ts            #   Detection / Recognizer / Session / PrivacyOptions
 │   │   ├── template.ts         #   占位符模板编译 / HMAC tag
@@ -59,9 +62,10 @@ llm-protocol/
 │   │   ├── runner.ts           #     矩阵执行器（能力门控 / 预算 / live 两轮）
 │   │   ├── scenarios/          #     离线 Fixture + live smoke 场景
 │   │   └── reporters/          #     JSON / JUnit / Markdown 报告
+│   ├── support/                #   测试适配器（Request -> translate.<source>.<target>）
 │   ├── fixtures/               #   离线 fixture 资产（requests/responses/streams）
 │   └── *.test.ts               #   vitest 测试
-├── docs/01.tech.md                # 需求规格（权威来源）
+├── docs/                        # 设计文档（按创建时间编号 NN.title.md）
 ├── .github/workflows/          # publish-npm.yml（Trusted Publishing）
 └── package.json                # private 已移除；publishConfig 固定 npmjs 公共源
 ```

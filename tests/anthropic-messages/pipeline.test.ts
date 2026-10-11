@@ -7,7 +7,7 @@
  * restored on the way out.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import { TranslationError } from "../../src/errors.js";
 
 interface CapturedRequest {
@@ -68,15 +68,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("translate: Anthropic Messages -> OpenAI Chat", () => {
-  it("converts URL path, headers and body (TC-019, 9.13#2/4)", async () => {
+  it("uses the url/headers verbatim and converts the body (TC-019)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
     const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
 
-    const request = new Request("https://api.openai.com/v1/messages", {
+    const request = new Request("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "x-api-key": "sk-openai-secret",
-        "anthropic-version": "2023-06-01",
+        authorization: "Bearer sk-openai-secret",
         "content-type": "application/json",
       },
       body: JSON.stringify({
@@ -90,12 +89,11 @@ describe("translate: Anthropic Messages -> OpenAI Chat", () => {
     const response = await forward(request);
     const captured = lastRequest();
 
+    // 9.1/9.2: URL and headers are final and used verbatim (no path rewrite or
+    // credential move); the caller supplies the target-shaped headers.
     expect(captured.url).toBe("https://api.openai.com/v1/chat/completions");
-    // 9.13#4: x-api-key value -> Authorization Bearer
     expect(captured.headers.get("authorization")).toBe("Bearer sk-openai-secret");
-    // 9.13#5: no source credential leak
-    expect(captured.headers.get("x-api-key")).toBeNull();
-    expect(captured.headers.get("anthropic-version")).toBeNull();
+    expect(captured.headers.get("content-type")).toBe("application/json");
 
     expect(captured.body).toMatchObject({
       model: "gpt-4o",

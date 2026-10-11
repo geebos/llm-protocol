@@ -396,7 +396,7 @@ describe("GAP-014 provider dialect declarations", () => {
 // ---- full-pipeline / SDK coverage for the hardened parser (L4/L5) ----
 
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 
 async function collectFrames(body: ReadableStream<Uint8Array> | null): Promise<SSEFrame[]> {
   if (!body) return [];

@@ -5,7 +5,7 @@
  * translate() integration with the golden fixture.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../support/request-translate.js";
 import {
   deriveAnthropicCacheKey,
   extractAnthropicCacheAnchors,
@@ -598,14 +598,14 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
     );
   });
 
-  it("honors an explicit x-llm-prompt-cache-key header over anchors and does not leak it upstream", async () => {
+  it("honors an explicit x-llm-prompt-cache-key header over anchors (forwarded verbatim)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
     const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch, cache: {} });
     await forward(
-      new Request("https://api.openai.com/v1/messages", {
+      new Request("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
-          "x-api-key": "key",
+          authorization: "Bearer key",
           "content-type": "application/json",
           "x-llm-prompt-cache-key": "explicit-session-key",
         },
@@ -613,7 +613,10 @@ describe("translate() integration: Messages -> Chat prompt cache", () => {
       }),
     );
     expect(lastRequest().body.prompt_cache_key).toBe("explicit-session-key");
-    expect(lastRequest().headers.get("x-llm-prompt-cache-key")).toBeNull();
+    // 9.2: headers are final; the caller-supplied header is forwarded verbatim.
+    expect(lastRequest().headers.get("x-llm-prompt-cache-key")).toBe(
+      "explicit-session-key",
+    );
   });
 
   it("traces never leak the cache key, anchor text or prompt content", async () => {
