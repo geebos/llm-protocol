@@ -14,6 +14,7 @@
 | **版本** | **日期**   | **说明**                                                                 |
 |----------|------------|--------------------------------------------------------------------------|
 | v0.1     | 2026-10-10 | 初稿：`translate` 命名空间化、options 化、`onComplete` 观测回调、`logid` 透传；给出类型、示例、迁移与实现影响，末章列出待确认问题。 |
+| v0.2     | 2026-10-10 | 确认 Q10：隐私开启时 `onComplete` 观测数据为 **restore 前**（占位符）视图，绝不回传原文。 |
 
 ## 目录
 
@@ -196,9 +197,9 @@ export interface TranslateCompletion {
   responseHeaders?: Headers;
   /** 上游 HTTP 状态码。 */
   upstreamStatus?: number;
-  /** 非流式：上游响应体（目标协议，JSON 对象）；流式为 undefined。 */
+  /** 非流式：上游响应体（目标协议，JSON 对象，隐私开启时为 restore 前）；流式为 undefined。 */
   responseBody?: unknown;
-  /** 流式：canonical SSE 事件序列；非流式为 undefined。 */
+  /** 流式：canonical SSE 事件序列（隐私开启时为 restore 前）；非流式为 undefined。 */
   sseEvents?: CanonicalStreamEvent[];
   /** `sseEvents` 是否因缓冲上限被截断。 */
   sseEventsTruncated?: boolean;
@@ -267,7 +268,8 @@ export interface UnifiedUsage {
 2. **在途数据尽量回填**：上游错误时，若请求已发出，`requestBody` 必填；若响应头已到，`responseHeaders` / `upstreamStatus` 必填。
 3. **流式事件缓冲**：`sseEvents` 为 canonical 事件序列（统一表示，见 §15-Q3）。默认上限 10000 条，超出后停止追加并置 `sseEventsTruncated = true`，**不影响**真实 SSE 转发。
 4. **回调异常隔离**：`onComplete` 内部抛错被吞掉并写入内部错误日志（不污染调用方结果，不中断流）。
-5. **不与 `Response` 竞争**：返回的 `Response` 仍是源协议正文来源；`onComplete` 仅提供观测副本，两者内容一致但互不消费。
+5. **不与 `Response` 竞争**：返回的 `Response` 仍是源协议正文来源；`onComplete` 仅提供观测副本，互不消费。隐私关闭时两者内容一致；隐私开启时 `onComplete` 为 **restore 前**视图，与面向客户端的 `Response` 形成明确分工（见下条）。
+6. **隐私：restore 前视图（Q10 已确认）**：隐私开启时，`responseBody` / `sseEvents` 均为隐私还原（restore）**之前**的数据，即含稳定占位符（如 `<private_placeholder_phone_1>`）而不含原文；`requestBody` 本就于替换后实际发出，天然为占位符视图。因此 `TranslateCompletion` 默认即为隐私安全，不含隐私原文。
 
 # 7. 统一 Usage 映射
 
@@ -342,7 +344,8 @@ export interface UnifiedUsage {
 
 - 三者语义不变，作为 options 继续可用。
 - 隐私启用时，同协议直通关闭并产生 `privacy_passthrough_disabled` warning（现状一致）。
-- `debug`（原始 SSE 采集）与 `onComplete.sseEvents`（canonical 事件）**并存**：前者保留字节原文，后者提供统一语义事件。
+- **观测分界（Q10）**：`onComplete` 及其 `responseBody` / `sseEvents` 在隐私还原（restore）**之前**取样，含占位符、不含原文；面向客户端的 `Response` 仍是 restore **之后**（原文）的源协议正文。两者由同一 canonical 流在两个阶段分别取样，互不影响。
+- `debug`（原始 SSE 采集）与 `onComplete.sseEvents`（canonical 事件）**并存**：前者保留字节原文（含两端），后者提供统一的 restore 前语义事件。
 
 ## 9.7 同协议直通
 
@@ -443,6 +446,10 @@ await translate.chat.messages({
   body: { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "打 13800138000" }] },
   privacy: { mode: "strict", recognizers: [phoneRecognizer] },
   onPrivacyComplete: (rep) => console.log("redacted:", rep.redacted),
+  onComplete: (r) => {
+    // restore 前视图：响应体中保留占位符，不含 13800138000 原文
+    console.log(JSON.stringify(r.responseBody));
+  },
   logid: "lg_privacy_1",
 });
 ```
@@ -545,7 +552,7 @@ const res = await translate.chat.messages({
 - **logid**：出现在 `trace` 与 `onComplete`；缺省自动生成；不进入上游/响应头。
 - **usage 统一**：三协议 usage 归一后 `{ input, output, cacheRead, cacheWrite }` 正确；缺失按 0；无 usage 时 `undefined`。
 - **回归**：现有 292 项单测迁移到新入口后全绿；`compat --offline-only` 18 场景全过；覆盖率不低于基线（statements ≥85%）。
-- **安全**：`TranslateCompletion` 序列化不包含凭据与隐私原文（`onComplete` 中的响应体为上游内容，需遵循隐私规范：**隐私开启时 `onComplete` 观测到的应是替换后/或按配置的最小必要内容**，见 §15-Q10）。
+- **安全**：`TranslateCompletion` 序列化不包含凭据与隐私原文。隐私开启时 `onComplete` 恒为 **restore 前**（占位符）视图（Q10 已确认）；需要原文的调用方只能通过面向客户端的 `Response` 获取。
 
 # 15. 待确认问题
 
@@ -562,7 +569,7 @@ const res = await translate.chat.messages({
 | Q7 | 是否新增显式 `stream?: boolean` option（而非依赖 body）？ | 不加，沿用 body 判定 |
 | Q8 | 是否提供旧 API 兼容层 `translateLegacy`？ | 不提供（major 直接移除） |
 | Q9 | `EndpointCodec` 是否从 `ProtocolAdapter` 移除？ | 保留但主路径不调用，标记 deprecated |
-| Q10 | 隐私开启时 `onComplete` 观测数据是否应走 restore 前（占位符）还是 restore 后（原文）？ | 默认 restore **后**（与 Response 一致），如需占位符视图另设开关 |
+| Q10 | 隐私开启时 `onComplete` 观测数据是否应走 restore 前（占位符）还是 restore 后（原文）？ | **已确认：restore 前（占位符视图）** |
 
 ---
 
