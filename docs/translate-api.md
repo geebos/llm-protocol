@@ -1,6 +1,6 @@
 # llm-protocol 统一 `translate` API 破坏性调整技术设计
 
-**文档版本：** v0.1（接口评审稿）
+**文档版本：** v0.4（interface-freeze，可进入实现）
 **日期：** 2026-10-10
 **适用仓库：** `llm-protocol`
 **范围：** 公开入口 `translate` 的破坏性重设计（协议选择、options 化、`onComplete` 观测回调、`logid` 透传）
@@ -16,6 +16,7 @@
 | v0.1     | 2026-10-10 | 初稿：`translate` 命名空间化、options 化、`onComplete` 观测回调、`logid` 透传；给出类型、示例、迁移与实现影响，末章列出待确认问题。 |
 | v0.2     | 2026-10-10 | 确认 Q10：隐私开启时 `onComplete` 观测数据为 **restore 前**（占位符）视图，绝不回传原文。 |
 | v0.3     | 2026-10-10 | 明确 `includeUsage` 为 best-effort 提示：不支持的目标协议**静默丢弃**（不产生 warning），作为 FR-008 的显式豁免（无语义数据损失）。 |
+| v0.4     | 2026-10-10 | 确认全部设计问题（Q1–Q10）：`responseBody` 为客户端最终（源协议）形态、隐私下为 restore 前；新增显式 `stream?: boolean`；其余按默认。文档进入 interface-freeze。 |
 
 ## 目录
 
@@ -33,7 +34,7 @@
 12. [迁移指南](#12-迁移指南)
 13. [内部实现影响](#13-内部实现影响)
 14. [测试与验收](#14-测试与验收)
-15. [待确认问题](#15-待确认问题)
+15. [设计决议](#15-设计决议)
 
 ---
 
@@ -147,8 +148,10 @@ export interface TranslateOptions {
   headers?: HeadersInit;
   /** 覆盖 IR model（对应各协议请求体的 model 字段）。 */
   model?: string;
-  /** 覆盖 IR include usage（流式是否请求并回传 usage）。 */
+  /** 覆盖 IR include usage（流式是否请求并回传 usage）。不支持的目标协议静默丢弃。 */
   includeUsage?: boolean;
+  /** 显式覆盖流式判定；缺省时回退到源 body 的 `stream` 字段。 */
+  stream?: boolean;
 
   // ---- 观测 ----
   /** 内部日志追踪 id；缺省时由内部生成。 */
@@ -198,7 +201,7 @@ export interface TranslateCompletion {
   responseHeaders?: Headers;
   /** 上游 HTTP 状态码。 */
   upstreamStatus?: number;
-  /** 非流式：上游响应体（目标协议，JSON 对象，隐私开启时为 restore 前）；流式为 undefined。 */
+  /** 非流式：客户端最终（源协议，JSON 对象）响应体；隐私开启时为 restore 前内容；流式为 undefined。 */
   responseBody?: unknown;
   /** 流式：canonical SSE 事件序列（隐私开启时为 restore 前）；非流式为 undefined。 */
   sseEvents?: CanonicalStreamEvent[];
@@ -236,6 +239,7 @@ export interface UnifiedUsage {
 | `headers`              | `HeadersInit`                          | 否   | **最终转发 headers**，原样使用（见 §9.2）。缺省 `{}`。                                                    |
 | `model`                | `string`                               | 否   | 覆盖 IR `model`。缺省用 body 中的值；两者皆缺 → 校验错误。                                                |
 | `includeUsage`         | `boolean`                              | 否   | 覆盖 IR `includeUsage`（见 §9.4）。缺省沿用源 body 解析值。**不支持的目标协议目标侧静默丢弃。** |
+| `stream`               | `boolean`                              | 否   | 显式覆盖流式判定；缺省时回退到源 body（`stream: true` / Responses 等价字段）。只控制目标渲染与响应分支，不改写源 body。 |
 | `logid`                | `string`                               | 否   | 内部日志/追踪透传 id（见 §8）。缺省自动生成。                                                            |
 | `onComplete`           | `(r: TranslateCompletion) => void`     | 否   | 完成观测回调，按 §6 语义恰好触发一次。                                                                    |
 | `onPrivacyComplete`    | `(r: PrivacyCompletionReport) => void` | 否   | 隐私统计回调，语义不变。                                                                                  |
@@ -270,7 +274,8 @@ export interface UnifiedUsage {
 3. **流式事件缓冲**：`sseEvents` 为 canonical 事件序列（统一表示，见 §15-Q3）。默认上限 10000 条，超出后停止追加并置 `sseEventsTruncated = true`，**不影响**真实 SSE 转发。
 4. **回调异常隔离**：`onComplete` 内部抛错被吞掉并写入内部错误日志（不污染调用方结果，不中断流）。
 5. **不与 `Response` 竞争**：返回的 `Response` 仍是源协议正文来源；`onComplete` 仅提供观测副本，互不消费。隐私关闭时两者内容一致；隐私开启时 `onComplete` 为 **restore 前**视图，与面向客户端的 `Response` 形成明确分工（见下条）。
-6. **隐私：restore 前视图（Q10 已确认）**：隐私开启时，`responseBody` / `sseEvents` 均为隐私还原（restore）**之前**的数据，即含稳定占位符（如 `<private_placeholder_phone_1>`）而不含原文；`requestBody` 本就于替换后实际发出，天然为占位符视图。因此 `TranslateCompletion` 默认即为隐私安全，不含隐私原文。
+6. **隐私：restore 前视图（Q10 已确认）**：隐私开启时，`responseBody`（源协议形态）与 `sseEvents` 均为隐私还原（restore）**之前**的数据，即含稳定占位符（如 `<private_placeholder_phone_1>`）而不含原文；`requestBody` 本就于替换后实际发出，天然为占位符视图。因此 `TranslateCompletion` 默认即为隐私安全，不含隐私原文。
+7. **`responseBody` 形态（Q2 已确认）**：为**客户端最终（源协议）**形态，即与返回 `Response` 同构；隐私开启时仅内容取 restore 前。
 
 # 7. 统一 Usage 映射
 
@@ -342,7 +347,8 @@ export interface UnifiedUsage {
 
 ## 9.5 流式
 
-- `stream` 仍由源 body 的 `stream: true`（或 Responses 等价字段）判定；本次不新增 `stream` option（见 §15-Q7）。
+- 是否流式由 `options.stream` 决定；未提供时回退到源 body 判定（`stream: true` / Responses 等价字段）。
+- `options.stream` 只控制目标侧 `renderRequest(streaming)` 与响应处理分支，**不改写源 body**；目标请求体的 `stream` 字段以该决议值为准。
 - 流式返回的 `Response.body` 为**源协议** SSE 字节流，语义与现状一致。
 - `onComplete` 在流**结束/取消/出错**时触发。
 
@@ -350,7 +356,7 @@ export interface UnifiedUsage {
 
 - 三者语义不变，作为 options 继续可用。
 - 隐私启用时，同协议直通关闭并产生 `privacy_passthrough_disabled` warning（现状一致）。
-- **观测分界（Q10）**：`onComplete` 及其 `responseBody` / `sseEvents` 在隐私还原（restore）**之前**取样，含占位符、不含原文；面向客户端的 `Response` 仍是 restore **之后**（原文）的源协议正文。两者由同一 canonical 流在两个阶段分别取样，互不影响。
+- **观测分界（Q10）**：`onComplete` 及其 `responseBody` / `sseEvents` 在隐私还原（restore）**之前**取样，含占位符、不含原文；`responseBody` 为**源协议（客户端最终）形态**，仅内容取 restore 前。面向客户端的 `Response` 仍是 restore **之后**（原文）的源协议正文。两者由同一 canonical 流在两个阶段分别取样，互不影响。
 - `debug`（原始 SSE 采集）与 `onComplete.sseEvents`（canonical 事件）**并存**：前者保留字节原文（含两端），后者提供统一的 restore 前语义事件。
 
 ## 9.7 同协议直通
@@ -554,28 +560,29 @@ const res = await translate.chat.messages({
 - **类型**：`translate.messages.chat` 参数与返回类型正确；`translate.responses.*` 调用返回 `unsupported`。
 - **options 语义**：`url` 原样使用（不拼接）；`headers` 原样转发；`content-type` 缺省补齐；`body` 对象/字符串均可用。
 - **覆盖**：`model` / `includeUsage` 覆盖 IR，且分别落到目标协议请求体（Chat `stream_options.include_usage`、Responses `include`、Anthropic 静默丢弃且**无 warning**）。
-- **onComplete**：非流式（成功/上游 4xx）、流式（读完/取消/出错）、直通路径各触发且恰好一次；`status`、`usage`、`sseEvents`、`responseHeaders`、`requestBody` 正确；`onComplete` 抛错不影响主流程。
+- **onComplete**：非流式（成功/上游 4xx）、流式（读完/取消/出错）、直通路径各触发且恰好一次；`status`、`usage`、`sseEvents`、`responseHeaders`、`requestBody`、`responseBody`（源协议形态）正确；`onComplete` 抛错不影响主流程。
+- **stream 覆盖**：`options.stream` 覆盖源 body 判定，目标请求体 `stream` 字段随之变化，且不改写源 body 其余字段。
 - **logid**：出现在 `trace` 与 `onComplete`；缺省自动生成；不进入上游/响应头。
 - **usage 统一**：三协议 usage 归一后 `{ input, output, cacheRead, cacheWrite }` 正确；缺失按 0；无 usage 时 `undefined`。
 - **回归**：现有 292 项单测迁移到新入口后全绿；`compat --offline-only` 18 场景全过；覆盖率不低于基线（statements ≥85%）。
 - **安全**：`TranslateCompletion` 序列化不包含凭据与隐私原文。隐私开启时 `onComplete` 恒为 **restore 前**（占位符）视图（Q10 已确认）；需要原文的调用方只能通过面向客户端的 `Response` 获取。
 
-# 15. 待确认问题
+# 15. 设计决议
 
-以下为落地前需要确认的设计点，当前文档给了默认取舍：
+以下问题已在评审中确认，作为 interface-freeze 的最终决议（Q1–Q10 均已定）：
 
-| 编号 | 问题 | 文档默认取舍 |
-|------|------|--------------|
-| Q1 | 单次调用返回 `Promise<Response>`，还是返回更丰富的 `TranslateResult`（含 requestBody/usage 等）？ | `Promise<Response>`，其余经 `onComplete` |
-| Q2 | `onComplete.responseBody` 指上游原始（目标协议）还是客户端最终（源协议）响应体？ | 上游原始（未翻译） |
-| Q3 | `onComplete.sseEvents` 用 canonical 统一事件，还是源协议原生 SSE 帧？ | canonical（`CanonicalStreamEvent[]`） |
-| Q4 | `headers` 是否彻底原样，还是仍剔除 `host`/`connection` 等逐跳头？ | 原样，仅缺省补 `content-type` |
-| Q5 | `body` 是否支持 `Uint8Array` / `ArrayBuffer` 等二进制？ | 暂只支持对象与 JSON 字符串 |
-| Q6 | 是否需要把 `logid` 回显到响应头（如 `x-logid`）或透传到上游？ | 都不做，仅内部与回调 |
-| Q7 | 是否新增显式 `stream?: boolean` option（而非依赖 body）？ | 不加，沿用 body 判定 |
-| Q8 | 是否提供旧 API 兼容层 `translateLegacy`？ | 不提供（major 直接移除） |
-| Q9 | `EndpointCodec` 是否从 `ProtocolAdapter` 移除？ | 保留但主路径不调用，标记 deprecated |
-| Q10 | 隐私开启时 `onComplete` 观测数据是否应走 restore 前（占位符）还是 restore 后（原文）？ | **已确认：restore 前（占位符视图）** |
+| 编号 | 决议 |
+|------|------|
+| Q1 | 单次调用返回 `Promise<Response>`；其余数据经 `onComplete`。 |
+| Q2 | `onComplete.responseBody` 为**客户端最终（源协议）**形态；隐私开启时内容取 restore 前（占位符）。 |
+| Q3 | `sseEvents` 使用 canonical 统一事件 `CanonicalStreamEvent[]`。 |
+| Q4 | `headers` 原样转发；仅缺省时补 `content-type: application/json`。 |
+| Q5 | `body` 只支持对象与 JSON 字符串（不支持二进制）。 |
+| Q6 | `logid` 不写入上游/响应头，仅内部与回调可见。 |
+| Q7 | **新增显式 `stream?: boolean`**，覆盖源 body 判定。 |
+| Q8 | 不提供旧 API 兼容层（major 直接移除）。 |
+| Q9 | 保留 `EndpointCodec` 但主路径不调用，标记 deprecated。 |
+| Q10 | 隐私开启时 `onComplete` 恒为 **restore 前**（占位符）视图。 |
 
 ---
 
