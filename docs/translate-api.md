@@ -15,6 +15,7 @@
 |----------|------------|--------------------------------------------------------------------------|
 | v0.1     | 2026-10-10 | 初稿：`translate` 命名空间化、options 化、`onComplete` 观测回调、`logid` 透传；给出类型、示例、迁移与实现影响，末章列出待确认问题。 |
 | v0.2     | 2026-10-10 | 确认 Q10：隐私开启时 `onComplete` 观测数据为 **restore 前**（占位符）视图，绝不回传原文。 |
+| v0.3     | 2026-10-10 | 明确 `includeUsage` 为 best-effort 提示：不支持的目标协议**静默丢弃**（不产生 warning），作为 FR-008 的显式豁免（无语义数据损失）。 |
 
 ## 目录
 
@@ -234,7 +235,7 @@ export interface UnifiedUsage {
 | `body`                 | `unknown`                              | 是   | 源协议请求体。对象按 JSON 序列化；字符串按原样解析为 JSON（见 §9.3）。                                   |
 | `headers`              | `HeadersInit`                          | 否   | **最终转发 headers**，原样使用（见 §9.2）。缺省 `{}`。                                                    |
 | `model`                | `string`                               | 否   | 覆盖 IR `model`。缺省用 body 中的值；两者皆缺 → 校验错误。                                                |
-| `includeUsage`         | `boolean`                              | 否   | 覆盖 IR `includeUsage`（见 §9.4）。缺省沿用源 body 解析值。                                               |
+| `includeUsage`         | `boolean`                              | 否   | 覆盖 IR `includeUsage`（见 §9.4）。缺省沿用源 body 解析值。**不支持的目标协议目标侧静默丢弃。** |
 | `logid`                | `string`                               | 否   | 内部日志/追踪透传 id（见 §8）。缺省自动生成。                                                            |
 | `onComplete`           | `(r: TranslateCompletion) => void`     | 否   | 完成观测回调，按 §6 语义恰好触发一次。                                                                    |
 | `onPrivacyComplete`    | `(r: PrivacyCompletionReport) => void` | 否   | 隐私统计回调，语义不变。                                                                                  |
@@ -330,9 +331,14 @@ export interface UnifiedUsage {
 |----------------------|-----------------------------------------------------------------------------|------------------------------------------------------------------|
 | `openai-chat`        | 合并 `stream_options.include_usage = true`（仅流式）                        | 移除 `stream_options.include_usage`                              |
 | `openai-responses`   | 并入 `outputIncludes`（请求 `include: ["usage"]`）                          | 不请求 usage                                                     |
-| `anthropic-messages` | 无请求字段；usage 恒在（COMPATIBLE，无 warning）                            | 无法抑制 usage → **UNSUPPORTED warning**（`include_usage_unsupported`） |
+| `anthropic-messages` | 无请求字段；usage 恒在 → **静默丢弃**                                      | 无法抑制 usage；usage 恒在 → **静默丢弃**                        |
 
 - `includeUsage` 只影响**目标侧是否请求/保留 usage**，不改变响应中已存在 usage 的透传。
+- **静默丢弃是显式豁免（非静默降级）**：`includeUsage` 是**best-effort 提示**，不是需要忠实搬运的 IR 语义数据。当目标协议不支持该开关（如 Anthropic Messages 恒有 usage、无请求字段）时：
+  - 不产生 `TranslationWarning`（与 FR-008「无静默降级」的关系见下）；
+  - 目标响应中的 usage 仍按目标协议原样返回（最多是“比预期多”而非“丢失”）。
+- **与 FR-008 的关系**：FR-008 禁止的是**语义内容**的静默丢失。`includeUsage` 丢的只是一个可选项开关，不丢任何消息、工具、推理或 usage 数据本身，因此不触发 warning；实现上应在 `includeUsage` 选项文档中标注“best-effort”，避免调用方误以为开关被目标侧严格遵守。
+- 源协议不支持解析 include usage 时，源 body 中自然不存在该信息，`options.includeUsage` 仍可覆盖并驱动目标侧（若目标支持）。
 
 ## 9.5 流式
 
@@ -536,7 +542,7 @@ const res = await translate.chat.messages({
 | `src/pipeline/usage.ts`（新增） | `CanonicalUsage → UnifiedUsage` 映射。 |
 | `src/ir/types.ts` | `CanonicalRequest` 新增 `includeUsage?: boolean`。 |
 | `src/codecs/openai-chat/request.ts` | 解析/渲染 `includeUsage` ↔ `stream_options.include_usage`（流式）。 |
-| `src/codecs/anthropic-messages/request.ts` | `includeUsage: false` → UNSUPPORTED warning；`true` 为 no-op。 |
+| `src/codecs/anthropic-messages/request.ts` | `includeUsage` 目标侧静默丢弃（不产生 warning）；解析侧无该字段。 |
 | `src/codecs/openai-responses/*`（P1） | `includeUsage` ↔ `outputIncludes`。 |
 | `src/codecs/protocol-adapter.ts` | `EndpointCodec` 在主路径不再使用：标记 deprecated 或从 `ProtocolAdapter` 移除（保留待定，见 §15-Q9）。 |
 | `src/codecs/*/headers.ts` | `renderTargetHeaders` / `parseCredential` 在 options 路径下不再调用；能力保留供其他入口/测试使用。 |
@@ -547,7 +553,7 @@ const res = await translate.chat.messages({
 
 - **类型**：`translate.messages.chat` 参数与返回类型正确；`translate.responses.*` 调用返回 `unsupported`。
 - **options 语义**：`url` 原样使用（不拼接）；`headers` 原样转发；`content-type` 缺省补齐；`body` 对象/字符串均可用。
-- **覆盖**：`model` / `includeUsage` 覆盖 IR，且分别落到目标协议请求体（Chat `stream_options.include_usage`、Responses `include`、Anthropic no-op/warning）。
+- **覆盖**：`model` / `includeUsage` 覆盖 IR，且分别落到目标协议请求体（Chat `stream_options.include_usage`、Responses `include`、Anthropic 静默丢弃且**无 warning**）。
 - **onComplete**：非流式（成功/上游 4xx）、流式（读完/取消/出错）、直通路径各触发且恰好一次；`status`、`usage`、`sseEvents`、`responseHeaders`、`requestBody` 正确；`onComplete` 抛错不影响主流程。
 - **logid**：出现在 `trace` 与 `onComplete`；缺省自动生成；不进入上游/响应头。
 - **usage 统一**：三协议 usage 归一后 `{ input, output, cacheRead, cacheWrite }` 正确；缺失按 0；无 usage 时 `undefined`。
