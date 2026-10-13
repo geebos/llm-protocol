@@ -1,5 +1,5 @@
 /**
- * Anthropic message-turn normalization (tech-v2.md P0-7 / 12).
+ * Anthropic message-turn normalization (02.tech-v2.md P0-7 / 12).
  *
  * Anthropic Messages is stricter than OpenAI Chat about turn structure, most
  * notably `tool_result` placement: results must live inside a user turn and

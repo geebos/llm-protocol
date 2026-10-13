@@ -6,18 +6,21 @@
  * against gross regressions without being flaky.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../../src/index.js";
 import { TranslationError } from "../../src/errors.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();
 
-function openaiChatRequest(body: unknown, url = "https://api.anthropic.com/v1/chat/completions"): Request {
-  return new Request(url, {
-    method: "POST",
-    headers: { authorization: "Bearer k", "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+const TARGET_URL = "https://api.anthropic.com/v1/messages";
+const HEADERS = { "x-api-key": "k" };
+
+function openaiChatOptions(body: unknown): {
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+} {
+  return { url: TARGET_URL, headers: HEADERS, body };
 }
 
 function anthropicJsonResponse(): Response {
@@ -38,17 +41,16 @@ function anthropicJsonResponse(): Response {
 describe("NFR-006 body size limit", () => {
   it("rejects oversized request bodies with a validation error", async () => {
     const fetch = (async () => anthropicJsonResponse()) as typeof fetch;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch,
-      maxBodyBytes: 16,
-    });
-    const request = openaiChatRequest({
-      model: "m",
-      messages: [{ role: "user", content: "this payload is way bigger than 16 bytes" }],
-    });
-    const err = await forward(request).catch((e: unknown) => e);
+    const err = await translate.chat
+      .messages({
+        ...openaiChatOptions({
+          model: "m",
+          messages: [{ role: "user", content: "this payload is way bigger than 16 bytes" }],
+        }),
+        fetch,
+        maxBodyBytes: 16,
+      })
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("validation");
     expect((err as TranslationError).message).toMatch(/limit/);
@@ -56,13 +58,11 @@ describe("NFR-006 body size limit", () => {
 
   it("accepts bodies within the limit", async () => {
     const fetch = (async () => anthropicJsonResponse()) as typeof fetch;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiChatOptions({ model: "m", messages: [{ role: "user", content: "hi" }] }),
       fetch,
       maxBodyBytes: 1024,
     });
-    const response = await forward(openaiChatRequest({ model: "m", messages: [{ role: "user", content: "hi" }] }));
     expect(response.status).toBe(200);
   });
 });
@@ -70,12 +70,9 @@ describe("NFR-006 body size limit", () => {
 describe("NFR-004 malformed input", () => {
   it("rejects a non-JSON request body with a validation error", async () => {
     const fetch = (async () => anthropicJsonResponse()) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      body: "this is not json {",
-    });
-    const err = await forward(request).catch((e: unknown) => e);
+    const err = await translate.chat
+      .messages({ url: TARGET_URL, headers: HEADERS, body: "this is not json {", fetch })
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("validation");
   });
@@ -88,8 +85,10 @@ describe("NFR-004 malformed input", () => {
       'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial answer"}}\n\n';
     const fetch = (async () =>
       new Response(bytesStream(partial), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatRequest({ model: "m", stream: true, messages: [] }));
+    const response = await translate.chat.messages({
+      ...openaiChatOptions({ model: "m", stream: true, messages: [] }),
+      fetch,
+    });
     const frames = await collectFrames(response.body);
     const chunks = frames.filter((f) => f.data !== "[DONE]").map((f) => JSON.parse(f.data));
     const text = chunks
@@ -105,8 +104,10 @@ describe("NFR-004 malformed input", () => {
     const garbage = "data: {not json\n\n";
     const fetch = (async () =>
       new Response(bytesStream(garbage), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatRequest({ model: "m", stream: true, messages: [] }));
+    const response = await translate.chat.messages({
+      ...openaiChatOptions({ model: "m", stream: true, messages: [] }),
+      fetch,
+    });
     const frames = await collectFrames(response.body);
     expect(frames.length).toBeGreaterThan(0);
   });
@@ -126,48 +127,41 @@ describe("NFR-006 upstream timeout", () => {
       });
       return anthropicJsonResponse();
     }) as typeof fetch;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch,
-      timeoutMs: 50,
-    });
-    const err = await forward(openaiChatRequest({ model: "m", messages: [] })).catch((e: unknown) => e);
+    const err = await translate.chat
+      .messages({ ...openaiChatOptions({ model: "m", messages: [] }), fetch, timeoutMs: 50 })
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TranslationError);
     expect((err as TranslationError).kind).toBe("timeout");
   });
 
   it("does not time out when the upstream responds in time", async () => {
     const fetch = (async () => anthropicJsonResponse()) as typeof fetch;
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      ...openaiChatOptions({ model: "m", messages: [] }),
       fetch,
       timeoutMs: 5000,
     });
-    const response = await forward(openaiChatRequest({ model: "m", messages: [] }));
     expect(response.status).toBe(200);
   });
 });
 
 describe("NFR-002 performance baseline (loose guard)", () => {
+  const heavyBody = {
+    model: "claude-sonnet-4-5",
+    messages: [
+      { role: "system", content: "You are helpful." },
+      { role: "user", content: "Hello".repeat(200) },
+      { role: "assistant", content: "Hi there!" },
+      { role: "user", content: "Tell me more.".repeat(200) },
+    ],
+  };
+
   it("translates a non-streaming request well under 50ms p95 locally", async () => {
     const fetch = (async () => anthropicJsonResponse()) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const mkRequest = () =>
-      openaiChatRequest({
-        model: "claude-sonnet-4-5",
-        messages: [
-          { role: "system", content: "You are helpful." },
-          { role: "user", content: "Hello".repeat(200) },
-          { role: "assistant", content: "Hi there!" },
-          { role: "user", content: "Tell me more.".repeat(200) },
-        ],
-      });
     const timings: number[] = [];
     for (let i = 0; i < 50; i++) {
       const t0 = performance.now();
-      const response = await forward(mkRequest());
+      const response = await translate.chat.messages({ ...openaiChatOptions(heavyBody), fetch });
       await response.arrayBuffer();
       timings.push(performance.now() - t0);
     }
@@ -185,8 +179,10 @@ describe("NFR-002 performance baseline (loose guard)", () => {
       'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}\n\n';
     const fetch = (async () =>
       new Response(bytesStream(head), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const response = await forward(openaiChatRequest({ model: "m", stream: true, messages: [] }));
+    const response = await translate.chat.messages({
+      ...openaiChatOptions({ model: "m", stream: true, messages: [] }),
+      fetch,
+    });
     const t0 = performance.now();
     const reader = response.body!.getReader();
     await reader.read();

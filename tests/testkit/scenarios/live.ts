@@ -165,7 +165,7 @@ export function liveScenariosFor(provider: ProviderConfig): Array<Scenario & Sce
     });
   }
 
-  // Reasoning -> text ordering (tech-v2.md STREAM-001, §20 Recommended). Only
+  // Reasoning -> text ordering (02.tech-v2.md STREAM-001, §20 Recommended). Only
   // providers declaring a Chat reasoning field can carry thinking into the
   // source stream; the profile is set so reasoning survives translation
   // (TH-003, never guessed).

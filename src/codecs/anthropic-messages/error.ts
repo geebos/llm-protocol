@@ -12,6 +12,7 @@ const KIND_TO_TYPE: Record<ErrorKind, string> = {
   cancelled: "api_error",
   stream_protocol: "api_error",
   unsupported: "invalid_request_error",
+  privacy: "invalid_request_error",
 };
 
 export const anthropicErrorCodec: ErrorCodec = {

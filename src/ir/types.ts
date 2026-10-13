@@ -10,8 +10,20 @@ export type ImageSource =
   | { type: "url"; url: string }
   | { type: "base64"; mediaType: string; data: string };
 
+/** Prompt-cache breakpoint metadata (PR-017): Anthropic `cache_control`. */
+export interface CanonicalCacheControl {
+  type: "ephemeral";
+  ttl?: string;
+}
+
 export type ContentPart =
-  | { type: "text"; text: string; annotations?: unknown[] }
+  | {
+      type: "text";
+      text: string;
+      annotations?: unknown[];
+      /** Prompt-cache breakpoint carried through the IR (PR-017). */
+      cache?: CanonicalCacheControl;
+    }
   | { type: "image"; source: ImageSource }
   | {
       type: "tool_call";
@@ -49,6 +61,8 @@ export interface CanonicalTool {
   inputSchema: Record<string, unknown>;
   /** OpenAI `strict` flag; not representable in Anthropic (LOSSY on render). */
   strict?: boolean;
+  /** Prompt-cache breakpoint on the tool definition (PR-017). */
+  cache?: CanonicalCacheControl;
 }
 
 export type CanonicalToolChoice =
@@ -98,6 +112,12 @@ export interface CanonicalRequest {
    * `parallel_tool_calls`, Anthropic `tool_choice.disable_parallel_tool_use`).
    */
   parallelToolCalls?: boolean;
+  /**
+   * Best-effort request to include usage in the response
+   * (05.translate-api.md §9.4). Rendered natively where the target supports it
+   * (OpenAI `stream_options.include_usage`); silently dropped otherwise.
+   */
+  includeUsage?: boolean;
   /** Unrecognized / provider-specific fields, preserved opaque (FR-004). */
   extensions?: Record<string, unknown>;
 }

@@ -14,6 +14,7 @@ import { unsupportedError, validationError } from "../../errors.js";
 import type { CodecContext, RequestCodec } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
+import { recordExtensionDisposition } from "../extension-evidence.js";
 
 const IR_MAPPED_FIELDS = [
   "model",
@@ -36,7 +37,7 @@ const IR_MAPPED_FIELDS = [
 /**
  * Known OpenAI fields with no Canonical-IR home. They are preserved in
  * `extensions` on parse and rendered back verbatim, so nothing is silently
- * dropped (GAP-004 / tech-v2.md 9.2 rule: mapped, preserved, or dropped+warned).
+ * dropped (GAP-004 / 02.tech-v2.md 9.2 rule: mapped, preserved, or dropped+warned).
  */
 const EXTENSION_FIELDS = [
   "stream_options",
@@ -81,6 +82,8 @@ export function createOpenAiChatRequestCodec(
   const reasoningField = profile.capabilities.reasoningField;
 
   return {
+    supportsExtensionReport: true,
+
     detectStreaming(payload: unknown): boolean {
       const p = payload as { stream?: unknown };
       return p?.stream === true;
@@ -113,6 +116,21 @@ export function createOpenAiChatRequestCodec(
         else if (key === "reasoning_effort" && effort === undefined) {
           extensions[key] = p[key];
         }
+      }
+
+      // `stream_options.include_usage` is the IR `includeUsage` hint; lift it
+      // out so it round-trips through the canonical field (05.translate-api.md
+      // §9.4) while other stream_options keys stay preserved as extensions.
+      let includeUsage: boolean | undefined;
+      const rawStreamOptions = extensions.stream_options;
+      if (rawStreamOptions && typeof rawStreamOptions === "object") {
+        const so = { ...(rawStreamOptions as Record<string, unknown>) };
+        if (typeof so.include_usage === "boolean") {
+          includeUsage = so.include_usage;
+        }
+        delete so.include_usage;
+        if (Object.keys(so).length) extensions.stream_options = so;
+        else delete extensions.stream_options;
       }
 
       const generation: CanonicalGenerationOptions = {};
@@ -153,6 +171,7 @@ export function createOpenAiChatRequestCodec(
         generation,
         thinking,
         parallelToolCalls,
+        includeUsage,
         extensions,
       };
     },
@@ -172,6 +191,7 @@ export function createOpenAiChatRequestCodec(
           profile.capabilities.reasoning?.signatureField,
         ),
       };
+      warnDroppedCacheControl(canonical, ctx);
       if (canonical.tools?.length) {
         body.tools = canonical.tools.map((t) => ({
           type: "function",
@@ -210,16 +230,31 @@ export function createOpenAiChatRequestCodec(
       for (const key of EXTENSION_FIELDS) {
         if (ext[key] !== undefined) body[key] = ext[key];
       }
+      // includeUsage is best-effort: only OpenAI Chat streaming carries it.
+      // `false` removes any inherited flag; unsupported shapes are ignored.
+      if (canonical.includeUsage !== undefined && streaming) {
+        const streamOptions = {
+          ...((body.stream_options as Record<string, unknown> | undefined) ?? {}),
+        };
+        if (canonical.includeUsage) streamOptions.include_usage = true;
+        else delete streamOptions.include_usage;
+        if (Object.keys(streamOptions).length) body.stream_options = streamOptions;
+        else delete body.stream_options;
+      }
       for (const key of Object.keys(ext)) {
         if (key === "reasoning_effort") continue; // handled explicitly above
         if (!EXTENSION_FIELDS.includes(key)) {
           ctx.warnings.push({
             code: "dropped_extension",
-            message: `Extension "${key}" cannot be represented in OpenAI Chat request`,
+            message: "Extension cannot be represented in OpenAI Chat request",
             fidelity: "LOSSY",
-            field: `extensions.${key}`,
+            field: "extensions",
           });
         }
+      }
+      for (const key of Object.keys(ext)) {
+        const forwarded = key === "reasoning_effort" || EXTENSION_FIELDS.includes(key);
+        recordExtensionDisposition(ctx, key, ext[key], forwarded);
       }
 
       // TH-004: never silently drop a thinking configuration request. Only
@@ -271,8 +306,7 @@ function parseMessages(
   reasoningField: string | undefined,
   ctx: CodecContext,
   signatureField?: string,
-): ParsedMessages {
-  if (!Array.isArray(raw)) throw validationError("messages must be an array");
+): ParsedMessages {  if (!Array.isArray(raw)) throw validationError("messages must be an array");
   const system: ContentPart[] = [];
   const messages: CanonicalMessage[] = [];
 
@@ -308,7 +342,7 @@ function parseMessages(
     } else {
       ctx.warnings.push({
         code: "unknown_role",
-        message: `Unknown OpenAI message role "${String(role)}" skipped`,
+        message: "Unknown OpenAI message role skipped",
         fidelity: "LOSSY",
         field: `messages[${i}].role`,
       });
@@ -339,9 +373,9 @@ function parseUserParts(content: unknown, ctx: CodecContext): ContentPart[] {
     } else {
       ctx.warnings.push({
         code: "unknown_content_block",
-        message: `Unknown OpenAI content block type "${String(b.type)}" skipped`,
+        message: "Unknown OpenAI content block type skipped",
         fidelity: "LOSSY",
-        field: `content.${String(b.type)}`,
+        field: "content",
       });
     }
   }
@@ -585,6 +619,35 @@ function renderAssistantMessage(
     }));
   }
   return msg;
+}
+
+/**
+ * OpenAI Chat has no representable prompt-cache breakpoint; dropping an IR
+ * `cache_control` is a fidelity loss and must be reported (PR-017, no silent
+ * downgrade).
+ */
+function warnDroppedCacheControl(
+  canonical: CanonicalRequest,
+  ctx: CodecContext,
+): void {
+  let dropped = false;
+  const scan = (parts: ContentPart[] | undefined): void => {
+    for (const part of parts ?? []) {
+      if (part.type === "text" && part.cache) dropped = true;
+      if (part.type === "tool_result") scan(part.content);
+    }
+  };
+  scan(canonical.system);
+  for (const message of canonical.messages) scan(message.content);
+  if (canonical.tools?.some((t) => t.cache)) dropped = true;
+  if (dropped) {
+    ctx.warnings.push({
+      code: "privacy_cache_control_dropped",
+      message: "Prompt-cache control is not representable in the OpenAI Chat target and was dropped",
+      fidelity: "LOSSY",
+      field: "cache",
+    });
+  }
 }
 
 function renderToolChoice(choice: CanonicalToolChoice): unknown {

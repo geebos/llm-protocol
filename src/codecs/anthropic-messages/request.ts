@@ -18,6 +18,8 @@ import {
   safeParseJson,
 } from "./content.js";
 import { normalizeAnthropicTurns } from "./normalize.js";
+import { isEphemeralCacheControl } from "../../cache/anthropic/cache-control.js";
+import { recordExtensionDisposition } from "../extension-evidence.js";
 
 /** Anthropic requires an explicit max_tokens; OpenAI Chat does not. */
 const DEFAULT_MAX_TOKENS = 1024;
@@ -60,7 +62,7 @@ function parseMessages(
     }
     const role = (m as { role?: unknown }).role;
     if (role !== "user" && role !== "assistant") {
-      throw validationError(`messages[${i}] has unsupported role "${String(role)}"`);
+      throw validationError(`messages[${i}] has an unsupported role`);
     }
     return {
       role,
@@ -84,6 +86,9 @@ function parseTools(tools: unknown, ctx: CodecContext): CanonicalTool[] | undefi
       name: tool.name,
       description: typeof tool.description === "string" ? tool.description : undefined,
       inputSchema: (tool.input_schema as Record<string, unknown>) ?? {},
+      ...(isEphemeralCacheControl((tool as { cache_control?: unknown }).cache_control)
+        ? { cache: (tool as { cache_control: { type: "ephemeral"; ttl?: string } }).cache_control }
+        : {}),
     };
   });
 }
@@ -102,7 +107,7 @@ function parseToolChoice(choice: unknown, ctx: CodecContext): CanonicalToolChoic
       if (typeof c.name !== "string") throw validationError("tool_choice.tool requires a name");
       return { type: "tool", name: c.name };
     default:
-      throw validationError(`unsupported tool_choice type "${String(c.type)}"`);
+      throw validationError("unsupported tool_choice type");
   }
 }
 
@@ -135,11 +140,13 @@ function parseThinking(
       return { mode: "adaptive", effort };
     }
     default:
-      throw validationError(`unsupported thinking type "${String(t.type)}"`);
+      throw validationError("unsupported thinking type");
   }
 }
 
 export const anthropicRequestCodec: RequestCodec = {
+  supportsExtensionReport: true,
+
   detectStreaming(payload: unknown): boolean {
     const p = payload as { stream?: unknown };
     return p?.stream === true;
@@ -210,19 +217,20 @@ export const anthropicRequestCodec: RequestCodec = {
       body.messages = messages.map((m) => renderMessage(m, ctx));
     }
     if (canonical.tools?.length) {
-      body.tools = canonical.tools.map((t) => {
+      body.tools = canonical.tools.map((t, ti) => {
         if (t.strict !== undefined) {
           ctx.warnings.push({
             code: "tool_strict",
-            message: `Tool "${t.name}" strict flag is not representable in Anthropic`,
+            message: "Tool strict flag is not representable in Anthropic",
             fidelity: "LOSSY",
-            field: `tools.${t.name}.strict`,
+            field: `tools[${ti}].strict`,
           });
         }
         return {
           name: t.name,
           ...(t.description !== undefined ? { description: t.description } : {}),
           input_schema: t.inputSchema,
+          ...(t.cache ? { cache_control: t.cache } : {}),
         };
       });
     }
@@ -260,11 +268,15 @@ export const anthropicRequestCodec: RequestCodec = {
       if (key !== "topK" && key !== "metadata" && key !== "service_tier") {
         ctx.warnings.push({
           code: "dropped_extension",
-          message: `Extension "${key}" cannot be represented in Anthropic request`,
+          message: "Extension cannot be represented in Anthropic request",
           fidelity: "LOSSY",
-          field: `extensions.${key}`,
+          field: "extensions",
         });
       }
+    }
+    for (const key of Object.keys(ext)) {
+      const forwarded = key === "topK" || key === "metadata" || key === "service_tier";
+      recordExtensionDisposition(ctx, key, ext[key], forwarded);
     }
 
     if (canonical.thinking) {
@@ -309,8 +321,10 @@ function renderMessage(m: CanonicalMessage, ctx: CodecContext): unknown {
 /** Single-text content renders as a plain string (Anthropic allows it). */
 function simplifyTextBlocks(blocks: unknown[]): unknown {
   if (blocks.length === 1) {
-    const b = blocks[0] as { type?: string; text?: string } | undefined;
-    if (b?.type === "text" && b.text !== undefined) return b.text;
+    const b = blocks[0] as { type?: string; text?: string; cache_control?: unknown } | undefined;
+    if (b?.type === "text" && b.text !== undefined && b.cache_control === undefined) {
+      return b.text;
+    }
   }
   return blocks;
 }

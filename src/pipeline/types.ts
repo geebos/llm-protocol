@@ -1,89 +1,166 @@
 /**
- * Pipeline types (9.1, 9.12).
+ * Unified `translate` pipeline types (05.translate-api.md).
  */
 import type { ApiFormat } from "../formats.js";
 import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
 import type { ProviderProfile } from "../capabilities/provider-profile.js";
 import type { TranslationPolicies } from "../ir/policies.js";
-import type { CacheAffinityResolver } from "../cache/resolver.js";
+import type { CacheAffinityResolver, PrivacySafeCacheAffinityResolver } from "../cache/resolver.js";
 import type { CacheTranslationReport } from "../cache/types.js";
+import type { CanonicalError } from "../errors.js";
+import type { CanonicalStreamEvent } from "../streams/types.js";
+import type { PrivacyCompletionReport, PrivacyOptions, PrivacyRequestTrace } from "../privacy/types.js";
 
-export interface TranslateOptions<From extends ApiFormat, To extends ApiFormat> {
-  from: From;
-  to: To;
-
+/**
+ * Options for a single `translate.<source>.<target>(options)` call.
+ *
+ * Every bit of the upstream request is supplied here; the core no longer
+ * accepts a WHATWG `Request` and never reconstructs the URL, endpoint or
+ * headers (05.translate-api.md §9.1/§9.2).
+ */
+export interface TranslateOptions {
+  /** Complete, final upstream URL. Used verbatim (no path/origin rewriting). */
+  url: string | URL;
+  /** Source-protocol request body (JSON object or serialized JSON string). */
+  body: unknown;
+  /** Final upstream headers; forwarded verbatim. `content-type` defaults to JSON. */
+  headers?: HeadersInit;
+  /** Overrides the IR model (the body's `model` field otherwise). */
+  model?: string;
   /**
-   * Upstream executor. Defaults to `globalThis.fetch`; injectable for tests,
-   * recording, fault injection or custom connection pools. The core never
-   * manages API keys, URL routing or tenants (FR-005B).
+   * Best-effort override of the IR `includeUsage` hint (§9.4). Unsupported
+   * targets drop it silently (no warning).
    */
-  fetch?: typeof globalThis.fetch;
+  includeUsage?: boolean;
+  /** Explicit streaming override; falls back to the source body's `stream` field. */
+  stream?: boolean;
 
-  /**
-   * Optional per-format provider profiles overriding the built-in defaults.
-   * Needed to declare provider-specific capabilities such as a Chat
-   * `reasoningField` (TH-003) without guessing from model names.
-   */
-  profiles?: Partial<Record<ApiFormat, ProviderProfile>>;
-
-  /**
-   * Translation policies (Appendix A.3). Defaults to `DEFAULT_POLICIES`:
-   * reasoning degradation is reported, never silently dropped.
-   */
-  policies?: TranslationPolicies;
-
-  /**
-   * Maximum accepted source request body size in bytes (NFR-006).
-   * Requests larger than this are rejected with a validation error.
-   * Default: 10 MiB.
-   */
-  maxBodyBytes?: number;
-
-  /**
-   * Optional upstream timeout in milliseconds (NFR-006). When exceeded, the
-   * request is aborted and a `timeout` TranslationError is raised. Timeouts
-   * compose with the caller's AbortSignal.
-   */
-  timeoutMs?: number;
-
-  /**
-   * Anthropic keepalive ping interval in ms while the upstream is idle
-   * (GAP-013). Defaults to 15000; only used when the source protocol is
-   * Anthropic Messages.
-   */
-  keepAliveIntervalMs?: number;
-
-  /**
-   * Prompt-cache affinity translation (Anthropic `cache_control` -> OpenAI
-   * Chat `prompt_cache_key`). Opt-in; only meaningful when the target is
-   * OpenAI Chat. `resolvers` default to `DEFAULT_CACHE_RESOLVERS` (explicit
-   * `x-llm-prompt-cache-key` header, then `cache_control` anchors). Injection
-   * is gated by the target profile's `capabilities.cache.promptCacheKey`.
-   */
-  cache?: {
-    resolvers?: CacheAffinityResolver[];
-  };
-
+  // ---- 观测 ----
+  /** Caller-visible correlation id; generated when absent. */
+  logid?: string;
+  /** Request-level completion callback; fires exactly once per call. */
+  onComplete?: (result: TranslateCompletion) => void;
+  /** Privacy completion report, invoked once per request (privacy enabled). */
+  onPrivacyComplete?: (report: PrivacyCompletionReport) => void;
   /** Diagnostic hook. Must never receive keys, credentials or prompt bodies. */
   trace?: (trace: TranslationTrace) => void;
+
+  // ---- 执行控制 ----
+  /** Upstream executor. Defaults to `globalThis.fetch`. */
+  fetch?: typeof globalThis.fetch;
+  /** Caller cancellation signal. */
+  signal?: AbortSignal;
+  /** Upstream timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Maximum accepted source request body size in bytes (NFR-006). Default 10 MiB. */
+  maxBodyBytes?: number;
+  /** Anthropic keepalive ping interval in ms while the upstream is idle. Default 15000. */
+  keepAliveIntervalMs?: number;
+
+  // ---- 能力与策略 ----
+  /** Per-format provider profiles overriding the built-in defaults. */
+  profiles?: Partial<Record<ApiFormat, ProviderProfile>>;
+  /** Translation policies (Appendix A.3). Defaults to `DEFAULT_POLICIES`. */
+  policies?: TranslationPolicies;
+  /**
+   * Prompt-cache affinity translation (Anthropic `cache_control` -> OpenAI
+   * Chat `prompt_cache_key`). Only meaningful when the target is OpenAI Chat.
+   */
+  cache?: {
+    /** Legacy resolvers that read the raw request/source body. */
+    resolvers?: CacheAffinityResolver[];
+    /** Privacy-safe resolvers that only read the redacted canonical request. */
+    privacySafeResolvers?: PrivacySafeCacheAffinityResolver[];
+    /** Tenant HMAC key for the built-in privacy-safe resolver. */
+    key?: () => Uint8Array | Promise<Uint8Array>;
+    /** Tenant namespace mixed into the HMAC seed. */
+    namespace?: string;
+  };
+  /** Privacy recognition/redaction/restore (04.privacy-transform.md). */
+  privacy?: PrivacyOptions;
 }
 
-export type ForwardTranslator = (request: Request) => Promise<Response>;
+/** A single source->target call: options in, source-protocol `Response` out. */
+export type TranslateCall<From extends ApiFormat, To extends ApiFormat> = (
+  options: TranslateOptions,
+) => Promise<Response>;
+
+/** All target selectors under one source protocol. */
+export type TranslateTargets<From extends ApiFormat> = {
+  messages: TranslateCall<From, "anthropic-messages">;
+  chat: TranslateCall<From, "openai-chat">;
+  responses: TranslateCall<From, "openai-responses">;
+};
+
+/** Public `translate` entry (05.translate-api.md §3). */
+export type TranslateNamespace = {
+  messages: TranslateTargets<"anthropic-messages">;
+  chat: TranslateTargets<"openai-chat">;
+  responses: TranslateTargets<"openai-responses">;
+};
+
+export interface TranslateCompletion {
+  /** Correlation id (same as the trace's `logid`/`traceId`). */
+  logid: string;
+  from: ApiFormat;
+  to: ApiFormat;
+  /** Success / caller cancellation / any error (validation, privacy, upstream). */
+  status: "completed" | "cancelled" | "errored";
+  /** Actual upstream request body (target protocol, JSON object). */
+  requestBody?: unknown;
+  /** Upstream response headers, when a response was received. */
+  responseHeaders?: Headers;
+  /** Upstream HTTP status code. */
+  upstreamStatus?: number;
+  /**
+   * Non-streaming: client-final (source-protocol) response body. Under privacy
+   * this is the restore-before view (placeholders, never originals).
+   */
+  responseBody?: unknown;
+  /** Streaming: canonical SSE events (restore-before view under privacy). */
+  sseEvents?: CanonicalStreamEvent[];
+  /** Whether `sseEvents` hit the buffer cap and stopped accumulating. */
+  sseEventsTruncated?: boolean;
+  /** Unified usage (missing fields default to 0, see §7). */
+  usage?: UnifiedUsage;
+  /**
+   * Time-to-first-token in milliseconds, measured from the start of the call
+   * to the first content delta (`text_delta` / `tool_arguments_delta` /
+   * `reasoning_delta`). Streaming only; `undefined` when no token was observed
+   * (non-streaming, or an empty stream).
+   */
+  ttft?: number;
+  /** Wall-clock duration in ms. */
+  durationMs: number;
+  /** Normalized error on failure (undefined on success). */
+  error?: CanonicalError;
+}
+
+/** Cross-protocol unified usage (05.translate-api.md §7). */
+export interface UnifiedUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
 
 export interface TranslationTrace {
-  /** Request-scoped trace id (NFR-005). */
+  /** Request-scoped trace id (NFR-005); equals `logid`. */
   traceId: string;
+  /** Caller-visible correlation id (05.translate-api.md §8). */
+  logid: string;
   sourceFormat: ApiFormat;
   targetFormat: ApiFormat;
   sourceEndpoint: string;
   targetEndpoint: string;
   streaming: boolean;
-  passthrough: boolean;
   /** Wall-clock translation time in ms (NFR-005). */
   durationMs: number;
   /** Worst fidelity observed across warnings (EXACT if none). */
   fidelity: Fidelity;
   warnings: TranslationWarning[];
+  /** Request-side privacy summary (when privacy is enabled). */
+  privacy?: PrivacyRequestTrace;
   /** Cache affinity summary (when `cache` is enabled on the factory). */
   cache?: CacheTranslationReport;
 }

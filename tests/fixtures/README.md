@@ -4,7 +4,7 @@
 
 - 每个 fixture 是官方协议原始形态（`from` 或 `to` 协议均可）。
 - SSE fixture 为逐字节 SSE 文本，保持官方事件顺序，可直接作为 `Response.body` 喂给 `translate()`。
-- 来源见各文件 `source`/`description` 字段（对应测试或 tech.md 示例）。
+- 来源见各文件 `source`/`description` 字段（对应测试或 01.tech.md 示例）。
 
 ## 覆盖
 

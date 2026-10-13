@@ -2,7 +2,7 @@
   "id": "anthropic-text",
   "protocol": "anthropic-messages",
   "description": "Multi-turn text request with system prompt",
-  "source": "docs/tech.md 9.3 example shape",
+  "source": "docs/01.tech.md 9.3 example shape",
   "request": {
     "model": "claude-sonnet-4-5",
     "max_tokens": 1024,

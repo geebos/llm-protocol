@@ -2,13 +2,15 @@
  * Official SDK smoke tests (NFR-007, acceptance criterion 4).
  *
  * The OpenAI JS SDK and the Anthropic JS SDK consume the stream produced by
- * translate() through a custom fetch, proving the rendered SSE is parseable by
- * the respective official clients. No real provider is contacted.
+ * the public translate entry through a custom fetch, proving the rendered SSE
+ * is parseable by the respective official clients. No real provider is
+ * contacted.
  */
 import { describe, expect, it } from "vitest";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { translate } from "../src/pipeline/translate.js";
+import { translate } from "../src/index.js";
+import type { TranslateOptions } from "../src/index.js";
 
 const encoder = new TextEncoder();
 
@@ -29,6 +31,27 @@ function openaiFrame(data: unknown): string {
   return `data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`;
 }
 
+/**
+ * Adapter for the official SDKs' `fetch` signature: the SDK hands us a
+ * WHATWG `Request`, which we unpack into the options-based entry.
+ */
+function sdkFetch(
+  call: (options: TranslateOptions) => Promise<Response>,
+  base: Omit<TranslateOptions, "url" | "headers" | "body">,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
+    const text = await req.text();
+    return call({
+      ...base,
+      url: req.url,
+      headers: req.headers,
+      body: text ? JSON.parse(text) : {},
+      ...(req.signal ? { signal: req.signal } : {}),
+    });
+  }) as typeof fetch;
+}
+
 const anthropicTextStream =
   anthropicFrame("message_start", { type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model: "claude-sonnet-4-5", content: [], stop_reason: null, usage: {} } }) +
   anthropicFrame("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }) +
@@ -45,7 +68,7 @@ const openaiTextStream =
   openaiFrame({ id: "chatcmpl-1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 4, total_tokens: 11 } }) +
   openaiFrame("[DONE]");
 
-describe("OpenAI JS SDK parses translate() output (Anthropic upstream)", () => {
+describe("OpenAI JS SDK parses translate output (Anthropic upstream)", () => {
   it("consumes the OpenAI SSE stream and aggregates text", async () => {
     const anthropicFetch = (async () =>
       new Response(bytesStream(anthropicTextStream), {
@@ -53,12 +76,10 @@ describe("OpenAI JS SDK parses translate() output (Anthropic upstream)", () => {
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
 
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch: anthropicFetch });
     const client = new OpenAI({
       apiKey: "sk-test",
       baseURL: "https://api.anthropic.com/v1",
-      fetch: (url: RequestInfo | URL, init?: RequestInit) =>
-        forward(new Request(url, init)),
+      fetch: sdkFetch(translate.chat.messages, { fetch: anthropicFetch }),
     });
 
     const stream = await client.chat.completions.create({
@@ -82,7 +103,7 @@ describe("OpenAI JS SDK parses translate() output (Anthropic upstream)", () => {
   });
 });
 
-describe("Anthropic JS SDK parses translate() output (OpenAI upstream)", () => {
+describe("Anthropic JS SDK parses translate output (OpenAI upstream)", () => {
   it("consumes the Anthropic SSE stream and aggregates the final message", async () => {
     const openaiFetch = (async () =>
       new Response(bytesStream(openaiTextStream), {
@@ -90,11 +111,9 @@ describe("Anthropic JS SDK parses translate() output (OpenAI upstream)", () => {
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
 
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch: openaiFetch });
     const client = new Anthropic({
       apiKey: "sk-ant-test-key",
-      fetch: (url: RequestInfo | URL, init?: RequestInit) =>
-        forward(new Request(url, init)),
+      fetch: sdkFetch(translate.messages.chat, { fetch: openaiFetch }),
     });
 
     const stream = client.messages.stream({

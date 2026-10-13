@@ -6,7 +6,8 @@
  * canonical pipeline -> source SSE on Response.body.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
+import { translate } from "../../src/index.js";
+import type { TranslateCompletion } from "../../src/index.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 
 const encoder = new TextEncoder();
@@ -50,17 +51,21 @@ const openaiTextStream =
   openaiFrame({ id: "chatcmpl-1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 8, completion_tokens: 5, total_tokens: 13 } }) +
   openaiFrame("[DONE]");
 
-function anthropicMessagesStreamRequest(): Request {
-  return new Request("https://api.openai.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": "sk-key", "content-type": "application/json" },
-    body: JSON.stringify({
+function anthropicMessagesOptions(): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  return {
+    url: "https://api.openai.com/v1/chat/completions",
+    headers: { authorization: "Bearer sk-key" },
+    body: {
       model: "gpt-4o",
       stream: true,
       max_tokens: 256,
       messages: [{ role: "user", content: "hi" }],
-    }),
-  });
+    },
+  };
 }
 
 describe("anthropic-messages -> openai-chat streaming", () => {
@@ -71,8 +76,7 @@ describe("anthropic-messages -> openai-chat streaming", () => {
         headers: { "content-type": "text/event-stream" },
       })) as typeof fetch;
 
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const response = await forward(anthropicMessagesStreamRequest());
+    const response = await translate.messages.chat({ ...anthropicMessagesOptions(), fetch });
     const frames = await collectSSEFrames(response.body);
     const events = frames.map((f) => f.event);
 
@@ -105,8 +109,7 @@ describe("anthropic-messages -> openai-chat streaming", () => {
         JSON.stringify({ error: { type: "invalid_request_error", message: "bad model", code: "bad" } }),
         { status: 400, headers: { "content-type": "application/json" } },
       )) as typeof fetch;
-    const forward = translate({ from: "anthropic-messages", to: "openai-chat", fetch });
-    const response = await forward(anthropicMessagesStreamRequest());
+    const response = await translate.messages.chat({ ...anthropicMessagesOptions(), fetch });
     expect(response.status).toBe(400);
     expect(response.headers.get("content-type")).toContain("application/json");
     const body = (await response.json()) as Record<string, unknown>;
@@ -134,13 +137,11 @@ describe("keepalive pings (GAP-013)", () => {
     const fetch = (async () =>
       new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
 
-    const forward = translate({
-      from: "anthropic-messages",
-      to: "openai-chat",
+    const response = await translate.messages.chat({
+      ...anthropicMessagesOptions(),
       fetch,
       keepAliveIntervalMs: 30,
     });
-    const response = await forward(anthropicMessagesStreamRequest());
     const reader = response.body!.getReader();
     let buffer = "";
     let sawPing = false;
@@ -160,5 +161,124 @@ describe("keepalive pings (GAP-013)", () => {
     expect(pingElapsed).toBeGreaterThanOrEqual(0);
     expect(pingElapsed).toBeLessThan(140);
     expect(buffer).toContain('text":"late"');
+  });
+});
+
+describe("stream terminal/error lifecycle", () => {
+  it("reports an errored completion when the parser rejects a chunk", async () => {
+    const malformed =
+      openaiFrame({
+        id: "c",
+        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+      }) + "data: {not json\n\n";
+    const fetch = (async () =>
+      new Response(bytesStream(malformed), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })) as typeof fetch;
+    let done: TranslateCompletion | undefined;
+    const response = await translate.messages.chat({
+      ...anthropicMessagesOptions(),
+      fetch,
+      onComplete: (r) => {
+        done = r;
+      },
+    });
+    await collectSSEFrames(response.body);
+    expect(done?.status).toBe("errored");
+    expect(done?.error?.kind).toBe("stream_protocol");
+  });
+
+  it("records the error when reading the upstream body throws", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            openaiFrame({
+              id: "c",
+              choices: [{ index: 0, delta: { content: "hi" }, finish_reason: null }],
+            }),
+          ),
+        );
+        controller.error(new Error("upstream body exploded"));
+      },
+    });
+    const fetch = (async () =>
+      new Response(upstream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })) as typeof fetch;
+    let done: TranslateCompletion | undefined;
+    const response = await translate.messages.chat({
+      ...anthropicMessagesOptions(),
+      fetch,
+      onComplete: (r) => {
+        done = r;
+      },
+    });
+    await expect(collectSSEFrames(response.body)).rejects.toBeTruthy();
+    expect(done?.status).toBe("errored");
+    expect(done?.error?.kind).toBe("upstream");
+  });
+
+  it("classifies a mid-stream timeout abort as timeout", async () => {
+    const fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new DOMException("timed out", "TimeoutError"));
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )) as typeof fetch;
+    let done: TranslateCompletion | undefined;
+    const response = await translate.messages.chat({
+      ...anthropicMessagesOptions(),
+      fetch,
+      onComplete: (r) => {
+        done = r;
+      },
+    });
+    await expect(collectSSEFrames(response.body)).rejects.toBeTruthy();
+    expect(done?.status).toBe("errored");
+    expect(done?.error?.kind).toBe("timeout");
+  });
+
+  it("classifies a caller abort mid-stream as cancelled", async () => {
+    const controller = new AbortController();
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
+      const upstream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(
+            encoder.encode(
+              openaiFrame({
+                id: "c",
+                choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+              }),
+            ),
+          );
+          req.signal.addEventListener("abort", () => c.error(req.signal.reason));
+        },
+      });
+      return new Response(upstream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    let done: TranslateCompletion | undefined;
+    const response = await translate.messages.chat({
+      ...anthropicMessagesOptions(),
+      fetch,
+      signal: controller.signal,
+      onComplete: (r) => {
+        done = r;
+      },
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+    controller.abort();
+    await expect(reader.read()).rejects.toBeTruthy();
+    expect(done?.status).toBe("cancelled");
   });
 });

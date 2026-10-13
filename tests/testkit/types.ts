@@ -1,5 +1,5 @@
 /**
- * Testkit shared types (tech.md section 10).
+ * Testkit shared types (01.tech.md section 10).
  *
  * The testkit is a compatibility laboratory: scenarios drive the public
  * translate() handler with real or fixture upstreams, consume the output with

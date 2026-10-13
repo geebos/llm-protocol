@@ -17,6 +17,11 @@ import type { CanonicalStreamEvent } from "../streams/types.js";
 /** Collector for fidelity warnings produced during a single translation. */
 export interface CodecContext {
   warnings: TranslationWarning[];
+  /**
+   * Extension fields the codec rendered, with kind and whether they were
+   * forwarded (PR-014 evidence 1). Populated by `renderRequest`.
+   */
+  extensionDispositions?: import("../privacy/types.js").RenderedExtensionDisposition[];
 }
 
 export function newCodecContext(): CodecContext {
@@ -29,6 +34,14 @@ export interface CanonicalEndpoint {
   query: Record<string, string>;
 }
 
+/**
+ * Endpoint identity codec.
+ *
+ * @deprecated The unified `translate` entry uses the caller-supplied URL
+ * verbatim (05.translate-api.md §9.1), so `matches`/`toCanonical`/
+ * `fromCanonical` are no longer called on the main path. Retained for
+ * compatibility with existing codec tests; scheduled for removal.
+ */
 export interface EndpointCodec {
   matches(url: URL): boolean;
   toCanonical(url: URL): CanonicalEndpoint;
@@ -51,6 +64,8 @@ export interface HeaderCodec {
 }
 
 export interface RequestCodec {
+  /** Whether this codec reports extension forwarding evidence (PR-014). */
+  readonly supportsExtensionReport?: boolean;
   detectStreaming(payload: unknown): boolean;
   parseRequest(payload: unknown, ctx?: CodecContext): CanonicalRequest;
   renderRequest(

@@ -1,10 +1,10 @@
 /**
- * translate() factory tests with no source-protocol direction:
- * same-protocol passthrough (TC-024, FR-006). Direction-specific pipeline
- * tests live under tests/<source-protocol>/.
+ * translate entry tests with no source-protocol direction: same-protocol calls
+ * always go through the Canonical IR. Direction-specific pipeline tests live
+ * under tests/<source-protocol>/.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../src/pipeline/translate.js";
+import { translate } from "../src/index.js";
 import { TranslationError } from "../src/errors.js";
 
 interface CapturedRequest {
@@ -48,25 +48,38 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-describe("translate: same-protocol passthrough (TC-024, FR-006)", () => {
-  it("does not parse or rewrite the body, and preserves URL/headers", async () => {
-    const rawBody = JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
-    const { fetch, lastRequest } = fakeFetch((req) => {
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "content-type": "application/json" },
-      });
+describe("translate: same-protocol goes through the IR (TC-024)", () => {
+  it("parses and re-renders the body/response, preserving URL and headers", async () => {
+    const { fetch, lastRequest } = fakeFetch(() =>
+      jsonResponse({
+        id: "chatcmpl_1",
+        object: "chat.completion",
+        model: "gpt-4o",
+        choices: [
+          { index: 0, message: { role: "assistant", content: "hi back" }, finish_reason: "stop" },
+        ],
+      }),
+    );
+    const response = await translate.chat.chat({
+      url: "https://api.example.com/v1/chat/completions",
+      headers: { authorization: "Bearer k" },
+      body: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+      fetch,
     });
-    const forward = translate({ from: "openai-chat", to: "openai-chat", fetch });
-    const request = new Request("https://api.example.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k", "content-type": "application/json" },
-      body: rawBody,
-    });
-    const response = await forward(request);
     const captured = lastRequest();
+    // URL and headers are used verbatim.
     expect(captured.url).toBe("https://api.example.com/v1/chat/completions");
     expect(captured.headers.get("authorization")).toBe("Bearer k");
-    expect(JSON.stringify(captured.body)).toBe(JSON.stringify(JSON.parse(rawBody)));
-    expect(await response.json()).toEqual({ ok: true });
+    // Body round-trips through the IR (stream is normalized on render).
+    expect(captured.body).toMatchObject({
+      model: "gpt-4o",
+      stream: false,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    // Response is re-rendered into the source protocol.
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.object).toBe("chat.completion");
+    const message = (body.choices as Array<Record<string, unknown>>)[0].message as Record<string, unknown>;
+    expect(message.content).toBe("hi back");
   });
 });

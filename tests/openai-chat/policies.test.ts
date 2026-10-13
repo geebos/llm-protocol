@@ -7,8 +7,7 @@
  * dropped; every decision lands in the TranslationReport.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
-import { TranslationError } from "../../src/errors.js";
+import { translate } from "../../src/index.js";
 import { createSSEParser, type SSEFrame } from "../../src/streams/index.js";
 import type { TranslationPolicies } from "../../src/ir/policies.js";
 import type { TranslationTrace } from "../../src/pipeline/types.js";
@@ -40,6 +39,9 @@ async function collectSSEFrames(body: ReadableStream<Uint8Array> | null): Promis
   return frames;
 }
 
+const TARGET_URL = "https://api.anthropic.com/v1/messages";
+const HEADERS = { "x-api-key": "k" };
+
 describe("response-side reasoning (source = openai-chat)", () => {
   const anthropicThinkingResponse =
     '{"id":"msg_1","type":"message","role":"assistant","model":"claude",' +
@@ -51,20 +53,14 @@ describe("response-side reasoning (source = openai-chat)", () => {
     const fetch = (async () =>
       new Response(anthropicThinkingResponse, { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: { model: "m", stream: false, messages: [{ role: "user", content: "hi" }] },
       fetch,
       policies: { reasoning: "provider_metadata" } as TranslationPolicies,
       trace: (t) => traces.push(t),
     });
-
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      body: JSON.stringify({ model: "m", stream: false, messages: [{ role: "user", content: "hi" }] }),
-    });
-    const response = await forward(request);
     const body = (await response.json()) as Record<string, unknown>;
     const message = (body.choices as Array<Record<string, unknown>>)[0].message as Record<string, unknown>;
     expect(message.reasoning_content).toBe("hidden chain");
@@ -76,18 +72,13 @@ describe("response-side reasoning (source = openai-chat)", () => {
     const fetch = (async () =>
       new Response(anthropicThinkingResponse, { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: { model: "m", stream: false, messages: [{ role: "user", content: "hi" }] },
       fetch,
       trace: (t) => traces.push(t),
     });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      body: JSON.stringify({ model: "m", stream: false, messages: [{ role: "user", content: "hi" }] }),
-    });
-    const response = await forward(request);
     const body = (await response.json()) as Record<string, unknown>;
     const message = (body.choices as Array<Record<string, unknown>>)[0].message as Record<string, unknown>;
     expect(message.reasoning_content).toBeUndefined();
@@ -105,19 +96,14 @@ describe("response-side reasoning (source = openai-chat)", () => {
     const fetch = (async () =>
       new Response(bytesStream(stream), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: { model: "m", stream: true, messages: [{ role: "user", content: "hi" }] },
       fetch,
       policies: { reasoning: "provider_metadata" } as TranslationPolicies,
       trace: (t) => traces.push(t),
     });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      body: JSON.stringify({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] }),
-    });
-    const response = await forward(request);
     const frames = await collectSSEFrames(response.body);
     const chunks = frames
       .filter((f) => f.data !== "[DONE]")
@@ -142,18 +128,13 @@ describe("response-side reasoning (source = openai-chat)", () => {
     const fetch = (async () =>
       new Response(bytesStream(stream), { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
     const traces: TranslationTrace[] = [];
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    const response = await translate.chat.messages({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: { model: "m", stream: true, messages: [{ role: "user", content: "hi" }] },
       fetch,
       trace: (t) => traces.push(t),
     });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      body: JSON.stringify({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] }),
-    });
-    const response = await forward(request);
     const frames = await collectSSEFrames(response.body);
     const chunks = frames
       .filter((f) => f.data !== "[DONE]")

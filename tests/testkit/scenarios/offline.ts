@@ -71,7 +71,7 @@ export function offlineScenariosFor(
 ): Array<Scenario & ScenarioProfiles> {
   const from = converseProtocol(provider.protocol);
   if (from === provider.protocol) {
-    // Same-protocol passthrough (TC-024).
+    // No converse source protocol (e.g. openai-responses); nothing to run.
     return [];
   }
 

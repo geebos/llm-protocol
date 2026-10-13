@@ -1,5 +1,5 @@
 /**
- * translate() factory tests, OpenAI Chat -> Anthropic Messages direction
+ * translate entry tests, OpenAI Chat -> Anthropic Messages direction
  * (M1, section 9.13, TC-019/021/023/024).
  *
  * Each test injects a fake fetch that captures the target Request and returns
@@ -7,8 +7,7 @@
  * restored on the way out.
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/pipeline/translate.js";
-import { TranslationError } from "../../src/errors.js";
+import { translate } from "../../src/index.js";
 
 interface CapturedRequest {
   url: string;
@@ -78,36 +77,31 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("translate: OpenAI Chat -> Anthropic Messages", () => {
-  it("rewrites URL path, headers and body to the target protocol (TC-019, 9.13#1)", async () => {
+  it("uses the url/headers verbatim and converts the body (TC-019)", async () => {
     const { fetch, lastRequest } = fakeFetch(() => jsonResponse(anthropicTextResponse));
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
 
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
+    const response = await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
       headers: {
-        authorization: "Bearer sk-ant-secret",
+        "x-api-key": "sk-ant-secret",
+        "anthropic-version": "2023-06-01",
         "content-type": "application/json",
-        "x-tracing": "should-be-stripped",
       },
-      body: JSON.stringify({
+      body: {
         model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "Hello" }],
-      }),
+      },
+      fetch,
     });
-
-    const response = await forward(request);
     const captured = lastRequest();
 
-    // 9.13#2: origin preserved, pathname converted
+    // 9.1/9.2: URL and headers are final and used verbatim (no path rewrite or
+    // credential move); the caller supplies the target-shaped headers.
     expect(captured.url).toBe("https://api.anthropic.com/v1/messages");
-
-    // 9.13#3: credential value moved to x-api-key
     expect(captured.headers.get("x-api-key")).toBe("sk-ant-secret");
     expect(captured.headers.get("anthropic-version")).toBe("2023-06-01");
-    // 9.13#5: no source auth header leaked, hop-by-hop stripped
     expect(captured.headers.get("authorization")).toBeNull();
-    expect(captured.headers.get("x-tracing")).toBeNull();
-    expect(captured.headers.get("content-length")).toBeNull();
+    expect(captured.headers.get("content-type")).toBe("application/json");
 
     // 9.13#7: body converted
     expect(captured.body).toMatchObject({
@@ -150,18 +144,16 @@ describe("translate: OpenAI Chat -> Anthropic Messages", () => {
       usage: { input_tokens: 20, output_tokens: 10 },
     };
     const { fetch } = fakeFetch(() => jsonResponse(anthropicToolResponse));
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
 
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer key", "content-type": "application/json" },
-      body: JSON.stringify({
+    const response = await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "key" },
+      body: {
         model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "Weather in Paris?" }],
-      }),
+      },
+      fetch,
     });
-
-    const response = await forward(request);
     const body = (await response.json()) as Record<string, unknown>;
     const message = ((body.choices as Array<Record<string, unknown>>)[0].message) as Record<string, unknown>;
     expect(message.tool_calls).toEqual([
@@ -172,27 +164,6 @@ describe("translate: OpenAI Chat -> Anthropic Messages", () => {
       },
     ]);
     expect((body.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe("tool_calls");
-  });
-
-  it("propagates a request body twice without reuse (FR-004 validation)", async () => {
-    const { fetch } = fakeFetch(() => jsonResponse(anthropicTextResponse));
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
-    });
-    await forward(request);
-    await expect(forward(request)).rejects.toThrow(/consumed/);
-  });
-
-  it("rejects a mismatched source pathname with a typed validation error", async () => {
-    const { fetch } = fakeFetch(() => jsonResponse(anthropicTextResponse));
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = new Request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ model: "m", messages: [] }),
-    });
-    await expect(forward(request)).rejects.toThrow(/does not match/);
   });
 });
 
@@ -208,13 +179,12 @@ describe("translate: upstream error and status handling", () => {
     const { fetch } = fakeFetch(() =>
       new Response(JSON.stringify(upstreamError), { status: 401 }),
     );
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer key" },
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+    const response = await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "key" },
+      body: { model: "m", messages: [{ role: "user", content: "hi" }] },
+      fetch,
     });
-    const response = await forward(request);
     expect(response.status).toBe(401);
     const body = (await response.json()) as Record<string, unknown>;
     // OpenAI error envelope: { error: {...} } with no top-level type field
@@ -223,24 +193,24 @@ describe("translate: upstream error and status handling", () => {
   });
 });
 
-describe("translate: factory reuse and credential isolation (TC-021)", () => {
-  it("keeps per-request credentials isolated across calls", async () => {
+describe("translate: credential isolation (TC-021)", () => {
+  it("keeps per-request credentials isolated across calls (TC-021)", async () => {
     const captured: string[] = [];
     const { fetch } = fakeFetch(async (req) => {
       captured.push(req.headers.get("x-api-key") ?? "");
       return jsonResponse(anthropicTextResponse);
     });
-    const forward = translate({ from: "openai-chat", to: "anthropic-messages", fetch });
 
-    const mk = (key: string) =>
-      new Request("https://api.anthropic.com/v1/chat/completions", {
-        method: "POST",
-        headers: { authorization: `Bearer ${key}` },
-        body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+    const call = (key: string) =>
+      translate.chat.messages({
+        url: "https://api.anthropic.com/v1/messages",
+        headers: { "x-api-key": key },
+        body: { model: "m", messages: [{ role: "user", content: "hi" }] },
+        fetch,
       });
 
-    await forward(mk("key-a"));
-    await forward(mk("key-b"));
+    await call("key-a");
+    await call("key-b");
     expect(captured).toEqual(["key-a", "key-b"]);
   });
 });
@@ -249,18 +219,13 @@ describe("translate: traces never contain credentials", () => {
   it("reports fidelity warnings without leaking the key", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "TOP_SECRET_KEY" },
+      body: { model: "m", messages: [{ role: "user", content: "hi" }] },
       fetch,
       trace: (t) => traces.push({ ...t }),
     });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer TOP_SECRET_KEY" },
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
-    });
-    await forward(request);
     const serialized = JSON.stringify(traces);
     expect(serialized).not.toContain("TOP_SECRET_KEY");
     expect(serialized).not.toContain("hi");
@@ -269,22 +234,17 @@ describe("translate: traces never contain credentials", () => {
   it("carries traceId, durationMs and worst-fidelity summary (NFR-005)", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
-      fetch,
-      trace: (t) => traces.push({ ...t }),
-    });
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      body: JSON.stringify({
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "k" },
+      body: {
         model: "m",
         max_tokens: 100,
         messages: [{ role: "user", content: "hi" }],
-      }),
+      },
+      fetch,
+      trace: (t) => traces.push({ ...t }),
     });
-    await forward(request);
     const t = traces[0];
     expect(typeof t.traceId).toBe("string");
     expect((t.traceId as string).length).toBeGreaterThan(8);
@@ -292,22 +252,17 @@ describe("translate: traces never contain credentials", () => {
     expect(t.fidelity).toBe("EXACT");
   });
 
-  it("summarizes worst fidelity as LOSSY when a warning exists", async () => {
+  it("summarizes worst fidelity as COMPATIBLE when a warning exists", async () => {
     const traces: Array<Record<string, unknown>> = [];
     const { fetch } = fakeFetch(() => jsonResponse(anthropicTextResponse));
-    const forward = translate({
-      from: "openai-chat",
-      to: "anthropic-messages",
+    // anthropic target default max_tokens => COMPATIBLE warning (not LOSSY).
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "k" },
+      body: { model: "m", messages: [{ role: "user", content: "hi" }] },
       fetch,
       trace: (t) => traces.push({ ...t }),
     });
-    // anthropic target default max_tokens => COMPATIBLE warning (not LOSSY).
-    const request = new Request("https://api.anthropic.com/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
-    });
-    await forward(request);
     expect(traces[0].fidelity).toBe("COMPATIBLE");
   });
 });

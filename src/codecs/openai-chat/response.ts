@@ -231,7 +231,7 @@ function parseUsage(
     if (u[key] !== undefined) details[key] = u[key];
   }
   // Compatible providers may report cache write/creation under other names
-  // (tech-v2.md §13.2). Only read them when the profile declares the dialect.
+  // (02.tech-v2.md §13.2). Only read them when the profile declares the dialect.
   if (caps?.cacheCreation) {
     for (const key of ["cache_creation_tokens", "cache_write_tokens", "cached_creation_tokens"]) {
       if (typeof u[key] === "number") {
