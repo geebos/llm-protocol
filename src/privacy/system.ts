@@ -9,10 +9,11 @@
 /** Default system notice; `{template}` is substituted on injection. */
 export const DEFAULT_SYSTEM_NOTICE = [
   "Privacy notice: some values in this conversation may be replaced by placeholders of the form {template}.",
-  "Treat every placeholder as an opaque reference to real content:",
+  "Treat every placeholder as ordinary characters, not as content to interpret:",
   "- Reproduce placeholders exactly as written; never rewrite, translate, split, or invent placeholders.",
-  "- You may reference a placeholder in your answer when useful; it will be restored for the end user.",
-  "- Do not attempt to infer or reveal the underlying value.",
+  "- Do not guess, infer, or derive what a placeholder stands for, and never attempt to restore it in any form.",
+  "- Trust that placeholder replacement is correct and will not cause errors; if something looks wrong, investigate other causes instead of questioning or reverting a placeholder.",
+  "- You may reference a placeholder in your answer when useful; it will be restored for the end user automatically.",
 ].join("\n");
 
 /**

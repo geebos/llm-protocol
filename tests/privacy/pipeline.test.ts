@@ -191,6 +191,10 @@ describe("privacy through translate", () => {
     const system = JSON.stringify(body.system);
     expect(system).toContain("Privacy notice");
     expect(system).toContain("<private_placeholder_{type}_{N}>");
+    expect(system).toContain("ordinary characters");
+    expect(system).toContain("never attempt to restore it in any form");
+    expect(system).toContain("placeholder replacement is correct and will not cause errors");
+    expect(system).toContain("investigate other causes");
   });
 
   it("restores a same-protocol response under privacy (PT-17)", async () => {
