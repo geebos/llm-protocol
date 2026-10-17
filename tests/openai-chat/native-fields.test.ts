@@ -6,7 +6,7 @@
  * (store value-dependent, metadata required).
  */
 import { describe, expect, it } from "vitest";
-import { translate } from "../../src/index.js";
+import { translate, type TranslationTrace } from "../../src/index.js";
 
 interface Captured {
   body: Record<string, unknown>;
@@ -113,5 +113,21 @@ describe("Chat native request fields (P5-2)", () => {
         fetch,
       }),
     ).rejects.toMatchObject({ kind: "unsupported", code: "non_droppable_field" });
+  });
+
+  it("takes the worst of warnings and drops (drop wins over COMPATIBLE)", async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(anthropicResponse));
+    const traces: TranslationTrace[] = [];
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "k" },
+      // No max_tokens -> COMPATIBLE `default_max_tokens`; store:false -> a drop.
+      body: { model: "gpt-4o", store: false, messages: [{ role: "user", content: "hi" }] },
+      fetch,
+      trace: (t) => traces.push(t),
+    });
+    expect(traces[0].warnings.map((w) => w.code)).toContain("default_max_tokens");
+    expect(traces[0].drops?.map((d) => d.path)).toEqual(["native.chat.store"]);
+    expect(traces[0].fidelity).toBe("LOSSY");
   });
 });

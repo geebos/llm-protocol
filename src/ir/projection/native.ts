@@ -25,12 +25,20 @@ const UNSUPPORTED_BY_TARGET = {
   cause: "unsupported_by_target",
 } as const;
 
+/**
+ * Native fields that only describe the *wire form* of a value the IR already
+ * carries (`max_tokens` vs `max_completion_tokens`). A target protocol has a
+ * single form, so targeting it is a lossless transform, not a drop (§6.2.1).
+ */
+const CHAT_LOSSLESS_FORM_HINTS: ReadonlySet<string> = new Set(["maxTokensField"]);
+
 function project(
   sink: ProjectionSink,
   partition: "anthropic" | "chat",
   native: Record<string, unknown> | undefined,
   policy: Record<string, FieldPolicy>,
   overrides?: readonly PolicyOverride[],
+  lossless: ReadonlySet<string> = new Set(),
 ): void {
   if (!native) return;
   for (const [key, fieldPolicy] of Object.entries(policy)) {
@@ -41,7 +49,7 @@ function project(
       `native.${partition}.${key}`,
       value,
       fieldPolicy,
-      UNSUPPORTED_BY_TARGET,
+      lossless.has(key) ? { kind: "transformed" } : UNSUPPORTED_BY_TARGET,
       overrides,
     );
   }
@@ -72,6 +80,7 @@ export function projectChatRequest(
     native as Record<string, unknown> | undefined,
     CHAT_REQUEST_POLICY as unknown as Record<string, FieldPolicy>,
     overrides,
+    CHAT_LOSSLESS_FORM_HINTS,
   );
 }
 

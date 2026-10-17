@@ -187,6 +187,26 @@ describe("Anthropic native request fields (L-8)", () => {
     expect(drops.every((d) => d.authorization === "policy_droppable")).toBe(true);
   });
 
+  it("reports LOSSY fidelity for a drop-only conversion", async () => {
+    const traces: TranslationTrace[] = [];
+    const { fetch } = fakeFetch(() => jsonResponse(chatResponse));
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer k" },
+      body: {
+        model: "claude-sonnet",
+        max_tokens: 16,
+        service_tier: "standard_only",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      fetch,
+      trace: (t) => traces.push(t),
+    });
+    expect(traces[0].warnings).toEqual([]);
+    expect(traces[0].drops?.map((d) => d.path)).toEqual(["native.anthropic.serviceTier"]);
+    expect(traces[0].fidelity).toBe("LOSSY");
+  });
+
   it("fails closed on a required cross-protocol native field", async () => {
     const { fetch } = fakeFetch(() => jsonResponse(chatResponse));
     await expect(

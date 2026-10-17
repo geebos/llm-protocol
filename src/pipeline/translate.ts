@@ -33,7 +33,8 @@ import {
   withAnthropicKeepAlive,
 } from "../streams/index.js";
 import type { CanonicalStreamEvent } from "../streams/types.js";
-import type { TranslationWarning, Fidelity } from "../ir/fidelity.js";
+import type { TranslationWarning } from "../ir/fidelity.js";
+import { calculateFidelity } from "../ir/projection/fidelity.js";
 import { DEFAULT_POLICIES } from "../ir/policies.js";
 import {
   resolveCacheAffinity,
@@ -133,7 +134,7 @@ export async function translateCall(
       traceId: logid,
       logid,
       durationMs: performance.now() - startedAt,
-      fidelity: worstFidelity(partial.warnings),
+      fidelity: calculateFidelity(partial.warnings, partial.drops ?? [], []),
       ...partial,
     });
   };
@@ -805,17 +806,6 @@ function restoreClientErrorText(
     session.snapshot(),
     config.streaming.maxPlaceholderLength,
   ).text;
-}
-
-/** Worst fidelity across warnings (EXACT if none). */
-function worstFidelity(warnings: TranslationWarning[]): Fidelity {
-  let worst: Fidelity = "EXACT";
-  for (const w of warnings) {
-    if (w.fidelity === "UNSUPPORTED") return "UNSUPPORTED";
-    if (w.fidelity === "LOSSY" && worst === "EXACT") worst = "LOSSY";
-    else if (w.fidelity === "COMPATIBLE" && worst === "EXACT") worst = "COMPATIBLE";
-  }
-  return worst;
 }
 
 /** Keep target status where it is protocol-meaningful; never fabricate 2xx. */
