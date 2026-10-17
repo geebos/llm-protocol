@@ -66,8 +66,6 @@ describe("native partition coverage", () => {
 
     const session = new PrivacySession("native-test", {
       compiled: config.template,
-      tagMode: config.tagMode,
-      tagBytes: config.tagBytes,
       namespace: config.namespace,
     });
     const result = await redactRegions(regions, session, config, extraHaystack);
@@ -86,8 +84,6 @@ describe("native partition coverage", () => {
     const { regions, extraHaystack } = collectRequestRegions(canonical, config.coverage);
     const session = new PrivacySession("native-test", {
       compiled: config.template,
-      tagMode: config.tagMode,
-      tagBytes: config.tagBytes,
       namespace: config.namespace,
     });
     await expect(redactRegions(regions, session, config, extraHaystack)).rejects.toMatchObject({

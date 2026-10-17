@@ -12,15 +12,18 @@ interface Captured {
   body: unknown;
 }
 
-function fakeFetch(handler: (req: Request) => Response | Promise<Response>): {
+function fakeFetch(
+  handler: (req: Request, body: unknown) => Response | Promise<Response>,
+): {
   fetch: typeof fetch;
   lastRequest: () => Captured;
 } {
   let captured: Captured | undefined;
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
-    captured = { url: req.url, headers: new Headers(req.headers), body: await req.json() };
-    return handler(req);
+    const body = await req.json();
+    captured = { url: req.url, headers: new Headers(req.headers), body };
+    return handler(req, body);
   }) as typeof fetch;
   return {
     fetch: fetchImpl,
@@ -478,12 +481,16 @@ describe("unified usage", () => {
 
 describe("privacy observation boundary", () => {
   it("keeps onComplete at the restore-before view and the Response restored", async () => {
-    const { fetch } = fakeFetch(() =>
-      jsonResponse({
+    const token = /<private_placeholder_phone-[a-z2-7]{5}>/;
+    const { fetch } = fakeFetch((_req, body) => {
+      const sent = JSON.stringify(body);
+      const found = token.exec(sent)?.[0];
+      if (!found) throw new Error("no token sent upstream");
+      return jsonResponse({
         ...anthropicResponse,
-        content: [{ type: "text", text: "call <private_placeholder_phone_1> now" }],
-      }),
-    );
+        content: [{ type: "text", text: `call ${found} now` }],
+      });
+    });
     let done: TranslateCompletion | undefined;
     const response = await translate.chat.messages({
       url: "https://api.anthropic.com/v1/messages",
@@ -498,7 +505,7 @@ describe("privacy observation boundary", () => {
     const client = JSON.stringify(await response.json());
     expect(client).toContain("13800138000");
     const observed = JSON.stringify(done?.responseBody);
-    expect(observed).toContain("<private_placeholder_phone_1>");
+    expect(observed).toMatch(token);
     expect(observed).not.toContain("13800138000");
   });
 });

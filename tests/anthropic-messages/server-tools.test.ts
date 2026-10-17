@@ -208,6 +208,6 @@ describe("Anthropic server tools", () => {
     const tool = (body.tools as Record<string, unknown>[])[0];
     expect(tool.name).toBe("web_search");
     expect(JSON.stringify(tool)).not.toContain(PHONE);
-    expect(String(tool.user_location)).toMatch(/private_placeholder_phone_\d+/);
+    expect(String(tool.user_location)).toMatch(/private_placeholder_phone-[a-z2-7]{5}/);
   });
 });

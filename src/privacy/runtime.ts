@@ -24,7 +24,6 @@ export interface RequestPrivacyOutcome {
   degraded: boolean;
   channels: PrivacyChannel[];
   allowTexts: string[];
-  exemptTexts: string[];
   warnings: PrivacyWarning[];
   extensionProofs: ExtensionPrivacyProof[];
 }
@@ -47,7 +46,6 @@ export async function redactCanonicalRequest(
     degraded: result.degraded,
     channels: [...result.channels] as PrivacyChannel[],
     allowTexts: result.allowTexts,
-    exemptTexts: result.exemptTexts,
     warnings: result.warnings,
     extensionProofs: buildExtensionProofs(
       extensionsCoverage,

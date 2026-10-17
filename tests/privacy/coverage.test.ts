@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { translate } from "../../src/index.js";
 import type { PrivacyRecognizer } from "../../src/index.js";
+import { tokenTag } from "../../src/index.js";
 
 function phoneRecognizer(): PrivacyRecognizer {
   return {
@@ -65,14 +66,22 @@ function openaiOptions(body: Record<string, unknown>): {
 
 describe("coverage policy", () => {
   it("rejects a collision with a default-allow extension (PT-62)", async () => {
+    // A caller-supplied tag key makes the token for this value predictable, so
+    // the extension can carry the exact token bytes the engine will generate.
+    const key = new Uint8Array([1, 2, 3]);
+    const tag = tokenTag(key, "tenant", "phone", "13800138000", 5);
     await expect(
       translate.chat.messages({
         ...openaiOptions({
-          metadata: { note: "<private_placeholder_phone_1>" },
+          metadata: { note: `<private_placeholder_phone-${tag}>` },
           messages: [{ role: "user", content: "call 13800138000" }],
         }),
         fetch: fetchOk(),
-        privacy: { recognizers: [phoneRecognizer()] },
+        privacy: {
+          recognizers: [phoneRecognizer()],
+          tagKey: () => key,
+          tagNamespace: "tenant",
+        },
       }),
     ).rejects.toMatchObject({ kind: "privacy", code: "privacy_placeholder_collision" });
   });
@@ -271,21 +280,6 @@ describe("coverage policy", () => {
     expect(err.code).toBe("privacy_uncovered_channel");
     expect(err.message).toMatch(/at \S+ \(phone: 1\*+0\)/);
     expect(err.message).not.toContain("13800138000");
-  });
-
-  it("rejects an unrecognized placeholder shape reaching egress", async () => {
-    // A placeholder-shaped literal in an allow extension, plus a real mapping
-    // from the message channel, makes the engine emit a foreign shape.
-    await expect(
-      translate.chat.messages({
-        ...openaiOptions({
-          metadata: { note: "<private_placeholder_phone_7>" },
-          messages: [{ role: "user", content: "call 13800138000" }],
-        }),
-        fetch: fetchOk(),
-        privacy: { recognizers: [phoneRecognizer()] },
-      }),
-    ).rejects.toBeDefined();
   });
 
   it("rejects oversized tool arguments (PT-40)", async () => {

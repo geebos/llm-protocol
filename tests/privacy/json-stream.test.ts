@@ -29,15 +29,19 @@ interface Harness {
 }
 
 function makeHarness(
-  overrides: { maxBytes?: number; overflowAction?: "reject" | "flush_raw" } = {},
+  overrides: {
+    maxBytes?: number;
+    overflowAction?: "reject" | "flush_raw";
+    escape?: boolean;
+  } = {},
 ): Harness {
+  // Mechanics are template-agnostic; numbered tokens keep the fixtures legible.
   const config = resolvePrivacyConfig({
     recognizers: [{ priority: 1, recognize: () => [] }],
+    mapping: { tagMode: false },
   });
   const session = new PrivacySession("json-stream", {
     compiled: config.template,
-    tagMode: config.tagMode,
-    tagBytes: config.tagBytes,
     namespace: config.namespace,
   });
   for (let i = 1; i <= 12; i++) session.getOrCreate("a", `x${i}`);
@@ -53,6 +57,7 @@ function makeHarness(
     compiled: config.template,
     matcher: createPlaceholderMatcher(config.template, entries),
     maxPlaceholderLength: 128,
+    escape: overrides.escape,
     maxBytes: overrides.maxBytes ?? 1024 * 1024,
     overflowAction: overrides.overflowAction ?? "reject",
     stats,
@@ -120,7 +125,7 @@ describe("incremental tool-argument restore", () => {
   });
 
   it("decodes escaped literals without restoring them (INV-E7)", () => {
-    const h = makeHarness();
+    const h = makeHarness({ escape: true });
     const literal = h.placeholder(1);
     // Request-side escaping prefixes the shape with a backslash, which JSON
     // then doubles: the wire text carries two backslashes.
@@ -136,8 +141,6 @@ describe("incremental tool-argument restore", () => {
     });
     const session = new PrivacySession("quoting", {
       compiled: config.template,
-      tagMode: config.tagMode,
-      tagBytes: config.tagBytes,
       namespace: config.namespace,
     });
     const original = `he said "hi"${NL}back${BS}slash 🙂`;

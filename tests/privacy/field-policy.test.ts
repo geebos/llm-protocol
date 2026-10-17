@@ -70,7 +70,10 @@ describe("field-level escaping policy (E4)", () => {
           ],
         }),
         fetch: fetchOk(),
-        privacy: { recognizers: [phoneRecognizer()] },
+        privacy: {
+          recognizers: [phoneRecognizer()],
+          mapping: { escape: true, tagMode: false },
+        },
       }),
     ).rejects.toMatchObject({ kind: "privacy", code: "privacy_field_unescapable" });
   });
@@ -98,7 +101,10 @@ describe("field-level escaping policy (E4)", () => {
           ],
         }),
         fetch: fetchOk(),
-        privacy: { recognizers: [phoneRecognizer()] },
+        privacy: {
+          recognizers: [phoneRecognizer()],
+          mapping: { escape: true, tagMode: false },
+        },
       }),
     ).rejects.toMatchObject({ kind: "privacy", code: "privacy_field_unescapable" });
   });

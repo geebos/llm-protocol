@@ -122,6 +122,7 @@ export function createPrivacyStreamRestore(
               compiled: config.template,
               matcher,
               maxPlaceholderLength: config.streaming.maxPlaceholderLength,
+              escape: config.escape,
               maxBytes: config.streaming.maxToolArgumentBytes,
               overflowAction: config.streaming.overflowAction,
               stats,
@@ -239,6 +240,7 @@ export function createPrivacyStreamRestore(
     const result = restoreText(pending, matcher, config.template, {
       final,
       maxPlaceholderLength: config.streaming.maxPlaceholderLength,
+      escape: config.escape,
     });
     emitText(kind, location, result.out, controller);
     stats.restored += result.matched;

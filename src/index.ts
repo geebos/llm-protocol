@@ -193,11 +193,12 @@ export {
   compileTemplate,
   parsePlaceholder,
   renderPlaceholder,
-  placeholderTag,
+  tokenTag,
   isValidType,
   scanTemplateShape,
   DEFAULT_TEMPLATE,
-  DEFAULT_TAG_BYTES,
+  LEGACY_TEMPLATE,
+  DEFAULT_TAG_LENGTH,
   TemplateError,
 } from "./privacy/template.js";
 export type { CompiledTemplate, ParsedPlaceholder } from "./privacy/template.js";

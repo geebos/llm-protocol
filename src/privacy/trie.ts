@@ -5,7 +5,7 @@
  * `PII-phone-10`), so a match is only committed once it can no longer be
  * extended into a longer registered placeholder.
  */
-import type { CompiledTemplate } from "./template.js";
+import { parsePlaceholder, type CompiledTemplate } from "./template.js";
 
 interface TrieNode {
   children: Map<string, TrieNode>;
@@ -18,6 +18,12 @@ function newNode(): TrieNode {
 
 export interface PlaceholderMatcher {
   root: TrieNode;
+  /**
+   * Entity types this matcher holds registered tokens for. Used to tell a
+   * mangled token of ours (`<..._phone-ab3kf>` typo'd by the model) from
+   * unrelated external literal text: only the former is worth a warning.
+   */
+  knownTypes: Set<string>;
   matchAt(buffer: string, start: number, final: boolean): MatchResult;
 }
 
@@ -31,7 +37,10 @@ export function createPlaceholderMatcher(
   entries: { placeholder: string; original: string }[],
 ): PlaceholderMatcher {
   const root = newNode();
+  const knownTypes = new Set<string>();
   for (const entry of entries) {
+    const parsed = parsePlaceholder(compiled, entry.placeholder);
+    if (parsed) knownTypes.add(parsed.type);
     let node = root;
     for (const ch of entry.placeholder) {
       let next = node.children.get(ch);
@@ -63,5 +72,5 @@ export function createPlaceholderMatcher(
     return accepted ?? { kind: "no_match" };
   }
 
-  return { root, matchAt };
+  return { root, knownTypes, matchAt };
 }

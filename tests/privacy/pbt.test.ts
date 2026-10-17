@@ -35,13 +35,13 @@ function makeSession(id: string, mappings: number): {
   config: ReturnType<typeof resolvePrivacyConfig>;
   entries: { placeholder: string; original: string }[];
 } {
+  // Mechanics are template-agnostic; numbered tokens keep the fixtures legible.
   const config = resolvePrivacyConfig({
     recognizers: [{ priority: 1, recognize: () => [] }],
+    mapping: { tagMode: false },
   });
   const session = new PrivacySession(id, {
     compiled: config.template,
-    tagMode: config.tagMode,
-    tagBytes: config.tagBytes,
     namespace: config.namespace,
   });
   for (let i = 1; i <= mappings; i++) session.getOrCreate("a", `X${i}`);
@@ -144,8 +144,6 @@ describe("privacy property-based tests", () => {
       const config = resolvePrivacyConfig({ recognizers });
       const session = new PrivacySession("async", {
         compiled: config.template,
-        tagMode: config.tagMode,
-        tagBytes: config.tagBytes,
         namespace: config.namespace,
       });
       const { redactRegions, setRegionAction } = await import("../../src/privacy/redact.js");

@@ -15,13 +15,13 @@ function makeSession(mappings: number): {
   session: PrivacySession;
   config: ReturnType<typeof resolvePrivacyConfig>;
 } {
+  // Mechanics are template-agnostic; numbered tokens keep the fixtures legible.
   const config = resolvePrivacyConfig({
     recognizers: [{ priority: 1, recognize: () => [] }],
+    mapping: { tagMode: false },
   });
   const session = new PrivacySession("stream-test", {
     compiled: config.template,
-    tagMode: config.tagMode,
-    tagBytes: config.tagBytes,
     namespace: config.namespace,
   });
   for (let i = 1; i <= mappings; i++) {
@@ -235,6 +235,33 @@ describe("streaming restore", () => {
     expect(result.warnings.some((w) => w.code === "privacy_unknown_placeholder")).toBe(true);
   });
 
+  it("restores a default tag token split across chunks", async () => {
+    // Default configuration: identity is the tag, not a counter.
+    const config = resolvePrivacyConfig({
+      recognizers: [{ priority: 1, recognize: () => [] }],
+    });
+    const session = new PrivacySession("tag-stream", {
+      compiled: config.template,
+      namespace: config.namespace,
+    });
+    const token = session.getOrCreate("phone", "13800138000").placeholder;
+    expect(token).toMatch(/^<private_placeholder_phone-[a-z2-7]{5}>$/);
+    const cut = token.length - 2;
+    const result = await run(
+      [
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `call ${token.slice(0, cut)}` },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `${token.slice(cut)} now` },
+        { type: "text_end", location: { choice: 0, content: 0 } },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe("call 13800138000 now");
+    expect(result.warnings).toHaveLength(0);
+  });
+
   it("rejects on buffer overflow in strict mode (PT-14)", async () => {
     const config = resolvePrivacyConfig({
       recognizers: [{ priority: 1, recognize: () => [] }],
@@ -242,8 +269,6 @@ describe("streaming restore", () => {
     });
     const session = new PrivacySession("overflow", {
       compiled: config.template,
-      tagMode: config.tagMode,
-      tagBytes: config.tagBytes,
       namespace: config.namespace,
     });
     await expect(
@@ -268,8 +293,6 @@ describe("streaming restore", () => {
     });
     const session = new PrivacySession("flush", {
       compiled: config.template,
-      tagMode: config.tagMode,
-      tagBytes: config.tagBytes,
       namespace: config.namespace,
     });
     const result = await run(
@@ -309,8 +332,6 @@ describe("streaming restore", () => {
     });
     const session = new PrivacySession("strict-stream", {
       compiled: config.template,
-      tagMode: config.tagMode,
-      tagBytes: config.tagBytes,
       namespace: config.namespace,
     });
     await expect(

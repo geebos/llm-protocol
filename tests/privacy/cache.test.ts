@@ -91,11 +91,14 @@ describe("privacy-safe cache affinity", () => {
       return cap.lastBody().prompt_cache_key as string | undefined;
     };
     const a = await keyFor("13800138000");
-    const b = await keyFor("13900139000");
+    const again = await keyFor("13800138000");
+    const other = await keyFor("13900139000");
     expect(a).toBeDefined();
     expect(a).toMatch(/^anthropic-cache-[0-9a-f]{32}$/);
-    // Different raw values, identical redacted anchor => identical key.
-    expect(a).toBe(b);
+    // Same redacted anchor across requests (same process tag key) => same key.
+    expect(a).toBe(again);
+    // A different value redacts to a different token, so the anchor differs.
+    expect(a).not.toBe(other);
   });
 
   it("does not expose an enumerable hash of the raw anchor (PT-58)", async () => {

@@ -1,6 +1,6 @@
 /**
  * Privacy engine core domain tests (P1): template, session, redact/restore.
- * Covers PT-02/07/08/09/15/19/21/22/27/28/32/34/68.
+ * Covers PT-02/07/08/09/11/15/19/21/22/27/28/32/34/68.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -30,26 +30,37 @@ function phoneRecognizer(): PrivacyRecognizer {
 
 describe("privacy template", () => {
   it("rejects adjacent dynamic tokens (PT-68)", () => {
-    expect(() => compileTemplate("PII-{type}{N}")).toThrow(TemplateError);
+    expect(() => compileTemplate("PII-{type}{N}", { tagMode: false })).toThrow(TemplateError);
   });
 
   it("rejects a missing literal prefix (PT-21)", () => {
-    expect(() => compileTemplate("{type}-{N}")).toThrow(TemplateError);
+    expect(() => compileTemplate("{type}-{N}", { tagMode: false })).toThrow(TemplateError);
   });
 
   it("renders and parses a custom template (PT-21)", () => {
-    const compiled = compileTemplate("[[{type}:{N}]]");
+    const compiled = compileTemplate("[[{type}:{N}]]", { tagMode: false });
     expect(compiled.prefix).toBe("[[");
     expect(parsePlaceholder(compiled, "[[phone:3]]")).toEqual({ type: "phone", n: 3 });
     expect(parsePlaceholder(compiled, "[[phone:0]]")).toBeUndefined();
   });
 
-  it("scans a template shape with tagMode (PT-27)", () => {
-    const compiled = compileTemplate("<p_{type}_{N}_{tag}>", { tagMode: true, tagBytes: 12 });
-    const tag = "a".repeat(24);
+  it("scans a numbered template shape with a tag (PT-27)", () => {
+    const compiled = compileTemplate("<p_{type}_{N}_{tag}>", {
+      tagMode: true,
+      tagLength: 12,
+    });
+    const tag = "a".repeat(12);
     const text = `<p_phone_1_${tag}>`;
     expect(scanTemplateShape(compiled, text, 0)).toBe(text.length);
     expect(parsePlaceholder(compiled, text)).toEqual({ type: "phone", n: 1, tag });
+  });
+
+  it("requires {N} when tag mode is disabled", () => {
+    expect(() => compileTemplate("<p_{type}-{tag}>", { tagMode: false })).toThrow(TemplateError);
+  });
+
+  it("requires {tag} in tag mode", () => {
+    expect(() => compileTemplate("<p_{type}-{N}>", { tagMode: true })).toThrow(TemplateError);
   });
 });
 
@@ -59,7 +70,9 @@ describe("privacy engine", () => {
     const session = engine.createSession("s1");
     const text = "call 13800138000 now";
     const redacted = await engine.redact(text, session, [phoneRecognizer()]);
-    expect(redacted).toBe("call <private_placeholder_phone_1> now");
+    const token = session.entries()[0].placeholder;
+    expect(token).toMatch(/^<private_placeholder_phone-[a-z2-7]{5}>$/);
+    expect(redacted).toBe(`call ${token} now`);
     expect(engine.restore(redacted, session)).toBe(text);
     // idempotent: re-redacting already-mapped text is stable
     const again = await engine.redact(text, session, [phoneRecognizer()]);
@@ -71,9 +84,8 @@ describe("privacy engine", () => {
     const session = engine.createSession("s2");
     const text = "13800138000 and 13800138000";
     const redacted = await engine.redact(text, session, [phoneRecognizer()]);
-    expect(redacted).toBe(
-      "<private_placeholder_phone_1> and <private_placeholder_phone_1>",
-    );
+    const token = session.entries()[0].placeholder;
+    expect(redacted).toBe(`${token} and ${token}`);
   });
 
   it("takes the outermost span (PT-08)", async () => {
@@ -88,7 +100,8 @@ describe("privacy engine", () => {
       recognize: () => [{ start: 5, end: 21, type: "inner" }],
     };
     const redacted = await engine.redact("mail user@example.com x", session, [outer, inner]);
-    expect(redacted).toBe("<private_placeholder_outer_1> x");
+    expect(redacted).toBe(`${session.entries()[0].placeholder} x`);
+    expect(redacted).toContain("<private_placeholder_outer-");
   });
 
   it("rejects crossing spans", async () => {
@@ -134,33 +147,32 @@ describe("privacy engine", () => {
     );
   });
 
-  it("escapes a literal that collides with a generated placeholder (PT-34)", async () => {
+  it("leaves a placeholder-shaped literal untouched (PT-34)", async () => {
     const engine = createPrivacyEngine();
     const session = engine.createSession("s8");
-    const text = "13800138000 <private_placeholder_phone_1>";
+    const literal = "<private_placeholder_phone_1>";
+    const text = `13800138000 ${literal}`;
     const redacted = await engine.redact(text, session, [phoneRecognizer()]);
-    expect(redacted).toBe(
-      "<private_placeholder_phone_1> \\<private_placeholder_phone_1>",
-    );
+    // No escaping by default: only the detected value is replaced.
+    expect(redacted).toBe(`${session.entries()[0].placeholder} ${literal}`);
     expect(engine.restore(redacted, session)).toBe(text);
   });
 
-  it("escapes an already-registered placeholder literal instead of trusting it (PT-28)", async () => {
+  it("restores a re-fed registered token instead of escaping it (PT-28)", async () => {
     const engine = createPrivacyEngine();
     const session = engine.createSession("s9");
-    // Register phone_1 first, then feed the placeholder literal back in.
-    await engine.redact("13800138000", session, [phoneRecognizer()]);
-    const literal = "<private_placeholder_phone_1>";
+    const token = await engine.redact("13800138000", session, [phoneRecognizer()]);
     const none: PrivacyRecognizer = { priority: 1, recognize: () => [] };
-    const redacted = await engine.redact(literal, session, [none]);
-    expect(redacted).toBe(`\\${literal}`);
-    expect(engine.restore(redacted, session)).toBe(literal);
+    const redacted = await engine.redact(token, session, [none]);
+    // Provenance comes from the registry, so an issued token is trusted as-is.
+    expect(redacted).toBe(token);
+    expect(engine.restore(redacted, session)).toBe("13800138000");
   });
 
   it("does not restore unknown placeholders (PT-07)", () => {
     const engine = createPrivacyEngine();
     const session = engine.createSession("s10");
-    const text = "see <private_placeholder_phone_9>";
+    const text = "see <private_placeholder_phone-zzzzz>";
     expect(engine.restore(text, session)).toBe(text);
   });
 
@@ -178,8 +190,11 @@ describe("privacy engine", () => {
     const two = engine.createSession("req-2");
     const redactedOne = await engine.redact("call 13800138000", one, [phoneRecognizer()]);
     const redactedTwo = await engine.redact("call 13800138000", two, [phoneRecognizer()]);
-    expect(redactedOne).toBe("call <private_placeholder_phone_1>");
-    expect(redactedTwo).toBe("call <private_placeholder_phone_1>");
+    expect(redactedOne).toBe(`call ${one.entries()[0].placeholder}`);
+    expect(redactedTwo).toBe(`call ${two.entries()[0].placeholder}`);
+    // The process tag key keeps tokens stable, so the same value yields the
+    // same token; registries still never cross between sessions.
+    expect(redactedOne).toBe(redactedTwo);
     expect(engine.getSession("req-1")).toBeDefined();
     engine.destroySession("req-1");
     expect(engine.getSession("req-1")).toBeUndefined();

@@ -94,8 +94,6 @@ function richRequest(): CanonicalRequest {
 function sessionFor(config: ReturnType<typeof resolvePrivacyConfig>): PrivacySession {
   return new PrivacySession("regions-test", {
     compiled: config.template,
-    tagMode: config.tagMode,
-    tagBytes: config.tagBytes,
     namespace: config.namespace,
   });
 }

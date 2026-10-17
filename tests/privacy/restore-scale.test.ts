@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { compileTemplate, restoreString } from "../../src/index.js";
 
-const compiled = compileTemplate("<PP_{type}_{N}>");
+const compiled = compileTemplate("<PP_{type}_{N}>", { tagMode: false });
 const entries = [{ placeholder: "<PP_phone_1>", original: "13800138000" }];
 
 const PLAIN_TEXT_GUARD_MS = 1000;

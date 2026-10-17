@@ -101,7 +101,7 @@ describe("native field coverage (supersedes extension double evidence)", () => {
     });
     const metadata = JSON.stringify(cap.lastBody().metadata);
     expect(metadata).not.toContain("13800138000");
-    expect(metadata).toContain("<private_placeholder_phone_1>");
+    expect(metadata).toMatch(/<private_placeholder_phone-[a-z2-7]{5}>/);
   });
 
   it("rejects a sensitive value in a reject-native path (PT-29)", async () => {

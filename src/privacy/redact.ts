@@ -80,12 +80,6 @@ export interface RedactResult {
   channels: Set<string>;
   /** Texts from `allow` channels (used by EgressVerify). */
   allowTexts: string[];
-  /**
-   * Model-visible texts that opt out of collision/foreign-shape scanning
-   * (`collisionScan: false`, e.g. reasoning): never restored, so a shape
-   * literal there is harmless (used by EgressVerify).
-   */
-  exemptTexts: string[];
   /** Sanitized warnings produced during redaction. */
   warnings: PrivacyWarning[];
   /** Extension paths whose string values were actually transformed. */
@@ -393,18 +387,6 @@ export async function redactRegions(
     if (regionAction(region) === "allow") allowTexts.push(regionText(region));
   }
 
-  // Texts that opted out of placeholder scanning (reasoning). EgressVerify
-  // skips foreign-shape checks for them but still checks leaked originals.
-  const exemptTexts: string[] = [];
-  for (const region of regions) {
-    if (region.collisionScan === false) {
-      for (const segment of region.segments) {
-        const text = segment.get();
-        if (text !== "") exemptTexts.push(text);
-      }
-    }
-  }
-
   return {
     redacted,
     escaped,
@@ -412,7 +394,6 @@ export async function redactRegions(
     degraded: state.degraded,
     channels,
     allowTexts: [...allowTexts, ...extraHaystack],
-    exemptTexts,
     warnings: state.warnings,
     transformedExtensions: [...transformedExtensions],
   };

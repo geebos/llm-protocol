@@ -8,7 +8,14 @@
  */
 import { validationError } from "../errors.js";
 import type { TranslationWarning } from "../ir/fidelity.js";
-import { compileTemplate, DEFAULT_TAG_BYTES, DEFAULT_TEMPLATE, TemplateError, type CompiledTemplate } from "./template.js";
+import {
+  compileTemplate,
+  DEFAULT_TAG_LENGTH,
+  DEFAULT_TEMPLATE,
+  LEGACY_TEMPLATE,
+  TemplateError,
+  type CompiledTemplate,
+} from "./template.js";
 import type {
   PrivacyCoveragePolicy,
   PrivacyOptions,
@@ -38,12 +45,9 @@ export interface ResolvedPrivacyConfig {
   coverage: NormalizedCoverage;
   template: CompiledTemplate;
   tagMode: boolean;
-  tagBytes: number;
-  /** Placeholder identifier mode (docs/06 §10.2); default "sequence". */
-  idMode: "sequence" | "derived";
-  /** Stable context id required by `idMode: "derived"`. */
-  contextId: string;
-  /** Reversible literal escaping (docs/06 §7); default true. */
+  /** Tag length in characters (0 in legacy numbered mode). */
+  tagLength: number;
+  /** Reversible literal escaping (docs/06 §7); opt-in, default false. */
   escape: boolean;
   namespace: string;
   resolveTagKey?: () => Uint8Array | Promise<Uint8Array>;
@@ -100,24 +104,20 @@ export function resolvePrivacyConfig(options: PrivacyOptions): ResolvedPrivacyCo
   const warnings: PrivacyWarning[] = [];
 
   let template: CompiledTemplate;
+  const tagMode = options.mapping?.tagMode ?? true;
   try {
-    template = compileTemplate(options.mapping?.template ?? DEFAULT_TEMPLATE, {
-      tagMode: options.mapping?.tagMode ?? false,
-      tagBytes: options.mapping?.tagBytes ?? DEFAULT_TAG_BYTES,
-    });
+    template = compileTemplate(
+      options.mapping?.template ?? (tagMode ? DEFAULT_TEMPLATE : LEGACY_TEMPLATE),
+      {
+        tagMode,
+        tagLength: options.mapping?.tagLength ?? DEFAULT_TAG_LENGTH,
+      },
+    );
   } catch (err) {
     if (err instanceof TemplateError) {
       throw validationError(`Invalid privacy placeholder template: ${err.code}`);
     }
     throw err;
-  }
-  if (template.tagMode && (!options.tagKey || !options.tagNamespace)) {
-    throw validationError("tagMode requires both tagKey and tagNamespace");
-  }
-  const idMode = options.mapping?.idMode ?? "sequence";
-  const contextId = options.mapping?.tagContextId ?? "";
-  if (idMode === "derived" && (!options.tagKey || contextId === "")) {
-    throw validationError("idMode 'derived' requires both tagKey and tagContextId");
   }
 
   const recognition: ResolvedRecognition = {
@@ -154,10 +154,8 @@ export function resolvePrivacyConfig(options: PrivacyOptions): ResolvedPrivacyCo
     coverage: normalizeCoverage(coverageInput),
     template,
     tagMode: template.tagMode,
-    tagBytes: template.tagBytes,
-    idMode,
-    contextId,
-    escape: options.mapping?.escape ?? true,
+    tagLength: template.tagLength,
+    escape: options.mapping?.escape ?? false,
     namespace: options.tagNamespace ?? "",
     resolveTagKey: options.tagKey,
     system: options.system ?? "default",

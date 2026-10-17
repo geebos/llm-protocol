@@ -7,14 +7,17 @@
  * that is a substring of a placeholder never triggers a false positive
  * (PT-65). `policy` honours `allow` channels; `strict` overrides them.
  *
+ * Placeholder-shaped literals are not rejected: only registered tokens can
+ * restore, so an unregistered shape carries no value and forwarding it leaks
+ * nothing. This removes the false rejections that made external text fail
+ * closed (docs/06 §1.1).
+ *
  * A failure lists the structural location and a MASKED form of the leaked
  * value (`1*********0`), so operators can locate the leak without the raw
  * value ever appearing in the diagnostic (INV-3).
  */
 import type { ResolvedPrivacyConfig } from "./config.js";
 import { guard } from "./errors.js";
-import { escapeStep } from "./escape.js";
-import { scanTemplateShape, type CompiledTemplate } from "./template.js";
 import { createPlaceholderMatcher } from "./trie.js";
 import type { PrivacySession } from "./session.js";
 
@@ -91,71 +94,18 @@ function sanitizePath(path: string, originals: string[], minLength: number): str
 }
 
 /**
- * Reject any template shape that is neither a registered token nor an escaped
- * literal. Escaped literals (`\<shape>`) are expected engine output and are
- * skipped, so external text matching the placeholder format no longer trips
- * the egress check (docs/06 §12).
- */
-function assertNoForeignShape(
-  text: string,
-  path: string,
-  matcher: ReturnType<typeof createPlaceholderMatcher>,
-  template: CompiledTemplate,
-  placeholders: Set<string>,
-): void {
-  let i = 0;
-  while (i < text.length) {
-    const esc = escapeStep(template, text, i);
-    if (esc) {
-      i = esc.kind === "emit" ? esc.end : i + 1;
-      continue;
-    }
-    const match = matcher.matchAt(text, i, true);
-    if (match.kind === "match") {
-      i = match.end;
-      continue;
-    }
-    if (text[i] === template.prefix[0]) {
-      const end = scanTemplateShape(template, text, i);
-      if (end !== undefined) {
-        const shape = text.slice(i, end);
-        if (!placeholders.has(shape)) {
-          guard(
-            "privacy_unknown_placeholder",
-            `An unrecognized placeholder shape reached the outbound payload at ${path || "<root>"}`,
-          );
-        }
-        i = end;
-        continue;
-      }
-    }
-    i++;
-  }
-}
-
-/**
- * Verify the final outbound payload. Throws `PrivacyGuardError` on a leak or
- * an engine-unknown placeholder shape.
+ * Verify the final outbound payload. Throws `PrivacyGuardError` when an
+ * identified original survived outside a redacted channel.
  */
 export function verifyEgress(
   payload: unknown,
   session: PrivacySession,
   config: ResolvedPrivacyConfig,
   allowTexts: string[],
-  exemptTexts: string[] = [],
 ): void {
   const entries = session.entries();
   if (entries.length === 0) return;
-  const placeholders = new Set(entries.map((e) => e.placeholder));
   const matcher = createPlaceholderMatcher(config.template, entries);
-  // Texts that opted out of shape scanning (reasoning, injected notice): a
-  // foreign shape there is engine-authored or never restored, so it is not
-  // rejected. Containment covers payloads that join the text into a larger
-  // system string.
-  const exempt = exemptTexts.filter((text) => text !== "");
-  const isExempt = (value: string): boolean =>
-    value !== "" && exempt.some((text) => value.includes(text));
-
   const allowedOriginals = new Set<string>();
   if (config.egress === "policy") {
     for (const entry of entries) {
@@ -183,11 +133,6 @@ export function verifyEgress(
       seen.add(dedupe);
       const safePath = sanitizePath(path, originals, config.minEgressValueLength);
       leaks.push(`${safePath} (${entry.type}: ${maskValue(entry.original)})`);
-    }
-    // A template-shaped literal that this engine neither generated nor
-    // escaped is not trusted: reject rather than forward it upstream.
-    if (!isExempt(value)) {
-      assertNoForeignShape(value, path, matcher, config.template, placeholders);
     }
   }
 

@@ -25,6 +25,7 @@ export function restoreResponse(
   template: CompiledTemplate,
   maxPlaceholderLength: number,
   maxToolArgumentBytes = 1024 * 1024,
+  escape = false,
 ): RestoreCounts {
   const entries = session.snapshot();
   const counts: RestoreCounts = {
@@ -36,7 +37,7 @@ export function restoreResponse(
   if (entries.length === 0) return counts;
 
   const restoreField = (value: string): string => {
-    const result = restoreString(value, template, entries, maxPlaceholderLength);
+    const result = restoreString(value, template, entries, maxPlaceholderLength, escape);
     counts.unknown += result.unknown;
     counts.restored += result.matched;
     counts.warnings.push(...result.warnings);
@@ -67,6 +68,7 @@ export function restoreResponse(
             template,
             entries,
             maxPlaceholderLength,
+            escape,
           );
           if (result.parseFailed) {
             counts.jsonParseFailures++;

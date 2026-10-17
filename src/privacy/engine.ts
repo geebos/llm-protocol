@@ -31,13 +31,11 @@ export function createPrivacyEngine(): PrivacyEngine {
       mapping: {
         template: options.template,
         tagMode: options.tagMode,
-        tagBytes: options.tagBytes,
+        tagLength: options.tagLength,
       },
     });
     const session = new PrivacySession(id ?? randomUUID(), {
       compiled: resolved.template,
-      tagMode: resolved.tagMode,
-      tagBytes: resolved.tagBytes,
       namespace: resolved.namespace,
     });
     sessions.set(session.id, session);
@@ -76,7 +74,7 @@ export function createPrivacyEngine(): PrivacyEngine {
         mapping: {
           template: active.compiled.raw,
           tagMode: active.compiled.tagMode,
-          tagBytes: active.compiled.tagBytes,
+          tagLength: active.compiled.tagLength,
         },
       });
       const holder = { value: text };

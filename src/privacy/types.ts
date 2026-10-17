@@ -70,24 +70,26 @@ export interface PrivacyCoveragePolicy {
 }
 
 export interface PrivacyMappingOptions {
-  /** Default `<private_placeholder_{type}_{N}>`. Must be unambiguous. */
-  template?: string;
-  /** Include a versioned HMAC tag in the placeholder (default false). */
-  tagMode?: boolean;
-  /** HMAC tag length in bytes; must be >= 12 (>=96-bit). Default 12. */
-  tagBytes?: number;
   /**
-   * Placeholder identifier mode. `sequence` (default) numbers tokens in IR
-   * document order; `derived` derives the number from an HMAC so the same
-   * (context, type, value) is stable across requests. `derived` requires
-   * `tagKey` and `tagContextId` (docs/06 §10.2).
+   * Placeholder template. Default `<private_placeholder_{type}-{tag}>` in tag
+   * mode, or `<private_placeholder_{type}_{N}>` in legacy numbered mode.
    */
-  idMode?: "sequence" | "derived";
-  /** Stable context id for `idMode: "derived"`; must not vary per request. */
-  tagContextId?: string;
+  template?: string;
   /**
-   * Reversible escaping of external literal text (docs/06). Default true.
-   * When disabled the legacy fail-closed collision behaviour is restored.
+   * Tag mode (default `true`): the token carries an HMAC tag derived from
+   * `(type, value)`, so a token is self-identifying and needs no counter.
+   * Disabling it falls back to legacy numbered tokens (docs/06 §10.2).
+   */
+  tagMode?: boolean;
+  /** Tag length in base32 characters. Default 5. */
+  tagLength?: number;
+  /**
+   * Reversible escaping of external literal text (docs/06 §7).
+   *
+   * Default `false`: literal text is never rewritten, so backslashes, code and
+   * placeholder-shaped literals reach the model byte-identical. Enabling it
+   * restores the legacy escaping behaviour (and its fail-closed checks) for
+   * callers that still depend on it.
    */
   escape?: boolean;
 }
@@ -148,7 +150,7 @@ export interface PrivacySessionView {
 export interface PrivacySessionOptions {
   template?: string;
   tagMode?: boolean;
-  tagBytes?: number;
+  tagLength?: number;
 }
 
 export interface PrivacyEngine {

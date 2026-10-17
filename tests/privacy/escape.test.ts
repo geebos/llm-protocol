@@ -1,19 +1,22 @@
 /**
- * Provenance-aware reversible escaping (docs/06). Covers PE-01..PE-05/PE-13.
+ * Legacy provenance escaping (docs/06 §7) — opt-in.
  *
- * External literals that look like placeholders are escaped on the request and
- * decoded on the response (single pass, `D(E(x)) = x`), so they no longer fail
- * closed as collisions or unknown shapes.
+ * Escaping is no longer the default: literal text is never rewritten unless
+ * `mapping.escape: true` is requested. These tests pin the legacy contract
+ * (`D(E(x)) = x`, single pass, non-recursive) and the default byte-identity
+ * guarantee (INV-A1).
  */
 import { describe, expect, it } from "vitest";
 import { translate } from "../../src/index.js";
 import type { PrivacyCompletionReport, PrivacyRecognizer } from "../../src/index.js";
-import { compileTemplate } from "../../src/privacy/template.js";
+import { compileTemplate, LEGACY_TEMPLATE } from "../../src/privacy/template.js";
 import { escapeLiteral, escapeStep } from "../../src/privacy/escape.js";
 import { restoreJsonText, restoreText } from "../../src/privacy/restore.js";
 import { createPlaceholderMatcher } from "../../src/privacy/trie.js";
 
-const compiled = compileTemplate("<private_placeholder_{type}_{N}>");
+const BS = String.fromCharCode(92);
+const compiled = compileTemplate(LEGACY_TEMPLATE, { tagMode: false });
+const SHAPE = "<private_placeholder_phone_1>";
 
 function phoneRecognizer(): PrivacyRecognizer {
   return {
@@ -30,19 +33,18 @@ function phoneRecognizer(): PrivacyRecognizer {
   };
 }
 
-const entries = [
-  { placeholder: "<private_placeholder_phone_1>", original: "13800138000" },
-];
+const entries = [{ placeholder: SHAPE, original: "13800138000" }];
 
-function restoreAll(text: string): string {
+function restoreAll(text: string, escape = true): string {
   const result = restoreText(text, createPlaceholderMatcher(compiled, entries), compiled, {
     final: true,
     maxPlaceholderLength: 128,
+    escape,
   });
   return result.out + result.rest;
 }
 
-/** Feed chunk by chunk through the streaming decoder (shared FST). */
+/** Feed chunk by chunk through the shared streaming decoder. */
 function restoreChunked(chunks: string[]): string {
   const matcher = createPlaceholderMatcher(compiled, entries);
   let buffer = "";
@@ -53,6 +55,7 @@ function restoreChunked(chunks: string[]): string {
     const result = restoreText(buffer, matcher, compiled, {
       final,
       maxPlaceholderLength: 128,
+      escape: true,
     });
     out += result.out;
     buffer = result.rest;
@@ -63,59 +66,51 @@ function restoreChunked(chunks: string[]): string {
 describe("escapeLiteral", () => {
   it("prefix-escapes only template shapes and doubles backslashes (PE-04)", () => {
     expect(escapeLiteral(compiled, "hello")).toBe("hello");
-    expect(escapeLiteral(compiled, "\\")).toBe("\\\\");
+    expect(escapeLiteral(compiled, BS)).toBe(BS + BS);
     expect(escapeLiteral(compiled, "<not a shape>")).toBe("<not a shape>");
-    expect(escapeLiteral(compiled, "<private_placeholder_phone_1>")).toBe(
-      "\\<private_placeholder_phone_1>",
-    );
-    expect(escapeLiteral(compiled, "\\<private_placeholder_phone_1>")).toBe(
-      "\\\\\\<private_placeholder_phone_1>",
-    );
+    expect(escapeLiteral(compiled, SHAPE)).toBe(BS + SHAPE);
+    expect(escapeLiteral(compiled, BS + SHAPE)).toBe(BS + BS + BS + SHAPE);
   });
 
   it("reports need_more for a bare trailing escape (PE-05)", () => {
-    expect(escapeStep(compiled, "\\", 0)).toEqual({ kind: "need_more" });
-    expect(escapeStep(compiled, "\\\\", 0)).toEqual({
-      kind: "emit",
-      text: "\\",
-      end: 2,
-    });
-    expect(escapeStep(compiled, "\\<", 0)).toEqual({ kind: "emit", text: "<", end: 2 });
+    expect(escapeStep(compiled, BS, 0)).toEqual({ kind: "need_more" });
+    expect(escapeStep(compiled, BS + BS, 0)).toEqual({ kind: "emit", text: BS, end: 2 });
+    expect(escapeStep(compiled, BS + "<", 0)).toEqual({ kind: "emit", text: "<", end: 2 });
   });
 });
 
 describe("escape-aware restore", () => {
   it("restores registered tokens and decodes escaped literals (PE-01/PE-13)", () => {
-    expect(restoreAll("<private_placeholder_phone_1>")).toBe("13800138000");
+    expect(restoreAll(SHAPE)).toBe("13800138000");
     // An escaped registered placeholder stays a literal and is never restored.
-    expect(restoreAll("\\<private_placeholder_phone_1>")).toBe(
-      "<private_placeholder_phone_1>",
-    );
-    expect(
-      restoreAll("<private_placeholder_phone_1> and \\<private_placeholder_phone_1>"),
-    ).toBe("13800138000 and <private_placeholder_phone_1>");
+    expect(restoreAll(BS + SHAPE)).toBe(SHAPE);
+    expect(restoreAll(`${SHAPE} and ${BS}${SHAPE}`)).toBe(`13800138000 and ${SHAPE}`);
+  });
+
+  it("does not decode escapes when escaping is disabled", () => {
+    // The backslash stays literal; the registered token still restores.
+    expect(restoreAll(BS + SHAPE, false)).toBe(BS + "13800138000");
+    expect(restoreAll(BS + "hello", false)).toBe(BS + "hello");
   });
 
   it("is chunk-invariant across an escape boundary (PE-05)", () => {
-    const text = "A \\<private_placeholder_phone_1> B";
-    expect(restoreChunked([text])).toBe("A <private_placeholder_phone_1> B");
-    expect(restoreChunked(["A \\", "<private_placeholder_phone_1> B"])).toBe(
-      "A <private_placeholder_phone_1> B",
-    );
-    expect(restoreChunked(["A ", "\\", "<private_", "placeholder_phone_1>", " B"])).toBe(
-      "A <private_placeholder_phone_1> B",
+    const text = `A ${BS}${SHAPE} B`;
+    expect(restoreChunked([text])).toBe(`A ${SHAPE} B`);
+    expect(restoreChunked([`A ${BS}`, `${SHAPE} B`])).toBe(`A ${SHAPE} B`);
+    expect(restoreChunked(["A ", BS, "<private_", "placeholder_phone_1>", " B"])).toBe(
+      `A ${SHAPE} B`,
     );
   });
 
   it("decodes escaped values inside JSON tool arguments (PE-01)", () => {
-    const arg = JSON.stringify({ note: "\\<private_placeholder_phone_1>" });
-    const result = restoreJsonText(arg, compiled, entries, 128);
+    const arg = JSON.stringify({ note: BS + SHAPE });
+    const result = restoreJsonText(arg, compiled, entries, 128, true);
     expect(result.parseFailed).toBe(false);
-    expect(JSON.parse(result.text)).toEqual({ note: "<private_placeholder_phone_1>" });
+    expect(JSON.parse(result.text)).toEqual({ note: SHAPE });
   });
 });
 
-describe("escaped literals through translate", () => {
+describe("literal text through translate", () => {
   function capturingFetch(): { fetch: typeof fetch; lastBody: () => unknown } {
     let body: unknown;
     const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -149,11 +144,12 @@ describe("escaped literals through translate", () => {
     };
   }
 
-  it("escapes an external literal that equals the generated placeholder (PE-02)", async () => {
+  it("leaves literal text byte-identical by default (INV-A1)", async () => {
     let report: PrivacyCompletionReport | undefined;
     const cap = capturingFetch();
+    const literal = `note ${SHAPE} and C:${BS}tmp${BS}x ${BS}d{11}`;
     const response = await translate.chat.messages({
-      ...options("call 13800138000 and note <private_placeholder_phone_1>"),
+      ...options(`call 13800138000 and ${literal}`),
       fetch: cap.fetch,
       privacy: { recognizers: [phoneRecognizer()] },
       onPrivacyComplete: (r) => {
@@ -161,28 +157,47 @@ describe("escaped literals through translate", () => {
       },
     });
     const outbound = JSON.stringify(cap.lastBody());
+    // The sensitive value is gone, everything else is untouched.
     expect(outbound).not.toContain("13800138000");
-    // The external literal is prefix-escaped (backslash encoded as \\ in JSON).
-    expect(outbound).toContain("\\\\<private_placeholder_phone_1>");
+    const sent = cap.lastBody() as { messages: { content: string }[] };
+    const content = sent.messages[0].content;
+    const token = /<private_placeholder_phone-[a-z2-7]{5}>/.exec(content);
+    expect(token).not.toBeNull();
+    // Replacing the token with a marker reproduces the input verbatim: no
+    // escape character was inserted and no backslash was doubled.
+    expect(content.replace(token![0], "{p}")).toBe(`call {p} and ${literal}`);
+    const body = (await response.json()) as {
+      choices: { message: { content: string } }[];
+    };
+    expect(body.choices[0].message.content).toBe("call 13800138000 today");
+    expect(report?.redacted).toBe(1);
+    expect(report?.escaped).toBe(0);
+  });
+
+  it("still escapes when legacy escaping is enabled (PE-02)", async () => {
+    let report: PrivacyCompletionReport | undefined;
+    const cap = capturingFetch();
+    const response = await translate.chat.messages({
+      ...options(`call 13800138000 and note ${SHAPE}`),
+      fetch: cap.fetch,
+      privacy: {
+        recognizers: [phoneRecognizer()],
+        mapping: { escape: true, tagMode: false, template: LEGACY_TEMPLATE },
+      },
+      onPrivacyComplete: (r) => {
+        report = r;
+      },
+    });
+    const sent = cap.lastBody() as { messages: { content: string }[] };
+    // The external literal is prefix-escaped in the model-visible text.
+    expect(sent.messages[0].content).toBe(
+      `call ${SHAPE} and note ${BS}${SHAPE}`,
+    );
     const body = (await response.json()) as {
       choices: { message: { content: string } }[];
     };
     expect(body.choices[0].message.content).toBe("call 13800138000 today");
     expect(report?.redacted).toBe(1);
     expect(report?.escaped).toBe(1);
-  });
-
-  it("still fails closed when escaping is disabled (PE-15)", async () => {
-    const cap = capturingFetch();
-    await expect(
-      translate.chat.messages({
-        ...options("call 13800138000 and note <private_placeholder_phone_1>"),
-        fetch: cap.fetch,
-        privacy: {
-          recognizers: [phoneRecognizer()],
-          mapping: { escape: false },
-        },
-      }),
-    ).rejects.toMatchObject({ kind: "privacy", code: "privacy_placeholder_collision" });
   });
 });

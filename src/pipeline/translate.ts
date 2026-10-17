@@ -91,7 +91,6 @@ export async function translateCall(
   let privacyConfig: ResolvedPrivacyConfig | undefined;
   let privacySession: PrivacySession | undefined;
   let allowTexts: string[] = [];
-  let exemptTexts: string[] = [];
   let extensionProofs: ExtensionPrivacyProof[] = [];
   let privacyRequestTrace: PrivacyRequestTrace | undefined;
   let privacyFinalized = false;
@@ -225,7 +224,6 @@ export async function translateCall(
       reportState.invalidDetections = outcome.invalidDetections;
       reportState.degraded = reportState.degraded || outcome.degraded;
       allowTexts = outcome.allowTexts;
-      exemptTexts = outcome.exemptTexts;
       extensionProofs = outcome.extensionProofs;
       privacyRequestTrace = {
         sessionId: logid,
@@ -234,7 +232,6 @@ export async function translateCall(
       };
       for (const warning of outcome.warnings) pushPrivacyWarning(warning);
       const notice = injectSystemNotice(canonicalRequest, privacyConfig);
-      if (notice) exemptTexts = [...exemptTexts, notice];
     }
 
     const cacheEnabled = options.cache !== undefined && target.format === "openai-chat";
@@ -291,7 +288,7 @@ export async function translateCall(
           ctx.extensionDispositions,
           extensionProofs,
         );
-        verifyEgress(outboundPayload, privacySession, privacyConfig, allowTexts, exemptTexts);
+        verifyEgress(outboundPayload, privacySession, privacyConfig, allowTexts);
       } catch (err) {
         throw normalizePrivacyError(err);
       }
@@ -410,6 +407,7 @@ export async function translateCall(
         privacyConfig.template,
         privacyConfig.streaming.maxPlaceholderLength,
         privacyConfig.streaming.maxToolArgumentBytes,
+        privacyConfig.escape,
       );
       reportState.restored += counts.restored;
       reportState.unknown += counts.unknown;
@@ -512,12 +510,8 @@ async function materializePrivacySession(
   const tagKey = config.resolveTagKey ? await config.resolveTagKey() : undefined;
   return new PrivacySession(sessionId, {
     compiled: config.template,
-    tagMode: config.tagMode,
-    tagBytes: config.tagBytes,
     namespace: config.namespace,
     tagKey,
-    idMode: config.idMode,
-    contextId: config.contextId,
   });
 }
 
@@ -805,6 +799,7 @@ function restoreClientErrorText(
     config.template,
     session.snapshot(),
     config.streaming.maxPlaceholderLength,
+    config.escape,
   ).text;
 }
 

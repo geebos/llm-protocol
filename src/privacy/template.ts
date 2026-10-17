@@ -1,32 +1,45 @@
 /**
- * Placeholder template compile / render / parse and HMAC tag (Appendix C).
+ * Placeholder template compile / render / parse and token tag.
  *
- * Templates are compiled once and must be unambiguous. The grammar is
- *   prefix {type} mid1 {N} [mid2 {tag}] suffix
- * and is parsed with suffix anchoring: the trailing literal (and tag) are
- * stripped first, then `N` is the trailing digit run, then `mid1` (whose last
- * character must not be a digit), then `{type}`. Dynamic tokens must be
- * separated by at least one literal character and the literal prefix must be
- * non-empty; adjacent dynamic tokens (e.g. `PII-{type}{N}`) are rejected
- * (PT-68).
+ * A token's identity is its `{tag}`: a short base32 digest of
+ * `HMAC-SHA256(key, namespace, type, value)`. The same `(type, value)` yields
+ * the same token inside one session, and a caller-supplied stable key makes it
+ * stable across requests — so no counter (`{N}`) is needed.
+ *
+ * Grammar:
+ *   prefix {type} mid1 [ {N} mid2 ] {tag} suffix   (tag mode, default)
+ *   prefix {type} mid1 {N} suffix                  (legacy numbered mode)
+ *
+ * The grammar must stay unambiguous. In tag mode `{tag}` is required and is
+ * parsed by stripping the fixed-length trailing tag run first; in legacy mode
+ * `{N}` is required and is parsed by anchoring on the trailing digit run, which
+ * is why `mid1` may not end with a digit there.
  */
 import { createHmac } from "node:crypto";
 
-export const DEFAULT_TEMPLATE = "<private_placeholder_{type}_{N}>";
-export const DEFAULT_TAG_BYTES = 12;
-/** Frozen HMAC domain separation string (v1.6). */
+/** Default template (tag mode): identity comes from the tag, not a counter. */
+export const DEFAULT_TEMPLATE = "<private_placeholder_{type}-{tag}>";
+/** Legacy numbered template; used only when `tagMode` is disabled. */
+export const LEGACY_TEMPLATE = "<private_placeholder_{type}_{N}>";
+/** Default tag length in characters (base32, 5 chars = 25 bits). */
+export const DEFAULT_TAG_LENGTH = 5;
+/** Frozen HMAC domain separation string. */
 export const TAG_DOMAIN = "llm-protocol-privacy-v1";
 
 const TYPE_RE = /^[a-z0-9_]+$/;
 const TYPE_CHARS = /[a-z0-9_]/;
 const DIGIT_CHARS = /[0-9]/;
-const HEX_CHARS = /[0-9a-fA-F]/;
+/** Tag alphabet: RFC 4648 base32, lowercase, no padding. */
+const TAG_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+const TAG_CHARS = /[a-z2-7]/;
 /**
  * Upper bound on the literal `type` run considered by `scanTemplateShape`.
  * Real types are `<= maxTypeLength` (default 32); the cap keeps a buffer full
  * of prefixes from triggering quadratic scanning on adversarial input.
  */
 const MAX_TYPE_SCAN = 128;
+const MIN_TAG_LENGTH = 4;
+const MAX_TAG_LENGTH = 64;
 
 /** Template literal characters that cannot appear (Appendix B rule 5). */
 const FORBIDDEN_LITERAL = /["\\\u0000-\u001f\u007f]/;
@@ -35,14 +48,18 @@ export interface CompiledTemplate {
   raw: string;
   /** Literal before `{type}`. */
   prefix: string;
-  /** Literal between `{type}` and `{N}`. */
+  /** Literal between `{type}` and `{N}`/`{tag}`. */
   mid1: string;
-  /** Literal between `{N}` and `{tag}` (empty when not in tagMode). */
+  /** Literal between `{N}` and `{tag}` (empty unless both are present). */
   mid2: string;
-  /** Literal after `{tag}` (or after `{N}` when not in tagMode). */
+  /** Literal after the last dynamic token. */
   suffix: string;
+  /** Tag mode: the token carries an HMAC tag (default). */
   tagMode: boolean;
-  tagBytes: number;
+  /** Whether the template carries a legacy `{N}` counter. */
+  hasN: boolean;
+  /** Tag length in characters (0 when not in tag mode). */
+  tagLength: number;
   /** Whether the template contains only printable ASCII. */
   ascii: boolean;
 }
@@ -72,10 +89,10 @@ function occurrences(haystack: string, needle: string): number {
  */
 export function compileTemplate(
   raw: string,
-  options: { tagMode?: boolean; tagBytes?: number } = {},
+  options: { tagMode?: boolean; tagLength?: number } = {},
 ): CompiledTemplate {
-  const tagMode = options.tagMode ?? false;
-  const tagBytes = options.tagBytes ?? DEFAULT_TAG_BYTES;
+  const tagMode = options.tagMode ?? true;
+  const tagLength = options.tagLength ?? DEFAULT_TAG_LENGTH;
   if (typeof raw !== "string" || raw === "") {
     throw new TemplateError("template_empty", "template must be a non-empty string");
   }
@@ -85,41 +102,61 @@ export function compileTemplate(
       "template must not contain quotes, backslashes, control characters or newlines",
     );
   }
-  if (!Number.isInteger(tagBytes) || tagBytes < DEFAULT_TAG_BYTES) {
+  if (
+    tagMode &&
+    (!Number.isInteger(tagLength) || tagLength < MIN_TAG_LENGTH || tagLength > MAX_TAG_LENGTH)
+  ) {
     throw new TemplateError(
-      "template_tag_bytes",
-      "tagBytes must be an integer >= 12 (>=96-bit)",
+      "template_tag_length",
+      `tagLength must be an integer in [${MIN_TAG_LENGTH}, ${MAX_TAG_LENGTH}]`,
     );
   }
 
   const typeCount = occurrences(raw, "{type}");
   const nCount = occurrences(raw, "{N}");
   const tagCount = occurrences(raw, "{tag}");
-  if (typeCount !== 1) throw new TemplateError("template_type_count", "{type} must occur exactly once");
-  if (nCount !== 1) throw new TemplateError("template_n_count", "{N} must occur exactly once");
+  if (typeCount !== 1) {
+    throw new TemplateError("template_type_count", "{type} must occur exactly once");
+  }
+  if (nCount > 1) {
+    throw new TemplateError("template_n_count", "{N} must occur at most once");
+  }
   if (tagMode && tagCount !== 1) {
     throw new TemplateError("template_tag_count", "tagMode requires {tag} exactly once");
   }
-  if (!tagMode && tagCount !== 0) {
-    throw new TemplateError("template_unexpected_tag", "{tag} requires tagMode");
+  if (!tagMode) {
+    if (tagCount !== 0) {
+      throw new TemplateError("template_unexpected_tag", "{tag} requires tagMode");
+    }
+    if (nCount !== 1) {
+      throw new TemplateError("template_n_count", "numbered mode requires {N} exactly once");
+    }
   }
 
   const idxType = raw.indexOf("{type}");
   const idxN = raw.indexOf("{N}");
   const idxTag = raw.indexOf("{tag}");
-  if (idxType > idxN) {
+  const hasN = nCount === 1;
+  if (hasN && idxType > idxN) {
     throw new TemplateError("template_token_order", "{type} must precede {N}");
   }
-  if (tagMode && idxN > idxTag) {
+  if (tagMode && hasN && idxN > idxTag) {
     throw new TemplateError("template_token_order", "{N} must precede {tag}");
   }
 
   const prefix = raw.slice(0, idxType);
-  const mid1 = raw.slice(idxType + "{type}".length, idxN);
-  const mid2 = tagMode ? raw.slice(idxN + "{N}".length, idxTag) : "";
+  const afterType = idxType + "{type}".length;
+  const mid1 = hasN
+    ? raw.slice(afterType, idxN)
+    : tagMode
+      ? raw.slice(afterType, idxTag)
+      : raw.slice(afterType);
+  const mid2 = hasN && tagMode ? raw.slice(idxN + "{N}".length, idxTag) : "";
   const suffix = tagMode
     ? raw.slice(idxTag + "{tag}".length)
-    : raw.slice(idxN + "{N}".length);
+    : hasN
+      ? raw.slice(idxN + "{N}".length)
+      : raw.slice(afterType + mid1.length);
 
   const stripped = raw
     .replace("{type}", "")
@@ -131,13 +168,19 @@ export function compileTemplate(
   if (prefix === "") {
     throw new TemplateError("template_no_prefix", "template must start with a literal prefix");
   }
-  if (mid1 === "" || DIGIT_CHARS.test(mid1[mid1.length - 1])) {
+  if (mid1 === "") {
+    throw new TemplateError(
+      "template_ambiguous",
+      "a literal separator is required between {type} and the next token",
+    );
+  }
+  if (hasN && DIGIT_CHARS.test(mid1[mid1.length - 1])) {
     throw new TemplateError(
       "template_ambiguous",
       "a literal separator not ending in a digit is required between {type} and {N}",
     );
   }
-  if (tagMode && mid2 === "") {
+  if (hasN && tagMode && mid2 === "") {
     throw new TemplateError(
       "template_ambiguous",
       "a literal separator is required between {N} and the tag",
@@ -151,7 +194,8 @@ export function compileTemplate(
     mid2,
     suffix,
     tagMode,
-    tagBytes,
+    hasN,
+    tagLength: tagMode ? tagLength : 0,
     ascii: /^[\x20-\x7e]*$/.test(raw),
   };
 }
@@ -159,21 +203,20 @@ export function compileTemplate(
 export function renderPlaceholder(
   compiled: CompiledTemplate,
   type: string,
-  n: number,
+  n?: number,
   tag?: string,
 ): string {
-  return (
-    compiled.prefix +
-    type +
-    compiled.mid1 +
-    String(n) +
-    (compiled.tagMode ? compiled.mid2 + (tag ?? "") + compiled.suffix : compiled.suffix)
-  );
+  if (!compiled.hasN) {
+    return compiled.prefix + type + compiled.mid1 + (tag ?? "") + compiled.suffix;
+  }
+  const core = type + compiled.mid1 + (n === undefined ? "" : String(n));
+  if (!compiled.tagMode) return compiled.prefix + core + compiled.suffix;
+  return compiled.prefix + core + compiled.mid2 + (tag ?? "") + compiled.suffix;
 }
 
 export interface ParsedPlaceholder {
   type: string;
-  n: number;
+  n?: number;
   tag?: string;
 }
 
@@ -191,24 +234,34 @@ export function parsePlaceholder(
     if (!text.endsWith(compiled.suffix)) return undefined;
     coreEnd -= compiled.suffix.length;
   }
+  if (coreEnd < compiled.prefix.length) return undefined;
   return parseCore(compiled, text.slice(compiled.prefix.length, coreEnd));
 }
 
-/** Parse `type + mid1 + N [+ mid2 + tag]` after prefix/suffix stripping. */
+/** Parse `type + mid1 + N + mid2 + tag` after prefix/suffix stripping. */
 function parseCore(
   compiled: CompiledTemplate,
   core: string,
 ): ParsedPlaceholder | undefined {
-  let tag: string | undefined;
   let rest = core;
+  let tag: string | undefined;
   if (compiled.tagMode) {
-    const tagLength = compiled.tagBytes * 2;
+    const tagLength = compiled.tagLength;
     if (rest.length < tagLength) return undefined;
-    tag = rest.slice(rest.length - tagLength).toLowerCase();
-    if (![...tag].every((c) => HEX_CHARS.test(c))) return undefined;
+    tag = rest.slice(rest.length - tagLength);
+    if (![...tag].every((c) => TAG_CHARS.test(c))) return undefined;
     rest = rest.slice(0, rest.length - tagLength);
-    if (!rest.endsWith(compiled.mid2)) return undefined;
-    rest = rest.slice(0, rest.length - compiled.mid2.length);
+    if (compiled.hasN) {
+      if (rest.length < compiled.mid2.length) return undefined;
+      if (!rest.endsWith(compiled.mid2)) return undefined;
+      rest = rest.slice(0, rest.length - compiled.mid2.length);
+    }
+  }
+  if (!compiled.hasN) {
+    if (!rest.endsWith(compiled.mid1)) return undefined;
+    const type = rest.slice(0, rest.length - compiled.mid1.length);
+    if (!TYPE_RE.test(type)) return undefined;
+    return { type, tag };
   }
   let digitStart = rest.length;
   while (digitStart > 0 && DIGIT_CHARS.test(rest[digitStart - 1])) digitStart--;
@@ -224,25 +277,32 @@ function parseCore(
   return tag === undefined ? { type, n } : { type, n, tag };
 }
 
-export function placeholderTag(
+/**
+ * Token tag: the first `tagLength` base32 characters of
+ * `HMAC-SHA256(K, domain || 0x00 || namespace || type || value [|| salt])`.
+ *
+ * `salt` only advances when two distinct values of the same type collide on the
+ * truncated digest, so allocation stays deterministic within a session.
+ */
+export function tokenTag(
   key: Uint8Array,
   namespace: string,
   type: string,
   original: string,
-  tagBytes: number,
+  tagLength: number,
+  salt = 0,
 ): string {
   const hmac = createHmac("sha256", key);
   hmac.update(TAG_DOMAIN, "utf8");
   hmac.update(Uint8Array.of(0));
   hmac.update(namespace, "utf8");
-  hmac.update(Uint8Array.of(0));
-  hmac.update(type, "utf8");
-  hmac.update(Uint8Array.of(0));
-  hmac.update(original, "utf8");
-  return hmac.digest("hex").slice(0, tagBytes * 2);
+  updateLengthPrefixed(hmac, type);
+  updateLengthPrefixed(hmac, original);
+  if (salt > 0) updateLengthPrefixed(hmac, String(salt));
+  return base32(hmac.digest(), tagLength);
 }
 
-/** Length-prefixed update so the HMAC domain is unambiguous (docs/06 §10.2). */
+/** Length-prefixed update so the HMAC domain is unambiguous. */
 function updateLengthPrefixed(
   hmac: ReturnType<typeof createHmac>,
   value: string,
@@ -254,25 +314,21 @@ function updateLengthPrefixed(
   hmac.update(bytes);
 }
 
-/**
- * Deterministic placeholder number for `idMode: "derived"`:
- * `N = 1 + first 48 bits of HMAC-SHA256(K, domain || len(ContextID) || Type || Value)`.
- * The same `(contextId, type, original)` yields the same `N` across requests;
- * caller-side collision probing increments it (docs/06 §10.2).
- */
-export function derivedPlaceholderN(
-  key: Uint8Array,
-  contextId: string,
-  type: string,
-  original: string,
-): number {
-  const hmac = createHmac("sha256", key);
-  hmac.update(TAG_DOMAIN, "utf8");
-  updateLengthPrefixed(hmac, contextId);
-  updateLengthPrefixed(hmac, type);
-  updateLengthPrefixed(hmac, original);
-  const digest = hmac.digest();
-  return digest.readUIntBE(0, 6) + 1;
+/** First `length` base32 (RFC 4648, lowercase, unpadded) characters. */
+function base32(digest: Uint8Array, length: number): string {
+  let out = "";
+  let bits = 0;
+  let acc = 0;
+  for (const byte of digest) {
+    acc = ((acc << 8) | byte) & 0xfffff;
+    bits += 8;
+    while (bits >= 5 && out.length < length) {
+      out += TAG_ALPHABET[(acc >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+    if (out.length >= length) break;
+  }
+  return out;
 }
 
 /** Reject type strings that cannot round-trip through the template grammar. */
@@ -326,6 +382,12 @@ function isPartialCore(compiled: CompiledTemplate, rest: string): boolean {
   if (!afterType.startsWith(compiled.mid1)) return false;
   const afterMid1 = afterType.slice(compiled.mid1.length);
   if (afterMid1 === "") return true;
+  if (!compiled.hasN) {
+    return (
+      afterMid1.length <= compiled.tagLength &&
+      [...afterMid1].every((c) => TAG_CHARS.test(c))
+    );
+  }
   let j = 0;
   while (j < afterMid1.length && DIGIT_CHARS.test(afterMid1[j])) j++;
   if (j === afterMid1.length) return true;
@@ -333,15 +395,15 @@ function isPartialCore(compiled: CompiledTemplate, rest: string): boolean {
   const afterN = afterMid1.slice(j);
   if (compiled.mid2.startsWith(afterN)) return true;
   if (!afterN.startsWith(compiled.mid2)) return false;
-  const hex = afterN.slice(compiled.mid2.length);
-  return hex.length <= compiled.tagBytes * 2 && [...hex].every((c) => HEX_CHARS.test(c));
+  const tag = afterN.slice(compiled.mid2.length);
+  return tag.length <= compiled.tagLength && [...tag].every((c) => TAG_CHARS.test(c));
 }
 
 /**
  * Scan a template-shaped placeholder (registered or not) starting at `pos`.
- * Returns the end index (exclusive) of the `{type}...{N}` core (including tag
- * when tagMode), or `undefined`. Used by the unknown syntax scanner sharing
- * the registered matcher's safety boundary (PR-022).
+ * Returns the end index (exclusive) of the core (including tag when tag mode),
+ * or `undefined`. Used by the unknown syntax scanner sharing the registered
+ * matcher's safety boundary (PR-022).
  */
 export function scanTemplateShape(
   compiled: CompiledTemplate,
@@ -362,26 +424,35 @@ export function scanTemplateShape(
   while (from <= typeEnd) {
     const m = text.indexOf(compiled.mid1, from);
     if (m === -1 || m > typeEnd) break;
-    let cursor = m + compiled.mid1.length;
-    const nStart = cursor;
-    while (cursor < text.length && DIGIT_CHARS.test(text[cursor])) cursor++;
-    if (cursor > nStart) {
-      let coreEnd: number | undefined;
-      if (compiled.tagMode) {
-        if (text.startsWith(compiled.mid2, cursor)) {
-          const tagStart = cursor + compiled.mid2.length;
-          const tagLength = compiled.tagBytes * 2;
-          const tag = text.slice(tagStart, tagStart + tagLength);
-          if (tag.length === tagLength && [...tag].every((c) => HEX_CHARS.test(c))) {
-            coreEnd = tagStart + tagLength;
+    const cursor = m + compiled.mid1.length;
+    let coreEnd: number | undefined;
+    if (!compiled.hasN) {
+      const tag = text.slice(cursor, cursor + compiled.tagLength);
+      if (tag.length === compiled.tagLength && [...tag].every((c) => TAG_CHARS.test(c))) {
+        coreEnd = cursor + compiled.tagLength;
+      }
+    } else {
+      let nEnd = cursor;
+      while (nEnd < text.length && DIGIT_CHARS.test(text[nEnd])) nEnd++;
+      if (nEnd > cursor) {
+        if (compiled.tagMode) {
+          if (text.startsWith(compiled.mid2, nEnd)) {
+            const tagStart = nEnd + compiled.mid2.length;
+            const tag = text.slice(tagStart, tagStart + compiled.tagLength);
+            if (
+              tag.length === compiled.tagLength &&
+              [...tag].every((c) => TAG_CHARS.test(c))
+            ) {
+              coreEnd = tagStart + compiled.tagLength;
+            }
           }
+        } else {
+          coreEnd = nEnd;
         }
-      } else {
-        coreEnd = cursor;
       }
-      if (coreEnd !== undefined && (best === undefined || coreEnd > best)) {
-        best = coreEnd;
-      }
+    }
+    if (coreEnd !== undefined && (best === undefined || coreEnd > best)) {
+      best = coreEnd;
     }
     from = m + 1;
   }

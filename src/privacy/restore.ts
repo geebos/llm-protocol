@@ -20,6 +20,8 @@ import type { PrivacyWarning } from "./types.js";
 export interface RestoreTextOptions {
   final: boolean;
   maxPlaceholderLength: number;
+  /** Decode legacy prefix escapes (docs/06 §7); off by default. */
+  escape?: boolean;
 }
 
 export interface RestoreTextResult {
@@ -68,9 +70,9 @@ export function restoreText(
   );
 
   while (pos < buffer.length) {
-    // Escaped literal: decode to the original character and never let the
-    // decoded shape trigger a privacy restore (INV-E3/E7).
-    const escape = escapeStep(compiled, buffer, pos);
+    // Escaped literal (legacy opt-in): decode to the original character and
+    // never let the decoded shape trigger a privacy restore (INV-E3/E7).
+    const escape = options.escape === true ? escapeStep(compiled, buffer, pos) : undefined;
     if (escape) {
       if (escape.kind === "need_more") {
         if (!options.final) return holdTail(pos);
@@ -92,14 +94,21 @@ export function restoreText(
     if (result.kind === "need_more") {
       return holdTail(pos);
     }
-    // Not a registered placeholder: check the shared unknown-syntax boundary.
+    // Not a registered placeholder. External literal text that merely looks
+    // like a token is ordinary text (it cannot restore anything), so it passes
+    // through untouched. Only a shape of a type this session actually issued is
+    // reported: that is a mangled token, i.e. the client would receive a raw
+    // placeholder where the original value belonged.
     const shapeEnd = scanTemplateShape(compiled, buffer, pos);
     if (shapeEnd !== undefined) {
-      unknown++;
-      warnings.push({
-        code: "privacy_unknown_placeholder",
-        message: "An unknown placeholder shape was left unrestored",
-      });
+      const shapeText = buffer.slice(pos, shapeEnd);
+      if (isKnownTypeToken(compiled, shapeText, matcher.knownTypes)) {
+        unknown++;
+        warnings.push({
+          code: "privacy_unknown_placeholder",
+          message: "A placeholder of a known type was left unrestored",
+        });
+      }
       out += buffer.slice(pos, shapeEnd);
       pos = shapeEnd;
       continue;
@@ -122,17 +131,35 @@ export function restoreText(
   return { out, rest: "", unknown, matched, warnings };
 }
 
+/**
+ * Whether a scanned shape starts with `prefix + knownType + mid1`. Used to
+ * report tokens the model mangled (truncated, retagged) without flagging
+ * unrelated literal text that merely looks like a placeholder.
+ */
+function isKnownTypeToken(
+  compiled: CompiledTemplate,
+  shapeText: string,
+  knownTypes: Set<string>,
+): boolean {
+  for (const type of knownTypes) {
+    if (shapeText.startsWith(compiled.prefix + type + compiled.mid1)) return true;
+  }
+  return false;
+}
+
 /** Restore placeholders in a plain string against a frozen session snapshot. */
 export function restoreString(
   text: string,
   compiled: CompiledTemplate,
   entries: { placeholder: string; original: string }[],
   maxPlaceholderLength: number,
+  escape = false,
 ): { text: string; unknown: number; matched: number; warnings: PrivacyWarning[] } {
   const matcher = createPlaceholderMatcher(compiled, entries);
   const result = restoreText(text, matcher, compiled, {
     final: true,
     maxPlaceholderLength,
+    escape,
   });
   return {
     text: result.out + result.rest,
@@ -159,6 +186,7 @@ export function restoreJsonText(
   compiled: CompiledTemplate,
   entries: { placeholder: string; original: string }[],
   maxPlaceholderLength: number,
+  escape = false,
 ): JsonRestoreResult {
   let parsed: unknown;
   try {
@@ -175,6 +203,7 @@ export function restoreJsonText(
     const r = restoreText(value, matcher, compiled, {
       final: true,
       maxPlaceholderLength,
+      escape,
     });
     unknown += r.unknown;
     matched += r.matched;

@@ -44,6 +44,8 @@ export interface ToolArgumentsRestoreOptions {
   compiled: CompiledTemplate;
   matcher: PlaceholderMatcher;
   maxPlaceholderLength: number;
+  /** Decode legacy prefix escapes (docs/06 §7); off by default. */
+  escape?: boolean;
   /** Cumulative upstream byte budget for one tool block. */
   maxBytes: number;
   overflowAction: "reject" | "flush_raw";
@@ -195,6 +197,7 @@ export function createToolArgumentsRestorer(
 ): ToolArgumentsRestorer {
   const { compiled, matcher, maxPlaceholderLength, maxBytes, overflowAction, stats, report } =
     options;
+  const decodeEscapes = options.escape === true;
   const prefixHead = compiled.prefix[0];
   const keyTailLimit = maxPlaceholderLength + KEY_TAIL_MARGIN;
   const scalarChars = "0123456789+-.eEtrufalsn";
@@ -262,7 +265,12 @@ export function createToolArgumentsRestorer(
   /** Restore the held value tail and emit it in full (string/block end). */
   function commitValue(): void {
     if (!decoded) return;
-    if (decoded.indexOf(prefixHead) < 0 && decoded.indexOf(ESCAPE_CHAR) < 0) {
+    if (!decodeEscapes && decoded.indexOf(prefixHead) < 0) {
+      emitBody(decoded);
+      decoded = "";
+      return;
+    }
+    if (decodeEscapes && decoded.indexOf(prefixHead) < 0 && decoded.indexOf(ESCAPE_CHAR) < 0) {
       emitBody(decoded);
       decoded = "";
       return;
@@ -270,6 +278,7 @@ export function createToolArgumentsRestorer(
     const result = restoreText(decoded, matcher, compiled, {
       final: true,
       maxPlaceholderLength,
+      escape: decodeEscapes,
     });
     stats.restored += result.matched;
     stats.unknown += result.unknown;
@@ -281,7 +290,13 @@ export function createToolArgumentsRestorer(
   /** Restore the held value tail, emitting only the confirmed prefix. */
   function drainValue(): void {
     if (!decoded) return;
-    if (decoded.indexOf(prefixHead) < 0 && decoded.indexOf(ESCAPE_CHAR) < 0) {
+    if (!decodeEscapes && decoded.indexOf(prefixHead) < 0) {
+      const { out, carry } = splitTrailingHighSurrogate(decoded);
+      emitBody(out);
+      decoded = carry;
+      return;
+    }
+    if (decodeEscapes && decoded.indexOf(prefixHead) < 0 && decoded.indexOf(ESCAPE_CHAR) < 0) {
       const { out, carry } = splitTrailingHighSurrogate(decoded);
       emitBody(out);
       decoded = carry;
@@ -290,6 +305,7 @@ export function createToolArgumentsRestorer(
     const result = restoreText(decoded, matcher, compiled, {
       final: false,
       maxPlaceholderLength,
+      escape: decodeEscapes,
     });
     stats.restored += result.matched;
     stats.unknown += result.unknown;

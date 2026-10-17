@@ -182,7 +182,7 @@ await translate.chat.messages({
 });
 ```
 
-上游看到的是 `<private_placeholder_{type}_{N}>` 占位符外加注入的 system 提示，调用方拿到原文。`trace` 与 `onPrivacyComplete` 只携带计数与 warning code——不含原始值、占位符映射、凭据或完整 prompt。默认 `securityMode: "strict"`（不允许泄漏）与 `egress: "policy"`；覆盖率、模板、HMAC tag 与流式预算通过 `PrivacyOptions` 配置。
+上游看到的是 `<private_placeholder_{type}-{tag}>` token 外加注入的 system 提示，调用方拿到原文。只有被识别的片段会被改写：字面量文本（包括与占位符形状相同的字符串与反斜杠）逐字节原样转发，且只有本会话签发的 token 才会被还原。`trace` 与 `onPrivacyComplete` 只携带计数与 warning code——不含原始值、占位符映射、凭据或完整 prompt。默认 `securityMode: "strict"`（不允许泄漏）与 `egress: "policy"`；覆盖率、模板、HMAC tag 与流式预算通过 `PrivacyOptions` 配置。
 
 ### Prompt-cache 亲和性
 

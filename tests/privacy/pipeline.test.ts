@@ -39,7 +39,7 @@ interface Capture {
 }
 
 function capturingFetch(
-  handler: (req: Request) => Response | Promise<Response>,
+  handler: (req: Request, body: unknown) => Response | Promise<Response>,
 ): Capture {
   let body: unknown;
   let headers: Headers | undefined;
@@ -47,7 +47,7 @@ function capturingFetch(
     const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
     headers = new Headers(req.headers);
     body = await req.json();
-    return handler(req);
+    return handler(req, body);
   }) as typeof fetch;
   return {
     fetch: fetchImpl,
@@ -74,6 +74,15 @@ function openaiOptions(overrides: Record<string, unknown> = {}): {
       ...overrides,
     },
   };
+}
+
+const TOKEN_RE = /<private_placeholder_phone-[a-z2-7]{5}>/;
+
+/** The token the pipeline actually sent upstream (fixtures must echo it). */
+function tokenIn(body: unknown): string {
+  const token = TOKEN_RE.exec(JSON.stringify(body));
+  if (!token) throw new Error("no placeholder token in the outbound body");
+  return token[0];
 }
 
 const anthropicResponse = {
@@ -189,13 +198,16 @@ function bytesStream(text: string): ReadableStream<Uint8Array> {
 
 describe("privacy through translate", () => {
   it("redacts the upstream request and restores the response (PT-01/03)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(JSON.stringify(anthropicResponse), {
-          status: 200,
-          headers: { "content-type": "application/json" },
+    const cap = capturingFetch((_req, sent) => {
+      const token = tokenIn(sent);
+      return new Response(
+        JSON.stringify({
+          ...anthropicResponse,
+          content: [{ type: "text", text: `Sure, I will call ${token}.` }],
         }),
-    );
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
     const response = await translate.chat.messages({
       ...openaiOptions(),
       fetch: cap.fetch,
@@ -203,7 +215,7 @@ describe("privacy through translate", () => {
     });
     const outbound = JSON.stringify(cap.lastBody());
     expect(outbound).not.toContain("13800138000");
-    expect(outbound).toContain("<private_placeholder_phone_1>");
+    expect(outbound).toMatch(TOKEN_RE);
 
     const body = (await response.json()) as {
       choices: { message: { content: string } }[];
@@ -229,7 +241,7 @@ describe("privacy through translate", () => {
     const body = cap.lastBody() as { system?: unknown };
     const system = JSON.stringify(body.system);
     expect(system).toContain("Privacy notice");
-    expect(system).toContain("<private_placeholder_{type}_{N}>");
+    expect(system).toContain("<private_placeholder_{type}-{tag}>");
     expect(system).toContain("ordinary characters");
     expect(system).toContain("never attempt to restore it in any form");
     expect(system).toContain("placeholder replacement is correct and will not cause errors");
@@ -237,23 +249,22 @@ describe("privacy through translate", () => {
   });
 
   it("restores a same-protocol response under privacy (PT-17)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(
-          JSON.stringify({
-            id: "chatcmpl_1",
-            object: "chat.completion",
-            model: "gpt-4o",
-            choices: [
-              {
-                index: 0,
-                message: { role: "assistant", content: "call <private_placeholder_phone_1>" },
-                finish_reason: "stop",
-              },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+    const cap = capturingFetch((_req, sent) =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl_1",
+          object: "chat.completion",
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: `call ${tokenIn(sent)}` },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
     );
     const response = await translate.chat.chat({
       ...openaiOptions(),
@@ -307,13 +318,16 @@ describe("privacy through translate", () => {
   });
 
   it("reports completion with the security mode (PT-31)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(JSON.stringify(anthropicResponse), {
-          status: 200,
-          headers: { "content-type": "application/json" },
+    const cap = capturingFetch((_req, sent) => {
+      const token = tokenIn(sent);
+      return new Response(
+        JSON.stringify({
+          ...anthropicResponse,
+          content: [{ type: "text", text: `Sure, I will call ${token}.` }],
         }),
-    );
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
     let report: PrivacyCompletionReport | undefined;
     await translate.chat.messages({
       ...openaiOptions(),
@@ -351,19 +365,20 @@ describe("privacy through translate", () => {
   });
 
   it("restores a placeholder split across streaming deltas (PT-04)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(
-          bytesStream(
-            anthropicTextStream([
-              "Sure, call <private_",
-              "placeholder_phone_1>",
-              " now.",
-            ]),
-          ),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
+    const cap = capturingFetch((_req, sent) => {
+      const token = tokenIn(sent);
+      const cut = token.length - 2;
+      return new Response(
+        bytesStream(
+          anthropicTextStream([
+            `Sure, call ${token.slice(0, cut)}`,
+            `${token.slice(cut)}`,
+            " now.",
+          ]),
         ),
-    );
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    });
     let report: PrivacyCompletionReport | undefined;
     const response = await translate.chat.messages({
       ...openaiOptions({ stream: true }),
@@ -392,20 +407,21 @@ describe("privacy through translate", () => {
   });
 
   it("streams restored tool arguments before the tool block ends (PT-05/PT-24)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(
-          bytesStream(
-            anthropicToolStream([
-              `{"path":"a.ts","content":"line one${BS}n`,
-              "call <private_",
-              "placeholder_phone_1> now",
-              '"}',
-            ]),
-          ),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
+    const cap = capturingFetch((_req, sent) => {
+      const token = tokenIn(sent);
+      const cut = token.length - 2;
+      return new Response(
+        bytesStream(
+          anthropicToolStream([
+            `{"path":"a.ts","content":"line one${BS}n`,
+            `call ${token.slice(0, cut)}`,
+            `${token.slice(cut)} now`,
+            '"}',
+          ]),
         ),
-    );
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    });
     let report: PrivacyCompletionReport | undefined;
     const response = await translate.chat.messages({
       ...openaiOptions({ stream: true }),
@@ -529,29 +545,28 @@ describe("per-Part privacy restore (E-3)", () => {
   }
 
   it("restores a non-streaming refusal part", async () => {
-    const upstream = {
-      id: "c",
-      object: "chat.completion",
-      model: "gpt-4o",
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: "assistant",
-            content: null,
-            refusal: "I can't call <private_placeholder_phone_1>",
+    const cap = capturingFetch((_req, sent) => {
+      const upstream = {
+        id: "c",
+        object: "chat.completion",
+        model: "gpt-4o",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              refusal: `I can't call ${tokenIn(sent)}`,
+            },
+            finish_reason: "stop",
           },
-          finish_reason: "stop",
-        },
-      ],
-    };
-    const cap = capturingFetch(
-      () =>
-        new Response(JSON.stringify(upstream), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-    );
+        ],
+      };
+      return new Response(JSON.stringify(upstream), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
     const response = await translate.chat.chat({
       ...chatChatOptions(false),
       fetch: cap.fetch,
@@ -564,26 +579,25 @@ describe("per-Part privacy restore (E-3)", () => {
   });
 
   it("restores a placeholder split across streamed refusal deltas", async () => {
-    const stream =
-      `data: ${JSON.stringify({ id: "c", model: "gpt-4o", choices: [{ index: 0, delta: { role: "assistant", refusal: "I can't call <private_" }, finish_reason: null }] })}
-
-` +
-      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { refusal: "placeholder_phone_1>" }, finish_reason: null }] })}
-
-` +
-      `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}
-
-` +
-      `data: [DONE]
+    const cap = capturingFetch((_req, sent) => {
+      const token = tokenIn(sent);
+      const cut = token.length - 2;
+      const frame = (delta: Record<string, unknown>, finish: string | null): string =>
+        `data: ${JSON.stringify({ id: "c", model: "gpt-4o", choices: [{ index: 0, delta, finish_reason: finish }] })}
 
 `;
-    const cap = capturingFetch(
-      () =>
-        new Response(bytesStream(stream), {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
+      const stream =
+        frame({ role: "assistant", refusal: `I can't call ${token.slice(0, cut)}` }, null) +
+        frame({ refusal: token.slice(cut) }, null) +
+        frame({}, "stop") +
+        `data: [DONE]
+
+`;
+      return new Response(bytesStream(stream), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
     const response = await translate.chat.chat({
       ...chatChatOptions(true),
       fetch: cap.fetch,

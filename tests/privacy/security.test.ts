@@ -28,14 +28,33 @@ interface Capture {
   lastBody: () => unknown;
 }
 
-function capturingFetch(handler: (req: Request) => Response): Capture {
+function capturingFetch(handler: (req: Request, body: unknown) => Response): Capture {
   let body: unknown;
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = input instanceof Request ? input : new Request(input as RequestInfo, init);
     body = await req.json();
-    return handler(req);
+    return handler(req, body);
   }) as typeof fetch;
   return { fetch: fetchImpl, lastBody: () => body };
+}
+
+const TOKEN_RE = /<private_placeholder_phone-[a-z2-7]{5}>/;
+
+/** The token the pipeline actually sent upstream (fixtures must echo it). */
+function tokenIn(body: unknown): string {
+  const token = TOKEN_RE.exec(JSON.stringify(body));
+  if (!token) throw new Error("no placeholder token in the outbound body");
+  return token[0];
+}
+
+function upstreamErrorEchoing(message: string): Response {
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message },
+    }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  );
 }
 
 const okAnthropic = () =>
@@ -84,19 +103,7 @@ describe("privacy security invariants", () => {
   });
 
   it("keeps placeholders in the client error by default (PT-39/47)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(
-          JSON.stringify({
-            type: "error",
-            error: {
-              type: "invalid_request_error",
-              message: "bad input <private_placeholder_phone_1>",
-            },
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        ),
-    );
+    const cap = capturingFetch((_req, sent) => upstreamErrorEchoing(`bad input ${tokenIn(sent)}`));
     const response = await translate.chat.messages({
       ...openaiContentOptions(`call ${PHONE}`),
       fetch: cap.fetch,
@@ -104,24 +111,12 @@ describe("privacy security invariants", () => {
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: { message: string } };
-    expect(body.error.message).toContain("<private_placeholder_phone_1>");
+    expect(body.error.message).toMatch(TOKEN_RE);
     expect(body.error.message).not.toContain(PHONE);
   });
 
   it("restores the client error only under trusted_client (PT-39/47)", async () => {
-    const cap = capturingFetch(
-      () =>
-        new Response(
-          JSON.stringify({
-            type: "error",
-            error: {
-              type: "invalid_request_error",
-              message: "bad input <private_placeholder_phone_1>",
-            },
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        ),
-    );
+    const cap = capturingFetch((_req, sent) => upstreamErrorEchoing(`bad input ${tokenIn(sent)}`));
     const response = await translate.chat.messages({
       ...openaiContentOptions(`call ${PHONE}`),
       fetch: cap.fetch,
