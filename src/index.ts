@@ -36,7 +36,96 @@ export type {
   ImageSource,
   MessageRole,
 } from "./ir/types.js";
-export type { CanonicalResponse } from "./ir/response.js";
+export type { CanonicalResponse, CanonicalChoice } from "./ir/response.js";
+export type {
+  NativeByFormat,
+  NativeRequest,
+  NativeMessage,
+  NativePart,
+  NativeTool,
+  NativeResponse,
+  NativeChoice,
+  NativeStream,
+  AnthropicNativeRequest,
+  AnthropicNativeMessage,
+  AnthropicNativePart,
+  AnthropicNativeTool,
+  AnthropicNativeResponse,
+  AnthropicNativeChoice,
+  AnthropicNativeStream,
+  ChatNativeRequest,
+  ChatNativeMessage,
+  ChatNativePart,
+  ChatNativeTool,
+  ChatNativeResponse,
+  ChatNativeChoice,
+  ChatNativeStream,
+  NativeChoiceStreamMetadata,
+} from "./ir/native/index.js";
+export { getCacheControl } from "./ir/native/accessors.js";
+export type {
+  DropPolicy,
+  FieldPolicy,
+  FieldPolicyContext,
+  PolicyFor,
+} from "./ir/policy/policy.js";
+export {
+  ANTHROPIC_REQUEST_POLICY,
+  ANTHROPIC_MESSAGE_POLICY,
+  ANTHROPIC_PART_POLICY,
+  ANTHROPIC_TOOL_POLICY,
+  CHAT_REQUEST_POLICY,
+  CHAT_MESSAGE_POLICY,
+  CHAT_PART_POLICY,
+  CHAT_TOOL_POLICY,
+} from "./ir/policy/request.js";
+export {
+  ANTHROPIC_RESPONSE_POLICY,
+  ANTHROPIC_CHOICE_POLICY,
+  CHAT_RESPONSE_POLICY,
+  CHAT_CHOICE_POLICY,
+} from "./ir/policy/response.js";
+export { ANTHROPIC_STREAM_POLICY, CHAT_STREAM_POLICY } from "./ir/policy/stream.js";
+export type { ProjectionContext, ProjectionPhase } from "./ir/projection/context.js";
+export { projectionContext } from "./ir/projection/context.js";
+export type { DropRecord, FeatureAdaptationRecord } from "./ir/projection/drop-record.js";
+export { roleProjectionError, fieldProjectionError } from "./ir/projection/role.js";
+export { assertToolPairing } from "./ir/projection/tool.js";
+export { applyFieldPolicy, type ProjectionSink } from "./ir/projection/apply.js";
+export {
+  projectAnthropicRequest,
+  projectAnthropicTool,
+  projectChatRequest,
+} from "./ir/projection/native.js";
+export type { RoleCapabilities } from "./capabilities/provider-profile.js";
+export type { ProjectionOutcome } from "./ir/projection/outcome.js";
+export type { PolicyOverride } from "./ir/projection/override.js";
+export {
+  NON_RELAXABLE_SEGMENTS,
+  validateOverride,
+  findOverride,
+} from "./ir/projection/override.js";
+export type {
+  DecideFieldInput,
+  FieldAdaptationAuthorization,
+  FieldDecision,
+  ProjectionPlan,
+} from "./ir/projection/planner.js";
+export {
+  ProjectionPlanner,
+  decideField,
+  executePlan,
+  assertPlanStable,
+  nonDroppableFieldError,
+} from "./ir/projection/planner.js";
+export type { TranslationFailurePhase } from "./ir/projection/failure.js";
+export { calculateFidelity, worstFidelity } from "./ir/projection/fidelity.js";
+export type {
+  StreamBlockKey,
+  StreamBlockKind,
+  StreamLocation,
+} from "./ir/stream-key.js";
+export { streamBlockKey, streamBlockKeyId, createStreamBlockKey } from "./ir/stream-key.js";
 export type { CanonicalFinishReason } from "./ir/finish-reason.js";
 export type { CanonicalUsage } from "./ir/usage.js";
 export type { Fidelity, TranslationWarning } from "./ir/fidelity.js";

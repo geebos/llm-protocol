@@ -8,6 +8,7 @@ import type { ContentPart } from "../../ir/types.js";
 import { validationError } from "../../errors.js";
 import type { CodecContext, ResponseCodec } from "../protocol-adapter.js";
 import { parseAnthropicContent, renderAnthropicContent } from "./content.js";
+import { fieldProjectionError } from "../../ir/projection/role.js";
 
 const STOP_REASON_MAP: Record<string, CanonicalFinishReason> = {
   end_turn: "end_turn",
@@ -56,8 +57,7 @@ export const anthropicResponseCodec: ResponseCodec = {
     return {
       id: typeof p.id === "string" ? p.id : undefined,
       model: typeof p.model === "string" ? p.model : undefined,
-      content,
-      finishReason: stopReason,
+      choices: [{ index: 0, content, finishReason: stopReason }],
       usage,
       extensions,
     };
@@ -67,13 +67,19 @@ export const anthropicResponseCodec: ResponseCodec = {
     canonical: CanonicalResponse,
     ctx: CodecContext = { warnings: [] },
   ): unknown {
+    const choice = canonical.choices[0];
+    if (canonical.choices.length > 1) {
+      // Anthropic Messages has no multi-candidate response; a lossy selection
+      // is not allowed by default (docs/07 §5.3).
+      throw fieldProjectionError("choices", "anthropic-messages");
+    }
     const body: Record<string, unknown> = {
       id: canonical.id,
       type: "message",
       role: "assistant",
       model: canonical.model,
-      content: renderAnthropicContent(canonical.content),
-      stop_reason: renderStopReason(canonical.finishReason, ctx),
+      content: renderAnthropicContent(choice?.content ?? []),
+      stop_reason: renderStopReason(choice?.finishReason, ctx),
       stop_sequence: canonical.extensions?.stopSequence ?? null,
     };
     if (canonical.usage) body.usage = renderUsage(canonical.usage, ctx);

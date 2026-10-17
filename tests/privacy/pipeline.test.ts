@@ -428,3 +428,90 @@ describe("privacy through translate", () => {
     expect(report?.status).toBe("errored");
   });
 });
+
+describe("per-Part privacy restore (E-3)", () => {
+  function chatChatOptions(stream: boolean) {
+    return {
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer k" },
+      body: {
+        model: "gpt-4o",
+        stream,
+        messages: [{ role: "user", content: "please call 13800138000 today" }],
+      },
+    };
+  }
+
+  it("restores a non-streaming refusal part", async () => {
+    const upstream = {
+      id: "c",
+      object: "chat.completion",
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            refusal: "I can't call <private_placeholder_phone_1>",
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+    const cap = capturingFetch(
+      () =>
+        new Response(JSON.stringify(upstream), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const response = await translate.chat.chat({
+      ...chatChatOptions(false),
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+    });
+    const body = (await response.json()) as {
+      choices: Array<{ message: { refusal?: string; content?: string } }>;
+    };
+    expect(body.choices[0].message.refusal).toBe("I can't call 13800138000");
+  });
+
+  it("restores a placeholder split across streamed refusal deltas", async () => {
+    const stream =
+      `data: ${JSON.stringify({ id: "c", model: "gpt-4o", choices: [{ index: 0, delta: { role: "assistant", refusal: "I can't call <private_" }, finish_reason: null }] })}
+
+` +
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { refusal: "placeholder_phone_1>" }, finish_reason: null }] })}
+
+` +
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}
+
+` +
+      `data: [DONE]
+
+`;
+    const cap = capturingFetch(
+      () =>
+        new Response(bytesStream(stream), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const response = await translate.chat.chat({
+      ...chatChatOptions(true),
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+    });
+    const frames = await collectSSEFrames(response.body);
+    const refusal = frames
+      .filter((f) => f.data !== "[DONE]")
+      .map(
+        (f) =>
+          (JSON.parse(f.data) as { choices?: Array<{ delta?: { refusal?: string } }> })
+            .choices?.[0]?.delta?.refusal ?? "",
+      )
+      .join("");
+    expect(refusal).toBe("I can't call 13800138000");
+  });
+});

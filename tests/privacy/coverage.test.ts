@@ -256,13 +256,16 @@ describe("coverage policy", () => {
   });
 
   it("reports the leak location and a masked value on egress failure", async () => {
-    const err = await translate.chat.messages({
-      ...openaiOptions({
+    const err = await translate.chat.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer sk" },
+      body: {
+        model: "gpt-4o",
         metadata: { note: "owner 13800138000" },
         messages: [{ role: "user", content: "call 13800138000" }],
-      }),
+      },
       fetch: fetchOk(),
-      // strict egress overrides the default-allow extension holding the phone.
+      // strict egress overrides the default-allow native field holding the phone.
       privacy: { recognizers: [phoneRecognizer()], egress: "strict" },
     }).catch((e: unknown) => e as { code?: string; message?: string });
     expect(err.code).toBe("privacy_uncovered_channel");

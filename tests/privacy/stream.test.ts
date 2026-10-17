@@ -65,10 +65,10 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "see <private_placeholder_a_1" },
-        { type: "text_delta", index: 0, text: "0> end" },
-        { type: "text_end", index: 0 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "see <private_placeholder_a_1" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "0> end" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -81,9 +81,9 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "<private_placeholder_a_1" },
-        { type: "text_end", index: 0 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -97,10 +97,10 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "<private_placeholder_a_1>" },
-        { type: "text_delta", index: 0, text: " tail" },
-        { type: "text_end", index: 0 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1>" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: " tail" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -113,10 +113,10 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "tool_start", index: 0, id: "call_1", name: "f" },
-        { type: "tool_arguments_delta", index: 0, partialJson: '{"a":"<private_placeholder_a_1' },
-        { type: "tool_arguments_delta", index: 0, partialJson: '0>","b":[1,2]}' },
-        { type: "tool_end", index: 0 },
+        { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
+        { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '{"a":"<private_placeholder_a_1' },
+        { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '0>","b":[1,2]}' },
+        { type: "tool_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -136,9 +136,9 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(1);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "x <private_placeholder_a_42> y" },
-        { type: "text_end", index: 0 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "x <private_placeholder_a_42> y" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -162,9 +162,9 @@ describe("streaming restore", () => {
     await expect(
       run(
         [
-          { type: "text_start", index: 0 },
-          { type: "text_delta", index: 0, text: "<private_placeholder_" },
-          { type: "text_end", index: 0 },
+          { type: "text_start", location: { choice: 0, content: 0 } },
+          { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_" },
+          { type: "text_end", location: { choice: 0, content: 0 } },
           { type: "message_end" },
         ],
         session,
@@ -187,9 +187,9 @@ describe("streaming restore", () => {
     });
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "<private_placeholder_" },
-        { type: "text_end", index: 0 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -203,9 +203,9 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "tail <private_placeholder_a_1" },
-        { type: "text_end", index: 0 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "tail <private_placeholder_a_1" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
@@ -229,9 +229,9 @@ describe("streaming restore", () => {
     await expect(
       run(
         [
-          { type: "text_start", index: 0 },
-          { type: "text_delta", index: 0, text: "x <private_placeholder_" },
-          { type: "text_end", index: 0 },
+          { type: "text_start", location: { choice: 0, content: 0 } },
+          { type: "text_delta", location: { choice: 0, content: 0 }, text: "x <private_placeholder_" },
+          { type: "text_end", location: { choice: 0, content: 0 } },
           { type: "message_end" },
         ],
         session,
@@ -244,8 +244,8 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "partial <private_placeholder_a_1" },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "partial <private_placeholder_a_1" },
         { type: "error", error: { kind: "upstream", message: "boom" } },
       ],
       session,
@@ -259,14 +259,14 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_start", index: 1 },
-        { type: "text_delta", index: 0, text: "<private_placeholder_a_1" },
-        { type: "text_delta", index: 1, text: "other <private_placeholder_a_2" },
-        { type: "text_delta", index: 0, text: "0>" },
-        { type: "text_delta", index: 1, text: ">" },
-        { type: "text_end", index: 0 },
-        { type: "text_end", index: 1 },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_start", location: { choice: 0, content: 1 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1" },
+        { type: "text_delta", location: { choice: 0, content: 1 }, text: "other <private_placeholder_a_2" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "0>" },
+        { type: "text_delta", location: { choice: 0, content: 1 }, text: ">" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
+        { type: "text_end", location: { choice: 0, content: 1 } },
         { type: "message_end" },
       ],
       session,
@@ -276,7 +276,7 @@ describe("streaming restore", () => {
       result.events
         .filter(
           (e): e is Extract<CanonicalStreamEvent, { type: "text_delta" }> =>
-            e.type === "text_delta" && e.index === index,
+            e.type === "text_delta" && e.location.content === index,
         )
         .map((e) => e.text)
         .join("");
@@ -288,11 +288,11 @@ describe("streaming restore", () => {
     const { session, config } = makeSession(10);
     const result = await run(
       [
-        { type: "text_start", index: 0 },
-        { type: "text_delta", index: 0, text: "<private_placeholder_a_1" },
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1" },
         { type: "unknown", sourceType: "ping", raw: { type: "ping" } },
-        { type: "text_delta", index: 0, text: "0> tail" },
-        { type: "text_end", index: 0 },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "0> tail" },
+        { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,

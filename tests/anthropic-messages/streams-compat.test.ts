@@ -102,6 +102,7 @@ describe("STREAM-001 reasoning -> text", () => {
       "text_delta",
       "text_delta",
       "text_end",
+      "choice_end",
       "message_end",
     ]);
     expect(events[events.length - 1]).toMatchObject({
@@ -146,7 +147,7 @@ describe("STREAM-003 tool id/name/arguments fragmented", () => {
 
     const start = events.find((e) => e.type === "tool_start");
     // no placeholder name: the deferred start uses the real name
-    expect(start).toEqual({ type: "tool_start", index: 0, id: "call_1", name: "get_weather" });
+    expect(start).toEqual({ type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "get_weather" });
     const starts = events.filter((e) => e.type === "tool_start");
     expect(starts).toHaveLength(1);
     const args = events
@@ -259,7 +260,7 @@ describe("STREAM-008 parallel tool calls with interleaved arguments", () => {
     const byIndex = new Map<number, string>();
     for (const e of events) {
       if (e.type === "tool_arguments_delta") {
-        byIndex.set(e.index, (byIndex.get(e.index) ?? "") + e.partialJson);
+        byIndex.set(e.location.content, (byIndex.get(e.location.content) ?? "") + e.partialJson);
       }
     }
     expect(JSON.parse(byIndex.get(0)!)).toEqual({ city: "Paris" });

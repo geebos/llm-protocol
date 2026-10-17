@@ -9,6 +9,7 @@
  */
 import { createHmac } from "node:crypto";
 import type { CanonicalRequest } from "../../ir/types.js";
+import { getCacheControl } from "../../ir/native/accessors.js";
 import type { CacheAffinity, CacheAnchor } from "../types.js";
 import type { PrivacySafeCacheAffinityResolver } from "../resolver.js";
 
@@ -25,13 +26,13 @@ export function extractCanonicalCacheAnchors(
   canonical: CanonicalRequest,
 ): CacheAnchor[] {
   const system: CacheAnchor[] = [];
-  for (const part of canonical.system ?? []) {
-    if (part.type === "text" && part.cache) {
-      system.push({
-        location: "system",
-        text: part.text,
-        cacheControl: part.cache,
-      });
+  for (const message of canonical.messages) {
+    if (message.role !== "system" && message.role !== "developer") break;
+    for (const part of message.content) {
+      if (part.type !== "text") continue;
+      const cacheControl = getCacheControl(part);
+      if (!cacheControl) continue;
+      system.push({ location: "system", text: part.text, cacheControl });
     }
   }
 
@@ -40,11 +41,13 @@ export function extractCanonicalCacheAnchors(
   canonical.messages.forEach((message, messageIndex) => {
     if (message.role !== "user" && message.role !== "assistant") return;
     message.content.forEach((part, contentIndex) => {
-      if (part.type !== "text" || !part.cache) return;
+      if (part.type !== "text") return;
+      const cacheControl = getCacheControl(part);
+      if (!cacheControl) return;
       const anchor: CacheAnchor = {
         location: message.role === "assistant" ? "assistant" : "user",
         text: part.text,
-        cacheControl: part.cache,
+        cacheControl,
         messageIndex,
         contentIndex,
       };

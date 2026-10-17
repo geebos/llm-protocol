@@ -10,18 +10,26 @@
 import type { CanonicalUsage } from "../ir/usage.js";
 import type { CanonicalFinishReason } from "../ir/finish-reason.js";
 import type { CanonicalError } from "../errors.js";
+import type { ResolvedStreamLocation } from "../ir/stream-key.js";
+import type { NativeChoiceStreamMetadata, NativeStream } from "../ir/native/index.js";
 
 export type CanonicalStreamEvent =
-  | { type: "message_start"; id?: string; model?: string }
-  | { type: "text_start"; index: number }
-  | { type: "text_delta"; index: number; text: string }
-  | { type: "text_end"; index: number }
-  | { type: "tool_start"; index: number; id: string; name: string }
-  | { type: "tool_arguments_delta"; index: number; partialJson: string }
-  | { type: "tool_end"; index: number }
-  | { type: "reasoning_start"; index: number; metadata?: unknown }
-  | { type: "reasoning_delta"; index: number; text?: string; opaque?: string }
-  | { type: "reasoning_end"; index: number; metadata?: unknown }
+  | { type: "message_start"; id?: string; model?: string; native?: NativeStream }
+  | { type: "choice_start"; choice: number; native?: NativeStream }
+  | { type: "choice_end"; choice: number; finishReason?: CanonicalFinishReason; native?: NativeStream }
+  | { type: "text_start"; location: ResolvedStreamLocation }
+  | { type: "text_delta"; location: ResolvedStreamLocation; text: string }
+  | { type: "text_end"; location: ResolvedStreamLocation }
+  | { type: "tool_start"; location: ResolvedStreamLocation; id: string; name: string }
+  | { type: "tool_arguments_delta"; location: ResolvedStreamLocation; partialJson: string }
+  | { type: "tool_end"; location: ResolvedStreamLocation }
+  | { type: "reasoning_start"; location: ResolvedStreamLocation; metadata?: unknown }
+  | { type: "reasoning_delta"; location: ResolvedStreamLocation; text?: string; opaque?: string }
+  | { type: "reasoning_end"; location: ResolvedStreamLocation; metadata?: unknown }
+  | { type: "refusal_start"; location: ResolvedStreamLocation }
+  | { type: "refusal_delta"; location: ResolvedStreamLocation; text: string }
+  | { type: "refusal_end"; location: ResolvedStreamLocation }
+  | { type: "choice_metadata"; choice: number; native: NativeChoiceStreamMetadata }
   | { type: "usage"; usage: CanonicalUsage }
   | { type: "message_end"; finishReason?: CanonicalFinishReason }
   | { type: "error"; error: CanonicalError }

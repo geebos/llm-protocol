@@ -2,7 +2,7 @@
  * OpenAI Chat Completions response codec (FR-005, FR-009, FR-010).
  */
 import type { CanonicalFinishReason } from "../../ir/finish-reason.js";
-import type { CanonicalResponse } from "../../ir/response.js";
+import type { CanonicalChoice, CanonicalResponse } from "../../ir/response.js";
 import type { CanonicalUsage } from "../../ir/usage.js";
 import type { ContentPart } from "../../ir/types.js";
 import type { ProviderProfile } from "../../capabilities/provider-profile.js";
@@ -11,6 +11,7 @@ import { validationError } from "../../errors.js";
 import type { CodecContext, ResponseCodec } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
+import { fieldProjectionError } from "../../ir/projection/role.js";
 
 const FINISH_REASON_MAP: Record<string, CanonicalFinishReason> = {
   stop: "end_turn",
@@ -47,28 +48,33 @@ export function createOpenAiChatResponseCodec(
       if (p.error && typeof p.error === "object") {
         throw validationError("response contains an error object");
       }
-      const choices = Array.isArray(p.choices) ? p.choices : [];
-      const choice = (choices[0] as Record<string, unknown> | undefined) ?? {};
-      const message = (choice.message as Record<string, unknown> | undefined) ?? {};
-
-      const content = parseContent(message, reasoningField);
-
-      const finishReason =
-        typeof choice.finish_reason === "string" && choice.finish_reason !== null
-          ? (FINISH_REASON_MAP[choice.finish_reason] ?? "unknown")
-          : undefined;
+      const rawChoices = Array.isArray(p.choices) ? p.choices : [];
+      const choices: CanonicalChoice[] = rawChoices.map((raw, i) => {
+        const choice = (raw as Record<string, unknown> | undefined) ?? {};
+        const message = (choice.message as Record<string, unknown> | undefined) ?? {};
+        const finishReason =
+          typeof choice.finish_reason === "string" && choice.finish_reason !== null
+            ? (FINISH_REASON_MAP[choice.finish_reason] ?? "unknown")
+            : undefined;
+        const native: CanonicalChoice["native"] = {};
+        if (choice.logprobs !== undefined && choice.logprobs !== null) {
+          native.chat = { logprobs: choice.logprobs as Record<string, unknown> };
+        }
+        return {
+          index: typeof choice.index === "number" ? choice.index : i,
+          content: parseContent(message, reasoningField),
+          finishReason,
+          ...(Object.keys(native).length ? { native } : {}),
+        };
+      });
 
       const extensions: Record<string, unknown> = {};
       if (p.created !== undefined) extensions.created = p.created;
-      if (message.refusal !== undefined && message.refusal !== null) {
-        extensions.refusal = message.refusal;
-      }
 
       return {
         id: typeof p.id === "string" ? p.id : undefined,
         model: typeof p.model === "string" ? p.model : undefined,
-        content,
-        finishReason,
+        choices,
         usage: parseUsage(p.usage, profile.capabilities.usage),
         extensions,
       };
@@ -78,89 +84,96 @@ export function createOpenAiChatResponseCodec(
       canonical: CanonicalResponse,
       ctx: CodecContext = { warnings: [] },
     ): unknown {
-      const text = canonical.content
-        .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
-        .map((p) => p.text)
-        .join("");
-      const calls = canonical.content.filter(
-        (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
-      );
-      const reasoning = canonical.content.filter(
-        (p): p is Extract<ContentPart, { type: "reasoning" }> => p.type === "reasoning",
-      );
-
-      // Opaque thinking signatures (P1-2): only a provider declaring an
-      // opaque-signature field can carry them; otherwise warn, never silently
-      // drop the state that may be needed to resume thinking next turn.
       const sigCap = profile.capabilities.reasoning;
-      const signature = reasoning
-        .map((r) => r.signature)
-        .find((s): s is string => typeof s === "string");
-      if (signature !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
-        // preserved under the provider's declared opaque-signature field
-      } else if (signature !== undefined) {
-        ctx.warnings.push({
-          code: "thinking_signature_dropped",
-          message:
-            "Opaque thinking signature dropped because the target does not declare an opaque-signature field",
-          fidelity: "LOSSY",
-          field: "content.reasoning.signature",
-        });
-      }
+      const sourceChoices: CanonicalChoice[] = canonical.choices.length
+        ? canonical.choices
+        : [{ index: 0, content: [] }];
 
-      const message: Record<string, unknown> = {
-        role: "assistant",
-        content: text || null,
-      };
-      if (signature !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
-        message[sigCap.signatureField] = signature;
-      }
-      if (reasoningField && reasoning.length) {
-        message[reasoningField] = reasoning.map((r) => r.text ?? "").join("");
-      } else if (reasoning.length && policies.reasoning === "provider_metadata") {
-        // TH-004: preserve reasoning under an explicit provider-metadata field
-        // instead of silently dropping it.
-        message.reasoning_content = reasoning.map((r) => r.text ?? "").join("");
-        ctx.warnings.push({
-          code: "reasoning_provider_metadata",
-          message:
-            "Reasoning preserved as message.reasoning_content per provider_metadata policy",
-          fidelity: "COMPATIBLE",
-          field: "content.reasoning",
-        });
-      } else if (reasoning.length) {
-        ctx.warnings.push({
-          code: "reasoning_dropped",
-          message:
-            "Reasoning content dropped because the target does not declare a reasoning field (drop_with_warning policy)",
-          fidelity: "LOSSY",
-          field: "content.reasoning",
-        });
-      }
-      if (calls.length) {
-        message.tool_calls = calls.map((c) => ({
-          id: c.id,
-          type: "function",
-          function: { name: c.name, arguments: c.argumentsText },
-        }));
-      }
-      if (canonical.extensions?.refusal !== undefined) {
-        message.refusal = canonical.extensions.refusal;
-      }
+      const choices = sourceChoices.map((choice, i) => {
+        const content = choice.content;
+        if (content.some((p) => p.type === "opaque_native")) {
+          throw fieldProjectionError("opaque_native", "openai-chat");
+        }
+        const text = content
+          .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+          .map((p) => p.text)
+          .join("");
+        const calls = content.filter(
+          (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
+        );
+        const reasoning = content.filter(
+          (p): p is Extract<ContentPart, { type: "reasoning" }> => p.type === "reasoning",
+        );
+        const refusal = content.find(
+          (p): p is Extract<ContentPart, { type: "refusal" }> => p.type === "refusal",
+        );
+
+        const message: Record<string, unknown> = {
+          role: "assistant",
+          content: text || null,
+        };
+        // Opaque thinking signatures (P1-2): only a provider declaring an
+        // opaque-signature field can carry them; otherwise warn, never silently
+        // drop the state that may be needed to resume thinking next turn.
+        const signature = reasoning
+          .map((r) => r.signature)
+          .find((s): s is string => typeof s === "string");
+        if (signature !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
+          message[sigCap.signatureField] = signature;
+        } else if (signature !== undefined && i === 0) {
+          ctx.warnings.push({
+            code: "thinking_signature_dropped",
+            message:
+              "Opaque thinking signature dropped because the target does not declare an opaque-signature field",
+            fidelity: "LOSSY",
+            field: "content.reasoning.signature",
+          });
+        }
+        if (reasoningField && reasoning.length) {
+          message[reasoningField] = reasoning.map((r) => r.text ?? "").join("");
+        } else if (reasoning.length && policies.reasoning === "provider_metadata") {
+          message.reasoning_content = reasoning.map((r) => r.text ?? "").join("");
+          if (i === 0) {
+            ctx.warnings.push({
+              code: "reasoning_provider_metadata",
+              message:
+                "Reasoning preserved as message.reasoning_content per provider_metadata policy",
+              fidelity: "COMPATIBLE",
+              field: "content.reasoning",
+            });
+          }
+        } else if (reasoning.length && i === 0) {
+          ctx.warnings.push({
+            code: "reasoning_dropped",
+            message:
+              "Reasoning content dropped because the target does not declare a reasoning field (drop_with_warning policy)",
+            fidelity: "LOSSY",
+            field: "content.reasoning",
+          });
+        }
+        if (calls.length) {
+          message.tool_calls = calls.map((c) => ({
+            id: c.id,
+            type: "function",
+            function: { name: c.name, arguments: c.argumentsText },
+          }));
+        }
+        if (refusal) message.refusal = refusal.text;
+
+        return {
+          index: choice.index ?? i,
+          message,
+          finish_reason: renderFinishReason(choice.finishReason),
+          logprobs: choice.native?.chat?.logprobs ?? null,
+        };
+      });
 
       return {
         id: canonical.id,
         object: "chat.completion",
         created: canonical.extensions?.created ?? Math.floor(Date.now() / 1000),
         model: canonical.model,
-        choices: [
-          {
-            index: 0,
-            message,
-            finish_reason: renderFinishReason(canonical.finishReason),
-            logprobs: null,
-          },
-        ],
+        choices,
         ...(canonical.usage ? { usage: renderUsage(canonical.usage, ctx) } : {}),
       };
     },
@@ -174,6 +187,9 @@ function parseContent(
   const content: ContentPart[] = [];
   if (typeof message.content === "string" && message.content) {
     content.push({ type: "text", text: message.content });
+  }
+  if (typeof message.refusal === "string" && message.refusal) {
+    content.push({ type: "refusal", text: message.refusal });
   }
   if (
     reasoningField &&

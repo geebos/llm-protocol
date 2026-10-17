@@ -6,6 +6,14 @@
  * rewritten by codecs (TH-001).
  */
 
+import type {
+  NativeMessage,
+  NativePart,
+  NativeRequest,
+  NativeTool,
+} from "./native/index.js";
+import type { ApiFormat } from "../formats.js";
+
 export type ImageSource =
   | { type: "url"; url: string }
   | { type: "base64"; mediaType: string; data: string };
@@ -21,21 +29,22 @@ export type ContentPart =
       type: "text";
       text: string;
       annotations?: unknown[];
-      /** Prompt-cache breakpoint carried through the IR (PR-017). */
-      cache?: CanonicalCacheControl;
+      native?: NativePart;
     }
-  | { type: "image"; source: ImageSource }
+  | { type: "image"; source: ImageSource; native?: NativePart }
   | {
       type: "tool_call";
       id: string;
       name: string;
       argumentsText: string;
+      native?: NativePart;
     }
   | {
       type: "tool_result";
       toolCallId: string;
       content: ContentPart[];
       isError?: boolean;
+      native?: NativePart;
     }
   | {
       type: "reasoning";
@@ -45,13 +54,40 @@ export type ContentPart =
       encryptedContent?: string;
       reasoningId?: string;
       providerMetadata?: unknown;
+      native?: NativePart;
+    }
+  | {
+      type: "file";
+      /** File payload; this round only the url/base64 forms both protocols express. */
+      source: ImageSource;
+      filename?: string;
+      native?: NativePart;
+    }
+  | { type: "refusal"; text: string; native?: NativePart }
+  | {
+      type: "annotation";
+      /** Provider annotation kind (e.g. `url_citation`). */
+      kind: string;
+      text?: string;
+      startIndex?: number;
+      endIndex?: number;
+      url?: string;
+      native?: NativePart;
+    }
+  | {
+      type: "opaque_native";
+      /** Protocol the raw block came from; it may only round-trip to that protocol. */
+      sourceFormat: ApiFormat;
+      raw: unknown;
+      native?: NativePart;
     };
 
-export type MessageRole = "system" | "user" | "assistant" | "tool";
+export type MessageRole = "system" | "developer" | "user" | "assistant" | "tool";
 
 export interface CanonicalMessage {
   role: MessageRole;
   content: ContentPart[];
+  native?: NativeMessage;
 }
 
 export interface CanonicalTool {
@@ -61,8 +97,7 @@ export interface CanonicalTool {
   inputSchema: Record<string, unknown>;
   /** OpenAI `strict` flag; not representable in Anthropic (LOSSY on render). */
   strict?: boolean;
-  /** Prompt-cache breakpoint on the tool definition (PR-017). */
-  cache?: CanonicalCacheControl;
+  native?: NativeTool;
 }
 
 export type CanonicalToolChoice =
@@ -102,7 +137,6 @@ export interface CanonicalThinkingConfig {
 export interface CanonicalRequest {
   model: string;
   messages: CanonicalMessage[];
-  system?: ContentPart[];
   tools?: CanonicalTool[];
   toolChoice?: CanonicalToolChoice;
   generation?: CanonicalGenerationOptions;
@@ -118,6 +152,8 @@ export interface CanonicalRequest {
    * (OpenAI `stream_options.include_usage`); silently dropped otherwise.
    */
   includeUsage?: boolean;
+  /** Protocol-native fields (docs/07). Typed per protocol; never an unknown blob. */
+  native?: NativeRequest;
   /** Unrecognized / provider-specific fields, preserved opaque (FR-004). */
   extensions?: Record<string, unknown>;
 }

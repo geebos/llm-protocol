@@ -44,9 +44,13 @@ describe("Anthropic Messages codec", () => {
     const ctx = newCodecContext();
     const canonical = anthropic.request.parseRequest(anthropicTextRequest, ctx);
     expect(canonical.model).toBe("claude-sonnet-4-5");
-    expect(canonical.system?.[0]).toMatchObject({ type: "text", text: "You are a helpful assistant." });
-    expect(canonical.messages).toHaveLength(3);
-    expect(canonical.messages[1]).toMatchObject({ role: "assistant" });
+    expect(canonical.messages[0]).toMatchObject({ role: "system" });
+    expect(canonical.messages[0].content[0]).toMatchObject({
+      type: "text",
+      text: "You are a helpful assistant.",
+    });
+    expect(canonical.messages).toHaveLength(4);
+    expect(canonical.messages[2]).toMatchObject({ role: "assistant" });
 
     const rendered = anthropic.request.renderRequest(canonical, false, ctx);
     expect(rendered).toEqual(anthropicTextRequest);
@@ -138,8 +142,12 @@ describe("OpenAI Chat codec", () => {
   it("round-trips a text request to canonical and back (lossless)", () => {
     const ctx = newCodecContext();
     const canonical = openai.request.parseRequest(openaiTextRequest, ctx);
-    expect(canonical.system?.[0]).toMatchObject({ type: "text", text: "You are a helpful assistant." });
-    expect(canonical.messages).toHaveLength(3);
+    expect(canonical.messages[0]).toMatchObject({ role: "system" });
+    expect(canonical.messages[0].content[0]).toMatchObject({
+      type: "text",
+      text: "You are a helpful assistant.",
+    });
+    expect(canonical.messages).toHaveLength(4);
 
     const rendered = openai.request.renderRequest(canonical, false, ctx);
     expect(rendered).toEqual(openaiTextRequest);
@@ -239,7 +247,7 @@ describe("Stop reason and usage mappings", () => {
       },
       ctx,
     );
-    expect(parsed.finishReason).toBe("tool_call");
+    expect(parsed.choices[0]?.finishReason).toBe("tool_call");
     expect(parsed.usage).toMatchObject({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
   });
 
@@ -257,7 +265,7 @@ describe("Stop reason and usage mappings", () => {
       },
       ctx,
     );
-    expect(parsed.finishReason).toBe("max_tokens");
+    expect(parsed.choices[0]?.finishReason).toBe("max_tokens");
     expect(parsed.usage).toMatchObject({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
   });
 
@@ -270,6 +278,6 @@ describe("Stop reason and usage mappings", () => {
       },
       ctx,
     );
-    expect(parsed.finishReason).toBe("unknown");
+    expect(parsed.choices[0]?.finishReason).toBe("unknown");
   });
 });

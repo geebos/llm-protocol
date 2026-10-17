@@ -15,6 +15,13 @@ import type { CodecContext, RequestCodec } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
 import { recordExtensionDisposition } from "../extension-evidence.js";
+import { getCacheControl } from "../../ir/native/accessors.js";
+import type { RoleCapabilities } from "../../capabilities/provider-profile.js";
+import type { ChatNativeRequest } from "../../ir/native/index.js";
+import { roleProjectionError, fieldProjectionError } from "../../ir/projection/role.js";
+import { assertToolPairing } from "../../ir/projection/tool.js";
+import { projectAnthropicRequest, projectAnthropicTool } from "../../ir/projection/native.js";
+import { applyFieldPolicy } from "../../ir/projection/apply.js";
 
 const IR_MAPPED_FIELDS = [
   "model",
@@ -70,11 +77,6 @@ function parseEffort(value: unknown): ReasoningEffort | undefined {
   return undefined;
 }
 
-interface ParsedMessages {
-  system?: ContentPart[];
-  messages: CanonicalMessage[];
-}
-
 export function createOpenAiChatRequestCodec(
   profile: ProviderProfile,
   policies: TranslationPolicies = DEFAULT_POLICIES,
@@ -100,37 +102,60 @@ export function createOpenAiChatRequestCodec(
       if (typeof p.model !== "string") throw validationError("model is required");
 
       const signatureField = profile.capabilities.reasoning?.signatureField;
-      const { system, messages } = parseMessages(
+      const messages = parseMessages(
         p.messages,
         reasoningField,
         ctx,
         signatureField,
       );
       const effort = parseEffort(p.reasoning_effort);
-      const extensions: Record<string, unknown> = {};
-      // Preserve every field that has no canonical home — either a known
-      // extension field or a truly unknown field (GAP-004). An unmapped
-      // `reasoning_effort` value is preserved rather than silently dropped.
-      for (const key of Object.keys(p)) {
-        if (!IR_MAPPED_FIELDS.includes(key)) extensions[key] = p[key];
-        else if (key === "reasoning_effort" && effort === undefined) {
-          extensions[key] = p[key];
-        }
+
+      // `stream_options.include_usage` is the IR `includeUsage` hint; other
+      // stream_options keys are protocol-native (Presence/shape preserved).
+      let includeUsage: boolean | undefined;
+      let streamOptions: Record<string, unknown> | undefined;
+      if (p.stream_options && typeof p.stream_options === "object") {
+        const so = { ...(p.stream_options as Record<string, unknown>) };
+        if (typeof so.include_usage === "boolean") includeUsage = so.include_usage;
+        delete so.include_usage;
+        if (Object.keys(so).length) streamOptions = so;
       }
 
-      // `stream_options.include_usage` is the IR `includeUsage` hint; lift it
-      // out so it round-trips through the canonical field (05.translate-api.md
-      // §9.4) while other stream_options keys stay preserved as extensions.
-      let includeUsage: boolean | undefined;
-      const rawStreamOptions = extensions.stream_options;
-      if (rawStreamOptions && typeof rawStreamOptions === "object") {
-        const so = { ...(rawStreamOptions as Record<string, unknown>) };
-        if (typeof so.include_usage === "boolean") {
-          includeUsage = so.include_usage;
-        }
-        delete so.include_usage;
-        if (Object.keys(so).length) extensions.stream_options = so;
-        else delete extensions.stream_options;
+      const nativeChat: ChatNativeRequest = {};
+      if (typeof p.max_completion_tokens === "number") {
+        nativeChat.maxTokensField = "max_completion_tokens";
+      } else if (typeof p.max_tokens === "number") {
+        nativeChat.maxTokensField = "max_tokens";
+      }
+      if (streamOptions) nativeChat.streamOptions = streamOptions;
+      if (typeof p.store === "boolean") nativeChat.store = p.store;
+      if (p.metadata && typeof p.metadata === "object") {
+        nativeChat.metadata = p.metadata as Record<string, unknown>;
+      }
+      if (typeof p.user === "string") nativeChat.user = p.user;
+      if (typeof p.n === "number") nativeChat.n = p.n;
+      if (typeof p.logprobs === "boolean") nativeChat.logprobs = p.logprobs;
+      if (typeof p.top_logprobs === "number") nativeChat.topLogprobs = p.top_logprobs;
+      if (p.response_format && typeof p.response_format === "object") {
+        nativeChat.responseFormat = p.response_format as Record<string, unknown>;
+      }
+      if (typeof p.service_tier === "string") nativeChat.serviceTier = p.service_tier;
+      if (Array.isArray(p.modalities)) {
+        nativeChat.modalities = p.modalities.filter((m): m is string => typeof m === "string");
+      }
+      if (p.audio && typeof p.audio === "object") {
+        nativeChat.audio = p.audio as Record<string, unknown>;
+      }
+      if (effort === undefined && typeof p.reasoning_effort === "string") {
+        nativeChat.reasoningEffort = p.reasoning_effort;
+      }
+
+      // Residual unknown fields: same-protocol preserve in `native.chat.extra`
+      // (docs/07 §5.9); a target that cannot express them fails closed.
+      const knownFields = new Set([...IR_MAPPED_FIELDS, ...EXTENSION_FIELDS]);
+      for (const key of Object.keys(p)) {
+        if (knownFields.has(key)) continue;
+        (nativeChat.extra ??= {})[key] = p[key];
       }
 
       const generation: CanonicalGenerationOptions = {};
@@ -165,14 +190,13 @@ export function createOpenAiChatRequestCodec(
       return {
         model: p.model,
         messages,
-        system,
         tools: parseTools(p.tools),
         toolChoice: parseToolChoice(p.tool_choice),
         generation,
         thinking,
         parallelToolCalls,
         includeUsage,
-        extensions,
+        ...(Object.keys(nativeChat).length ? { native: { chat: nativeChat } } : {}),
       };
     },
 
@@ -181,6 +205,7 @@ export function createOpenAiChatRequestCodec(
       streaming: boolean,
       ctx: CodecContext = { warnings: [] },
     ): unknown {
+      projectAnthropicRequest(ctx, canonical.native?.anthropic);
       const body: Record<string, unknown> = {
         model: canonical.model,
         stream: streaming,
@@ -189,36 +214,48 @@ export function createOpenAiChatRequestCodec(
           reasoningField,
           ctx,
           profile.capabilities.reasoning?.signatureField,
+          profile.capabilities.roles,
         ),
       };
       warnDroppedCacheControl(canonical, ctx);
       if (canonical.tools?.length) {
-        body.tools = canonical.tools.map((t) => ({
-          type: "function",
-          function: {
-            name: t.name,
-            ...(t.description !== undefined ? { description: t.description } : {}),
-            parameters: t.inputSchema,
-            ...(t.strict !== undefined ? { strict: t.strict } : {}),
-          },
-        }));
+        body.tools = canonical.tools.map((t, ti) => {
+          // Anthropic server tools have no Chat equivalent; adjudicate before
+          // the map so they fail closed instead of becoming empty functions.
+          projectAnthropicTool(ctx, t.native?.anthropic, `tools[${ti}]`);
+          return {
+            type: "function",
+            function: {
+              name: t.name,
+              ...(t.description !== undefined ? { description: t.description } : {}),
+              parameters: t.inputSchema,
+              ...(t.strict !== undefined ? { strict: t.strict } : {}),
+            },
+          };
+        });
       }
       if (canonical.toolChoice) body.tool_choice = renderToolChoice(canonical.toolChoice);
       if (canonical.parallelToolCalls !== undefined) {
         body.parallel_tool_calls = canonical.parallelToolCalls;
       }
 
+      const nativeChat = canonical.native?.chat;
       // reasoning_effort is native to OpenAI Chat; render it from the canonical
       // thinking config regardless of the declared capability gate.
       if (canonical.thinking?.effort !== undefined) {
         body.reasoning_effort = canonical.thinking.effort;
-      } else if (canonical.extensions?.reasoning_effort !== undefined) {
-        // Unmapped effort value preserved through extensions (GAP-004).
-        body.reasoning_effort = canonical.extensions.reasoning_effort;
+      } else if (nativeChat?.reasoningEffort !== undefined) {
+        body.reasoning_effort = nativeChat.reasoningEffort;
       }
 
       const gen = canonical.generation;
-      if (gen?.maxTokens !== undefined) body.max_tokens = gen.maxTokens;
+      if (gen?.maxTokens !== undefined) {
+        if (nativeChat?.maxTokensField === "max_completion_tokens") {
+          body.max_completion_tokens = gen.maxTokens;
+        } else {
+          body.max_tokens = gen.maxTokens;
+        }
+      }
       if (gen?.temperature !== undefined) body.temperature = gen.temperature;
       if (gen?.topP !== undefined) body.top_p = gen.topP;
       if (gen?.stopSequences?.length) body.stop = gen.stopSequences;
@@ -226,10 +263,34 @@ export function createOpenAiChatRequestCodec(
       if (gen?.frequencyPenalty !== undefined) body.frequency_penalty = gen.frequencyPenalty;
       if (gen?.seed !== undefined) body.seed = gen.seed;
 
-      const ext = canonical.extensions ?? {};
-      for (const key of EXTENSION_FIELDS) {
-        if (ext[key] !== undefined) body[key] = ext[key];
+      if (nativeChat) {
+        if (nativeChat.store !== undefined) body.store = nativeChat.store;
+        if (nativeChat.metadata !== undefined) body.metadata = nativeChat.metadata;
+        if (nativeChat.user !== undefined) body.user = nativeChat.user;
+        if (nativeChat.n !== undefined) body.n = nativeChat.n;
+        if (nativeChat.logprobs !== undefined) body.logprobs = nativeChat.logprobs;
+        if (nativeChat.topLogprobs !== undefined) body.top_logprobs = nativeChat.topLogprobs;
+        if (nativeChat.responseFormat !== undefined) {
+          body.response_format = nativeChat.responseFormat;
+        }
+        if (nativeChat.serviceTier !== undefined) body.service_tier = nativeChat.serviceTier;
+        if (nativeChat.modalities !== undefined) body.modalities = nativeChat.modalities;
+        if (nativeChat.audio !== undefined) body.audio = nativeChat.audio;
+        if (nativeChat.streamOptions !== undefined) {
+          body.stream_options = { ...nativeChat.streamOptions };
+        }
+        for (const [key, value] of Object.entries(nativeChat)) {
+          if (key === "maxTokensField" || key === "extra") continue;
+          recordExtensionDisposition(ctx, key, value, true, `native.chat.${key}`);
+        }
+        if (nativeChat.extra) {
+          for (const [key, value] of Object.entries(nativeChat.extra)) {
+            body[key] = value;
+            recordExtensionDisposition(ctx, key, value, true, `native.chat.extra.${key}`);
+          }
+        }
       }
+
       // includeUsage is best-effort: only OpenAI Chat streaming carries it.
       // `false` removes any inherited flag; unsupported shapes are ignored.
       if (canonical.includeUsage !== undefined && streaming) {
@@ -241,20 +302,16 @@ export function createOpenAiChatRequestCodec(
         if (Object.keys(streamOptions).length) body.stream_options = streamOptions;
         else delete body.stream_options;
       }
+
+      // Residual extensions (externally constructed IR) are droppable and
+      // recorded as drops, not fidelity warnings.
+      const ext = canonical.extensions ?? {};
       for (const key of Object.keys(ext)) {
-        if (key === "reasoning_effort") continue; // handled explicitly above
-        if (!EXTENSION_FIELDS.includes(key)) {
-          ctx.warnings.push({
-            code: "dropped_extension",
-            message: "Extension cannot be represented in OpenAI Chat request",
-            fidelity: "LOSSY",
-            field: "extensions",
-          });
-        }
-      }
-      for (const key of Object.keys(ext)) {
-        const forwarded = key === "reasoning_effort" || EXTENSION_FIELDS.includes(key);
-        recordExtensionDisposition(ctx, key, ext[key], forwarded);
+        applyFieldPolicy(ctx, `extensions.${key}`, ext[key], "droppable", {
+          kind: "unsupported",
+          cause: "unsupported_by_target",
+        });
+        recordExtensionDisposition(ctx, key, ext[key], false);
       }
 
       // TH-004: never silently drop a thinking configuration request. Only
@@ -306,8 +363,7 @@ function parseMessages(
   reasoningField: string | undefined,
   ctx: CodecContext,
   signatureField?: string,
-): ParsedMessages {  if (!Array.isArray(raw)) throw validationError("messages must be an array");
-  const system: ContentPart[] = [];
+): CanonicalMessage[] {  if (!Array.isArray(raw)) throw validationError("messages must be an array");
   const messages: CanonicalMessage[] = [];
 
   for (let i = 0; i < raw.length; i++) {
@@ -317,7 +373,11 @@ function parseMessages(
     }
     const role = m.role;
     if (role === "system" || role === "developer") {
-      system.push(...parseUserParts(m.content, ctx));
+      messages.push({
+        role,
+        content: parseUserParts(m.content, ctx),
+        native: { chat: { origin: "messages" } },
+      });
     } else if (role === "user") {
       messages.push({ role: "user", content: parseUserParts(m.content, ctx) });
     } else if (role === "assistant") {
@@ -330,7 +390,7 @@ function parseMessages(
         throw validationError(`messages[${i}] tool message requires tool_call_id`);
       }
       messages.push({
-        role: "user",
+        role: "tool",
         content: [
           {
             type: "tool_result",
@@ -338,6 +398,7 @@ function parseMessages(
             content: parseUserParts(m.content, ctx),
           },
         ],
+        native: { chat: { origin: "messages" } },
       });
     } else {
       ctx.warnings.push({
@@ -349,7 +410,7 @@ function parseMessages(
     }
   }
 
-  return { system: system.length ? system : undefined, messages };
+  return messages;
 }
 
 function parseUserParts(content: unknown, ctx: CodecContext): ContentPart[] {
@@ -484,19 +545,21 @@ function renderMessages(
   reasoningField: string | undefined,
   ctx: CodecContext,
   signatureField?: string,
+  roles?: RoleCapabilities,
 ): unknown[] {
+  assertToolPairing(canonical.messages, "openai-chat");
   const out: unknown[] = [];
-  if (canonical.system?.length) {
-    const system = stripAnthropicBillingHeaders(canonical.system, ctx);
-    if (system.length) {
-      out.push({ role: "system", content: renderUserContent(system, ctx) });
-    }
-  }
   for (const m of canonical.messages) {
-    if (m.role === "system") {
-      const system = stripAnthropicBillingHeaders(m.content, ctx);
-      if (system.length) {
-        out.push({ role: "system", content: renderUserContent(system, ctx) });
+    if (m.content.some((p) => p.type === "opaque_native")) {
+      throw fieldProjectionError("opaque_native", "openai-chat");
+    }
+    if (m.role === "developer" && roles?.developerRole !== true) {
+      throw roleProjectionError("developer", "openai-chat");
+    }
+    if (m.role === "system" || m.role === "developer") {
+      const content = stripAnthropicBillingHeaders(m.content, ctx);
+      if (content.length) {
+        out.push({ role: m.role, content: renderUserContent(content, ctx) });
       }
       continue;
     }
@@ -569,13 +632,11 @@ function renderUserContent(parts: ContentPart[], ctx: CodecContext): string | un
         if (p.source.type === "url") {
           return { type: "image_url", image_url: { url: p.source.url } };
         }
-        ctx.warnings.push({
-          code: "image_lossy",
-          message: "Base64 image cannot be represented in OpenAI Chat request",
-          fidelity: "LOSSY",
-          field: "content.image",
-        });
-        return null;
+        // OpenAI accepts base64 images as data URLs, so this is lossless.
+        return {
+          type: "image_url",
+          image_url: { url: `data:${p.source.mediaType};base64,${p.source.data}` },
+        };
       }
       return p;
     })
@@ -633,13 +694,12 @@ function warnDroppedCacheControl(
   let dropped = false;
   const scan = (parts: ContentPart[] | undefined): void => {
     for (const part of parts ?? []) {
-      if (part.type === "text" && part.cache) dropped = true;
+      if (part.type === "text" && getCacheControl(part)) dropped = true;
       if (part.type === "tool_result") scan(part.content);
     }
   };
-  scan(canonical.system);
   for (const message of canonical.messages) scan(message.content);
-  if (canonical.tools?.some((t) => t.cache)) dropped = true;
+  if (canonical.tools?.some((t) => getCacheControl(t))) dropped = true;
   if (dropped) {
     ctx.warnings.push({
       code: "privacy_cache_control_dropped",

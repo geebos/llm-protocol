@@ -8,6 +8,8 @@ import type { ContentPart, ImageSource } from "../../ir/types.js";
 import { validationError } from "../../errors.js";
 import type { CodecContext } from "../protocol-adapter.js";
 import { isEphemeralCacheControl } from "../../cache/anthropic/cache-control.js";
+import { getCacheControl } from "../../ir/native/accessors.js";
+import { fieldProjectionError } from "../../ir/projection/role.js";
 
 export function toImageSource(block: {
   source?: unknown;
@@ -59,7 +61,7 @@ export function parseAnthropicContent(
           type: "text",
           text: b.text,
           ...(isEphemeralCacheControl(b.cache_control)
-            ? { cache: b.cache_control }
+            ? { native: { anthropic: { cacheControl: b.cache_control } } }
             : {}),
         });
         break;
@@ -93,24 +95,22 @@ export function parseAnthropicContent(
           type: "reasoning",
           text: typeof b.thinking === "string" ? b.thinking : undefined,
           signature: typeof b.signature === "string" ? b.signature : undefined,
-          providerMetadata: { anthropicBlock: "thinking" },
+          native: { anthropic: { thinkingKind: "thinking" } },
         });
         break;
       case "redacted_thinking":
         parts.push({
           type: "reasoning",
           encryptedContent: typeof b.data === "string" ? b.data : undefined,
-          providerMetadata: { anthropicBlock: "redacted_thinking" },
+          native: { anthropic: { thinkingKind: "redacted_thinking" } },
         });
         break;
       default:
-        ctx.warnings.push({
-          code: "unknown_content_block",
-          message: "Unknown Anthropic content block type preserved in extensions",
-          fidelity: "LOSSY",
-          field: "content",
+        parts.push({
+          type: "opaque_native",
+          sourceFormat: "anthropic-messages",
+          raw: b,
         });
-        parts.push({ type: "text", text: "" });
     }
   }
   return parts;
@@ -121,13 +121,15 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
   const blocks: unknown[] = [];
   for (const part of parts) {
     switch (part.type) {
-      case "text":
+      case "text": {
+        const cacheControl = getCacheControl(part);
         blocks.push({
           type: "text",
           text: part.text,
-          ...(part.cache ? { cache_control: part.cache } : {}),
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
         });
         break;
+      }
       case "image":
         blocks.push({ type: "image", source: renderImageSource(part.source) });
         break;
@@ -148,10 +150,7 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
         });
         break;
       case "reasoning":
-        if (
-          (part.providerMetadata as { anthropicBlock?: string } | undefined)
-            ?.anthropicBlock === "redacted_thinking"
-        ) {
+        if (part.native?.anthropic?.thinkingKind === "redacted_thinking") {
           blocks.push({
             type: "redacted_thinking",
             data: part.encryptedContent ?? "",
@@ -162,6 +161,18 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
             thinking: part.text ?? "",
             ...(part.signature ? { signature: part.signature } : {}),
           });
+        }
+        break;
+      case "refusal":
+        // Anthropic expresses a refusal as ordinary text with stop_reason
+        // "refusal"; there is no dedicated refusal block.
+        blocks.push({ type: "text", text: part.text });
+        break;
+      case "opaque_native":
+        if (part.sourceFormat === "anthropic-messages") {
+          blocks.push(part.raw);
+        } else {
+          throw fieldProjectionError("opaque_native", "anthropic-messages");
         }
         break;
     }

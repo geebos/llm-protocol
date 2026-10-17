@@ -45,41 +45,62 @@ export function restoreResponse(
 
   const walk = (parts: ContentPart[]): void => {
     for (const part of parts) {
-      if (part.type === "text") {
-        part.text = restoreField(part.text);
-      } else if (part.type === "tool_call") {
-        if (part.argumentsText.length > maxToolArgumentBytes) {
-          counts.warnings.push({
-            code: "privacy_buffer_overflow",
-            message: "Tool arguments exceed the restore limit and were left unrestored",
-            field: "content.tool_call.arguments",
-          });
-          continue;
+      switch (part.type) {
+        case "text":
+          part.text = restoreField(part.text);
+          break;
+        case "refusal":
+          // Refusal text is client-facing and restored like text (E-3).
+          part.text = restoreField(part.text);
+          break;
+        case "tool_call": {
+          if (part.argumentsText.length > maxToolArgumentBytes) {
+            counts.warnings.push({
+              code: "privacy_buffer_overflow",
+              message: "Tool arguments exceed the restore limit and were left unrestored",
+              field: "content.tool_call.arguments",
+            });
+            break;
+          }
+          const result = restoreJsonText(
+            part.argumentsText,
+            template,
+            entries,
+            maxPlaceholderLength,
+          );
+          if (result.parseFailed) {
+            counts.jsonParseFailures++;
+            counts.warnings.push({
+              code: "privacy_json_parse_failed",
+              message: "Tool arguments were not valid JSON and were left unrestored",
+              field: "content.tool_call.arguments",
+            });
+          } else {
+            part.argumentsText = result.text;
+            counts.unknown += result.unknown;
+            counts.restored += result.matched;
+            counts.warnings.push(...result.warnings);
+          }
+          break;
         }
-        const result = restoreJsonText(
-          part.argumentsText,
-          template,
-          entries,
-          maxPlaceholderLength,
-        );
-        if (result.parseFailed) {
-          counts.jsonParseFailures++;
-          counts.warnings.push({
-            code: "privacy_json_parse_failed",
-            message: "Tool arguments were not valid JSON and were left unrestored",
-            field: "content.tool_call.arguments",
-          });
-        } else {
-          part.argumentsText = result.text;
-          counts.unknown += result.unknown;
-          counts.restored += result.matched;
-          counts.warnings.push(...result.warnings);
-        }
-      } else if (part.type === "tool_result") {
-        walk(part.content);
+        case "tool_result":
+          walk(part.content);
+          break;
+        case "annotation":
+          // Only the display text; offsets/URLs/reference ids are untouched.
+          if (part.text !== undefined) part.text = restoreField(part.text);
+          break;
+        case "image":
+        case "file":
+          // Binary/URL payloads are never rewritten by redaction.
+          break;
+        case "reasoning":
+        case "opaque_native":
+          // Opaque/reasoning fields are never rewritten (signature protection).
+          break;
       }
     }
   };
-  walk(response.content);
+  walk(response.choices.flatMap((choice) => choice.content));
   return counts;
 }

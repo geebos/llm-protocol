@@ -23,6 +23,8 @@ export interface NormalizedCoverage {
   toolSchema: Required<ToolSchemaCoverage>;
   extensionsDefault: CoverageAction;
   extensionPaths: Record<string, CoverageAction>;
+  nativeDefault: CoverageAction;
+  nativePaths: Record<string, CoverageAction>;
 }
 
 const VALID_ACTIONS: readonly CoverageAction[] = ["redact", "allow", "reject"];
@@ -44,6 +46,17 @@ export function normalizeCoverage(policy: PrivacyCoveragePolicy): NormalizedCove
     extensionPaths = {};
     for (const [key, value] of Object.entries(policy.extensions)) {
       extensionPaths[key] = action(value, "allow", `extensions.${key}`);
+    }
+  }
+
+  let nativeDefault: CoverageAction = "allow";
+  let nativePaths: Record<string, CoverageAction> = {};
+  if (typeof policy.native === "string") {
+    nativeDefault = action(policy.native, "allow", "native");
+  } else if (policy.native && typeof policy.native === "object") {
+    nativePaths = {};
+    for (const [key, value] of Object.entries(policy.native)) {
+      nativePaths[key] = action(value, "allow", `native.${key}`);
     }
   }
 
@@ -70,6 +83,8 @@ export function normalizeCoverage(policy: PrivacyCoveragePolicy): NormalizedCove
     toolSchema,
     extensionsDefault,
     extensionPaths,
+    nativeDefault,
+    nativePaths,
   };
 }
 
@@ -79,6 +94,15 @@ export function extensionAction(
 ): CoverageAction {
   if (path in coverage.extensionPaths) return coverage.extensionPaths[path];
   return coverage.extensionsDefault;
+}
+
+/** Resolve a native partition field action; key is `<proto>.<field>`. */
+export function nativeAction(
+  coverage: NormalizedCoverage,
+  path: string,
+): CoverageAction {
+  if (path in coverage.nativePaths) return coverage.nativePaths[path];
+  return coverage.nativeDefault;
 }
 
 /** Channels that are only ever `redact` / `allow` / `reject` at the top level. */

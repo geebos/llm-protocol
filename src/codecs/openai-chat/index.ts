@@ -22,6 +22,7 @@ export const openaiChatDefaultProfile: ProviderProfile = {
     streaming: true,
     thinking: false,
     cache: { promptCacheKey: true },
+    roles: { midConversationSystem: true, developerRole: true },
   },
   defaultHeaders: {},
 };

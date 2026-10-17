@@ -73,6 +73,23 @@ export interface CacheCapabilities {
   promptCacheKey?: boolean;
 }
 
+/**
+ * Message-role capabilities (docs/07 §5.2.1, DEC-11).
+ *
+ * Protocol role/position is judged per capability, never by a single boolean.
+ * Absent means unsupported (fail-closed).
+ */
+export interface RoleCapabilities {
+  /** Target supports a mid-conversation system message. */
+  midConversationSystem?: boolean;
+  /** Target supports the developer role (distinct from system). */
+  developerRole?: boolean;
+  /** Target supports `clear_at` on system messages. */
+  systemClearAt?: boolean;
+  /** Target supports per-message output_config. */
+  perMessageOutputConfig?: boolean;
+}
+
 export interface ProviderCapabilities {
   tools: boolean;
   parallelTools: boolean;
@@ -88,6 +105,8 @@ export interface ProviderCapabilities {
   stream?: StreamCapabilities;
   /** Prompt-cache dialect. */
   cache?: CacheCapabilities;
+  /** Message-role capabilities (docs/07 §5.2.1). */
+  roles?: RoleCapabilities;
 }
 
 export interface ProviderProfile {

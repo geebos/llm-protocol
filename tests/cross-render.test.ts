@@ -56,6 +56,8 @@ describe("OpenAI request -> Anthropic request render", () => {
     expect(body.tool_choice).toEqual({ type: "tool", name: "echo" });
     const tools = body.tools as Array<Record<string, unknown>>;
     expect(tools[0]).toMatchObject({ name: "echo", input_schema: { type: "object" } });
+    // Phase: the strict flag is governed by field policy (droppable); a
+    // standalone codec call without a projection context neither warns nor drops.
 
     const msgs = body.messages as Array<Record<string, unknown>>;
     // system goes to top-level `system`; messages hold user/assistant/tool result
@@ -72,8 +74,9 @@ describe("OpenAI request -> Anthropic request render", () => {
     expect(toolResult.type).toBe("tool_result");
     expect(toolResult.tool_use_id).toBe("call_1");
 
-    // strict tool flag is LOSSY on the Anthropic side
-    expect(ctx.warnings.some((w) => w.code === "tool_strict")).toBe(true);
+    // strict tool flag is droppable via field policy; a standalone render
+    // without a projection context produces no warning.
+    expect(ctx.warnings.some((w) => w.code === "tool_strict")).toBe(false);
   });
 
   it("warns when thinking config is requested but target lacks thinking", () => {
@@ -276,11 +279,16 @@ describe("OpenAI response -> Anthropic response render", () => {
   const canonical: CanonicalResponse = {
     id: "chatcmpl_1",
     model: "gpt-4o",
-    content: [
-      { type: "text", text: "Here is the result." },
-      { type: "tool_call", id: "call_1", name: "echo", argumentsText: '{"x":1}' },
-    ] as ContentPart[],
-    finishReason: "tool_call",
+    choices: [
+      {
+        index: 0,
+        content: [
+          { type: "text", text: "Here is the result." },
+          { type: "tool_call", id: "call_1", name: "echo", argumentsText: '{"x":1}' },
+        ] as ContentPart[],
+        finishReason: "tool_call",
+      },
+    ],
     usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
   };
 
@@ -299,7 +307,7 @@ describe("OpenAI response -> Anthropic response render", () => {
   it("warns on content_filter stop reason mapped to end_turn", () => {
     const ctx = newCodecContext();
     anthropic.response.renderResponse(
-      { ...canonical, finishReason: "content_filter" },
+      { ...canonical, choices: [{ ...canonical.choices[0], finishReason: "content_filter" }] },
       ctx,
     );
     expect(ctx.warnings.some((w) => w.code === "stop_reason_lossy")).toBe(true);
@@ -310,11 +318,16 @@ describe("Anthropic response -> OpenAI response render", () => {
   const canonical: CanonicalResponse = {
     id: "msg_1",
     model: "claude-sonnet-4-5",
-    content: [
-      { type: "reasoning", text: "chain", signature: "sig-1" } as ContentPart,
-      { type: "text", text: "Answer" },
+    choices: [
+      {
+        index: 0,
+        content: [
+          { type: "reasoning", text: "chain", signature: "sig-1" } as ContentPart,
+          { type: "text", text: "Answer" },
+        ],
+        finishReason: "end_turn",
+      },
     ],
-    finishReason: "end_turn",
     usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
   };
 
@@ -406,7 +419,7 @@ describe("images and base64 lossy warning", () => {
     expect(content[0]).toEqual({ type: "image_url", image_url: { url: "https://x/y.png" } });
   });
 
-  it("emits a LOSSY warning for base64 images on OpenAI target", () => {
+  it("renders base64 images as data URLs on the OpenAI target", () => {
     const ctx = newCodecContext();
     const canonical: CanonicalRequest = {
       model: "m",
@@ -420,7 +433,10 @@ describe("images and base64 lossy warning", () => {
       ],
     };
     const body = openai.request.renderRequest(canonical, false, ctx) as Record<string, unknown>;
-    expect(body.messages).toEqual([]);
-    expect(ctx.warnings.some((w) => w.code === "image_lossy")).toBe(true);
+    const messages = body.messages as Array<{
+      content: Array<{ type: string; image_url: { url: string } }>;
+    }>;
+    expect(messages[0].content[0].image_url.url).toBe("data:image/png;base64,AAAA");
+    expect(ctx.warnings.some((w) => w.code === "image_lossy")).toBe(false);
   });
 });

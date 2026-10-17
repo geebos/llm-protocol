@@ -11,12 +11,18 @@ import type { CanonicalRequest } from "../ir/types.js";
 import type { CanonicalResponse } from "../ir/response.js";
 import type { CanonicalError } from "../errors.js";
 import type { TranslationWarning } from "../ir/fidelity.js";
+import type { DropRecord } from "../ir/projection/drop-record.js";
+import type { ProjectionContext } from "../ir/projection/context.js";
 import type { SSEFrame } from "../streams/sse-parser.js";
 import type { CanonicalStreamEvent } from "../streams/types.js";
 
 /** Collector for fidelity warnings produced during a single translation. */
 export interface CodecContext {
   warnings: TranslationWarning[];
+  /** Field-projection drop audit (docs/07 §6.3). */
+  drops?: DropRecord[];
+  /** Current projection direction, set by the pipeline (docs/07 §6.1). */
+  projection?: ProjectionContext;
   /**
    * Extension fields the codec rendered, with kind and whether they were
    * forwarded (PR-014 evidence 1). Populated by `renderRequest`.
@@ -25,7 +31,7 @@ export interface CodecContext {
 }
 
 export function newCodecContext(): CodecContext {
-  return { warnings: [] };
+  return { warnings: [], drops: [] };
 }
 
 /** Endpoint identity, protocol-independent enough to route across adapters. */

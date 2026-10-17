@@ -11,8 +11,14 @@ import { encodeSSE } from "../sse-parser.js";
 import type { CanonicalFinishReason } from "../../ir/finish-reason.js";
 import type { CanonicalUsage } from "../../ir/usage.js";
 import type { TranslationWarning } from "../../ir/fidelity.js";
+import {
+  createStreamBlockKey,
+  streamBlockKeyId,
+  type ResolvedStreamLocation,
+  type StreamBlockKey,
+} from "../../ir/stream-key.js";
 
-type BlockKind = "text" | "tool" | "reasoning";
+type BlockKind = StreamBlockKey["kind"];
 
 const STOP_REASON_MAP: Partial<Record<CanonicalFinishReason, string>> = {
   end_turn: "end_turn",
@@ -31,9 +37,10 @@ export function createAnthropicStreamRenderer(
   let ended = false;
   let terminal = false;
   let cachedUsage: CanonicalUsage | undefined;
+  let cachedFinishReason: CanonicalFinishReason | undefined;
 
-  function outputIndex(kind: BlockKind, sourceIndex: number): number {
-    const key = `${kind}:${sourceIndex}`;
+  function outputIndex(kind: BlockKind, location: ResolvedStreamLocation): number {
+    const key = streamBlockKeyId(createStreamBlockKey(kind, location));
     let out = indexMap.get(key);
     if (out === undefined) {
       out = nextIndex++;
@@ -73,8 +80,29 @@ export function createAnthropicStreamRenderer(
           return;
         }
 
+        case "choice_start": {
+          // Anthropic Messages has no multi-candidate concept; a second choice
+          // is not representable (docs/07 §7, L-2). Fail closed.
+          if (event.choice !== 0) {
+            terminal = true;
+            send(controller, "error", {
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: `multi-choice stream (choice ${event.choice}) is not representable in Anthropic Messages`,
+              },
+            });
+          }
+          return;
+        }
+
+        case "choice_end": {
+          cachedFinishReason = event.finishReason;
+          return;
+        }
+
         case "text_start": {
-          const index = outputIndex("text", event.index);
+          const index = outputIndex("text", event.location);
           send(controller, "content_block_start", {
             type: "content_block_start",
             index,
@@ -83,7 +111,7 @@ export function createAnthropicStreamRenderer(
           return;
         }
         case "text_delta": {
-          const index = outputIndex("text", event.index);
+          const index = outputIndex("text", event.location);
           send(controller, "content_block_delta", {
             type: "content_block_delta",
             index,
@@ -92,7 +120,7 @@ export function createAnthropicStreamRenderer(
           return;
         }
         case "text_end": {
-          const index = outputIndex("text", event.index);
+          const index = outputIndex("text", event.location);
           send(controller, "content_block_stop", {
             type: "content_block_stop",
             index,
@@ -101,7 +129,7 @@ export function createAnthropicStreamRenderer(
         }
 
         case "tool_start": {
-          const index = outputIndex("tool", event.index);
+          const index = outputIndex("tool", event.location);
           send(controller, "content_block_start", {
             type: "content_block_start",
             index,
@@ -110,7 +138,7 @@ export function createAnthropicStreamRenderer(
           return;
         }
         case "tool_arguments_delta": {
-          const index = outputIndex("tool", event.index);
+          const index = outputIndex("tool", event.location);
           send(controller, "content_block_delta", {
             type: "content_block_delta",
             index,
@@ -119,7 +147,7 @@ export function createAnthropicStreamRenderer(
           return;
         }
         case "tool_end": {
-          const index = outputIndex("tool", event.index);
+          const index = outputIndex("tool", event.location);
           send(controller, "content_block_stop", {
             type: "content_block_stop",
             index,
@@ -128,7 +156,7 @@ export function createAnthropicStreamRenderer(
         }
 
         case "reasoning_start": {
-          const index = outputIndex("reasoning", event.index);
+          const index = outputIndex("reasoning", event.location);
           const signature =
             (event.metadata as { signature?: unknown } | undefined)?.signature;
           send(controller, "content_block_start", {
@@ -143,7 +171,7 @@ export function createAnthropicStreamRenderer(
           return;
         }
         case "reasoning_delta": {
-          const index = outputIndex("reasoning", event.index);
+          const index = outputIndex("reasoning", event.location);
           if (event.text !== undefined) {
             send(controller, "content_block_delta", {
               type: "content_block_delta",
@@ -160,7 +188,36 @@ export function createAnthropicStreamRenderer(
           return;
         }
         case "reasoning_end": {
-          const index = outputIndex("reasoning", event.index);
+          const index = outputIndex("reasoning", event.location);
+          send(controller, "content_block_stop", {
+            type: "content_block_stop",
+            index,
+          });
+          return;
+        }
+
+        case "refusal_start": {
+          // Anthropic has no refusal block; render as a text block (lossy but
+          // representable) so the text reaches the client.
+          const index = outputIndex("refusal", event.location);
+          send(controller, "content_block_start", {
+            type: "content_block_start",
+            index,
+            content_block: { type: "text", text: "" },
+          });
+          return;
+        }
+        case "refusal_delta": {
+          const index = outputIndex("refusal", event.location);
+          send(controller, "content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: { type: "text_delta", text: event.text },
+          });
+          return;
+        }
+        case "refusal_end": {
+          const index = outputIndex("refusal", event.location);
           send(controller, "content_block_stop", {
             type: "content_block_stop",
             index,
@@ -174,11 +231,15 @@ export function createAnthropicStreamRenderer(
           cachedUsage = event.usage;
           return;
 
+        case "choice_metadata":
+          return;
+
         case "message_end": {
           if (ended) return;
           ended = true;
           terminal = true;
-          if (event.finishReason === "content_filter") {
+          const finishReason = event.finishReason ?? cachedFinishReason;
+          if (finishReason === "content_filter") {
             report?.({
               code: "stop_reason_lossy",
               message: "content_filter stop reason mapped to end_turn for Anthropic stream",
@@ -191,7 +252,7 @@ export function createAnthropicStreamRenderer(
           // (structural requirement, not fabricated billing data).
           send(controller, "message_delta", {
             type: "message_delta",
-            delta: { stop_reason: renderStopReason(event.finishReason) },
+            delta: { stop_reason: renderStopReason(finishReason) },
             usage: renderUsage(cachedUsage ?? {}),
           });
           return;

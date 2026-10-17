@@ -3,32 +3,35 @@
  *
  * Enforces, in order:
  * - `message_start` precedes all content events and appears at most once;
- * - every block start/delta/end uses the same (kind, index);
+ * - every block start/delta/end uses the same (choice, kind, content) key;
  * - `message_end` appears at most once and is a terminal transition;
  * - only one terminal transition (error/end) per stream.
  *
- * Violations surface as a `stream_protocol` error event rather than a crash.
+ * Blocks are keyed with the unified `StreamBlockKey` (docs/07 §7.1, DEC-13) so
+ * multi-candidate streams never alias two choices onto one key. Index-based
+ * events default `choice` to 0; location-based events (refusal) resolve the key
+ * at the parser boundary via `createStreamBlockKey`.
  */
 import type { CanonicalStreamEvent } from "./types.js";
 import type { CanonicalError } from "../errors.js";
-
-type BlockKind = "text" | "tool" | "reasoning";
-type IndexedEvent = Extract<CanonicalStreamEvent, { index: number }>;
+import {
+  createStreamBlockKey,
+  streamBlockKeyId,
+  type StreamBlockKey,
+} from "../ir/stream-key.js";
 
 function protocolError(message: string): CanonicalError {
   return { kind: "stream_protocol", message };
-}
-
-function startKind(type: "text_start" | "tool_start" | "reasoning_start"): BlockKind {
-  return type === "text_start" ? "text" : type === "tool_start" ? "tool" : "reasoning";
 }
 
 export class StreamValidator {
   private messageStarted = false;
   private messageEnded = false;
   private terminal = false;
-  private readonly blocks = new Map<string, BlockKind>();
+  private readonly blocks = new Map<string, StreamBlockKey["kind"]>();
   private readonly ended = new Set<string>();
+  private readonly startedChoices = new Set<number>();
+  private readonly endedChoices = new Set<number>();
 
   /** Returns the validated event, an error event, or null to swallow. */
   accept(event: CanonicalStreamEvent): CanonicalStreamEvent {
@@ -46,36 +49,58 @@ export class StreamValidator {
         this.messageStarted = true;
         return event;
 
-      case "text_start":
-      case "tool_start":
-      case "reasoning_start": {
+      case "choice_start":
         if (!this.messageStarted) {
-          return { type: "error", error: protocolError(`${event.type} before message_start`) };
+          return { type: "error", error: protocolError("choice_start before message_start") };
         }
-        if (this.messageEnded) {
-          return { type: "error", error: protocolError(`${event.type} after message_end`) };
+        if (this.startedChoices.has(event.choice)) {
+          return { type: "error", error: protocolError("duplicate choice_start") };
         }
-        const key = blockKey(startKind(event.type), event.index);
-        if (this.blocks.has(key)) {
-          return { type: "error", error: protocolError(`duplicate ${event.type} for index ${event.index}`) };
-        }
-        this.blocks.set(key, startKind(event.type));
+        this.startedChoices.add(event.choice);
         return event;
-      }
+
+      case "choice_end":
+        if (!this.startedChoices.has(event.choice)) {
+          return { type: "error", error: protocolError("choice_end for unstarted choice") };
+        }
+        if (this.endedChoices.has(event.choice)) {
+          return { type: "error", error: protocolError("duplicate choice_end") };
+        }
+        this.endedChoices.add(event.choice);
+        return event;
+
+      case "text_start":
+        return this.startGuard(event, createStreamBlockKey("text", event.location));
+      case "tool_start":
+        return this.startGuard(event, createStreamBlockKey("tool", event.location));
+      case "reasoning_start":
+        return this.startGuard(event, createStreamBlockKey("reasoning", event.location));
+      case "refusal_start":
+        return this.startGuard(event, createStreamBlockKey("refusal", event.location));
 
       case "text_delta":
-        return this.deltaGuard(event, "text");
+        return this.deltaGuard(event, createStreamBlockKey("text", event.location));
       case "tool_arguments_delta":
-        return this.deltaGuard(event, "tool");
+        return this.deltaGuard(event, createStreamBlockKey("tool", event.location));
       case "reasoning_delta":
-        return this.deltaGuard(event, "reasoning");
+        return this.deltaGuard(event, createStreamBlockKey("reasoning", event.location));
+      case "refusal_delta":
+        return this.deltaGuard(event, createStreamBlockKey("refusal", event.location));
 
       case "text_end":
-        return this.endGuard(event, "text");
+        return this.endGuard(event, createStreamBlockKey("text", event.location));
       case "tool_end":
-        return this.endGuard(event, "tool");
+        return this.endGuard(event, createStreamBlockKey("tool", event.location));
       case "reasoning_end":
-        return this.endGuard(event, "reasoning");
+        return this.endGuard(event, createStreamBlockKey("reasoning", event.location));
+      case "refusal_end":
+        return this.endGuard(event, createStreamBlockKey("refusal", event.location));
+
+      case "choice_metadata":
+        if (!this.messageStarted) {
+          return { type: "error", error: protocolError("choice_metadata before message_start") };
+        }
+        return event;
 
       case "usage":
         if (!this.messageStarted) {
@@ -100,32 +125,68 @@ export class StreamValidator {
     }
   }
 
-  private deltaGuard(event: IndexedEvent, kind: BlockKind): CanonicalStreamEvent {
-    const key = blockKey(kind, event.index);
-    if (!this.blocks.has(key)) {
-      return { type: "error", error: protocolError(`${event.type} for unstarted index ${event.index}`) };
+  private startGuard(
+    event: CanonicalStreamEvent,
+    key: StreamBlockKey,
+  ): CanonicalStreamEvent {
+    if (!this.messageStarted) {
+      return { type: "error", error: protocolError(`${event.type} before message_start`) };
     }
-    if (this.ended.has(key)) {
-      return { type: "error", error: protocolError(`${event.type} after block end (index ${event.index})`) };
+    if (this.messageEnded) {
+      return { type: "error", error: protocolError(`${event.type} after message_end`) };
+    }
+    if (this.endedChoices.has(key.choice)) {
+      return { type: "error", error: protocolError(`${event.type} after choice_end`) };
+    }
+    this.startedChoices.add(key.choice);
+    const id = streamBlockKeyId(key);
+    if (this.blocks.has(id)) {
+      return {
+        type: "error",
+        error: protocolError(`duplicate ${event.type} for block ${id}`),
+      };
+    }
+    this.blocks.set(id, key.kind);
+    return event;
+  }
+
+  private deltaGuard(
+    event: CanonicalStreamEvent,
+    key: StreamBlockKey,
+  ): CanonicalStreamEvent {
+    const id = streamBlockKeyId(key);
+    if (this.endedChoices.has(key.choice)) {
+      return { type: "error", error: protocolError(`${event.type} after choice_end`) };
+    }
+    if (!this.blocks.has(id)) {
+      return { type: "error", error: protocolError(`${event.type} for unstarted block ${id}`) };
+    }
+    if (this.ended.has(id)) {
+      return {
+        type: "error",
+        error: protocolError(`${event.type} after block end (block ${id})`),
+      };
     }
     return event;
   }
 
-  private endGuard(event: IndexedEvent, kind: BlockKind): CanonicalStreamEvent {
-    const key = blockKey(kind, event.index);
-    if (!this.blocks.has(key)) {
-      return { type: "error", error: protocolError(`${event.type} for unstarted index ${event.index}`) };
+  private endGuard(
+    event: CanonicalStreamEvent,
+    key: StreamBlockKey,
+  ): CanonicalStreamEvent {
+    const id = streamBlockKeyId(key);
+    if (this.endedChoices.has(key.choice)) {
+      return { type: "error", error: protocolError(`${event.type} after choice_end`) };
     }
-    if (this.ended.has(key)) {
-      return { type: "error", error: protocolError(`duplicate ${event.type} (index ${event.index})`) };
+    if (!this.blocks.has(id)) {
+      return { type: "error", error: protocolError(`${event.type} for unstarted block ${id}`) };
     }
-    this.ended.add(key);
+    if (this.ended.has(id)) {
+      return { type: "error", error: protocolError(`duplicate ${event.type} (block ${id})`) };
+    }
+    this.ended.add(id);
     return event;
   }
-}
-
-function blockKey(kind: BlockKind, index: number): string {
-  return `${kind}:${index}`;
 }
 
 /**

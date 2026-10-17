@@ -65,79 +65,77 @@ function openaiOptions(extra: Record<string, unknown>): {
   };
 }
 
-describe("extension double evidence", () => {
-  it("allows extensions without evidence by default (PT-29)", async () => {
+describe("native field coverage (supersedes extension double evidence)", () => {
+  it("allows a native field without evidence by default (PT-29)", async () => {
     const cap = capturingFetch();
-    // `metadata` is not representable in Anthropic and is dropped, but the
-    // default allow coverage never requires evidence.
     await expect(
-      translate.chat.messages({
-        ...openaiOptions({ metadata: { a: 1 } }),
+      translate.chat.chat({
+        url: "https://api.openai.com/v1/chat/completions",
+        headers: { authorization: "Bearer sk" },
+        body: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          metadata: { a: 1 },
+        },
         fetch: cap.fetch,
         privacy: { recognizers: [phoneRecognizer()] },
       }),
     ).resolves.toBeDefined();
   });
 
-  it("redacts an opt-in extension path with consistent evidence (PT-29/33/69)", async () => {
+  it("redacts an opt-in native path (PT-29/33/69)", async () => {
     const cap = capturingFetch();
-    await translate.chat.messages({
-      ...openaiOptions({ metadata: { note: "call 13800138000" } }),
+    await translate.chat.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer sk" },
+      body: {
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: { note: "call 13800138000" },
+      },
       fetch: cap.fetch,
       privacy: {
         recognizers: [phoneRecognizer()],
-        coverage: { extensions: { metadata: "redact" } },
+        coverage: { native: { "chat.metadata": "redact" } },
       },
     });
-    const metadata = JSON.stringify((cap.lastBody() as { metadata?: unknown }).metadata);
+    const metadata = JSON.stringify(cap.lastBody().metadata);
     expect(metadata).not.toContain("13800138000");
     expect(metadata).toContain("<private_placeholder_phone_1>");
   });
 
-  it("rejects a rejected extension path that the codec still forwards (PT-29)", async () => {
+  it("rejects a sensitive value in a reject-native path (PT-29)", async () => {
+    const cap = capturingFetch();
+    await expect(
+      translate.chat.chat({
+        url: "https://api.openai.com/v1/chat/completions",
+        headers: { authorization: "Bearer sk" },
+        body: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          metadata: { a: "13800138000" },
+        },
+        fetch: cap.fetch,
+        privacy: {
+          recognizers: [phoneRecognizer()],
+          coverage: { native: { "chat.metadata": "reject" } },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "privacy_uncovered_channel" });
+  });
+
+  it("fails closed on a required native field for a cross-protocol target", async () => {
     const cap = capturingFetch();
     await expect(
       translate.chat.messages({
         ...openaiOptions({ metadata: { a: 1 } }),
         fetch: cap.fetch,
-        privacy: {
-          recognizers: [phoneRecognizer()],
-          coverage: { extensions: { metadata: "reject" } },
-        },
       }),
-    ).rejects.toMatchObject({
-      kind: "privacy",
-      code: "privacy_extension_unverifiable",
-    });
+    ).rejects.toMatchObject({ kind: "unsupported", code: "non_droppable_field" });
   });
+});
 
-  it("only allows opaque extension paths to be rejected (PT-29)", async () => {
-    const cap = capturingFetch();
-    await expect(
-      translate.chat.messages({
-        ...openaiOptions({ signature: "abc" }),
-        fetch: cap.fetch,
-        privacy: {
-          recognizers: [phoneRecognizer()],
-          coverage: { extensions: { signature: "redact" } },
-        },
-      }),
-    ).rejects.toMatchObject({
-      kind: "privacy",
-      code: "privacy_extension_unverifiable",
-    });
-
-    await expect(
-      translate.chat.messages({
-        ...openaiOptions({ signature: "abc" }),
-        fetch: cap.fetch,
-        privacy: {
-          recognizers: [phoneRecognizer()],
-          coverage: { extensions: { signature: "reject" } },
-        },
-      }),
-    ).resolves.toBeDefined();
-  });
+describe("extension double-evidence unit contract", () => {
 
   it("fails closed when the codec does not report evidence (PT-48)", () => {
     expect(() =>

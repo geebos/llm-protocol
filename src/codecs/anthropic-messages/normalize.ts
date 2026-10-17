@@ -12,12 +12,14 @@
  */
 import type { CanonicalMessage, ContentPart } from "../../ir/types.js";
 import type { CodecContext } from "../protocol-adapter.js";
+import { assertToolPairing } from "../../ir/projection/tool.js";
 
 /** Merge/normalize canonical messages into Anthropic-friendly turns. */
 export function normalizeAnthropicTurns(
   messages: CanonicalMessage[],
   ctx: CodecContext,
 ): CanonicalMessage[] {
+  assertToolPairing(messages, "anthropic-messages");
   const merged: CanonicalMessage[] = [];
 
   for (const m of messages) {

@@ -27,6 +27,7 @@ export type PrivacyChannel =
   | "tool_schema"
   | "reasoning"
   | "extensions"
+  | "native"
   | "text";
 
 export interface RecognizerContext {
@@ -61,6 +62,11 @@ export interface PrivacyCoveragePolicy {
   tool_schema?: CoverageAction | ToolSchemaCoverage;
   reasoning?: CoverageAction;
   extensions?: CoverageAction | Record<string, CoverageAction>;
+  /**
+   * Native protocol partitions (docs/07 §8.2.4). Keys are `<proto>.<field>`
+   * (e.g. `anthropic.metadata`). Default `allow`, like extensions (INV-10).
+   */
+  native?: CoverageAction | Record<string, CoverageAction>;
 }
 
 export interface PrivacyMappingOptions {

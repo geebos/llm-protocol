@@ -6,7 +6,7 @@ import type { ProtocolAdapter } from "../protocol-adapter.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { anthropicEndpoint } from "./endpoint.js";
 import { createAnthropicHeaders } from "./headers.js";
-import { anthropicRequestCodec } from "./request.js";
+import { createAnthropicRequestCodec } from "./request.js";
 import { anthropicResponseCodec } from "./response.js";
 import { anthropicErrorCodec } from "./error.js";
 import { createAnthropicStreamParser } from "../../streams/anthropic/parse.js";
@@ -23,6 +23,7 @@ export const anthropicDefaultProfile: ProviderProfile = {
     parallelTools: true,
     streaming: true,
     thinking: true,
+    roles: {},
   },
   defaultHeaders: { "anthropic-version": "2023-06-01" },
 };
@@ -36,7 +37,7 @@ export function createAnthropicAdapter(
     profile,
     endpoint: anthropicEndpoint,
     headers: createAnthropicHeaders(profile),
-    request: anthropicRequestCodec,
+    request: createAnthropicRequestCodec(profile),
     response: anthropicResponseCodec,
     error: anthropicErrorCodec,
     stream: {

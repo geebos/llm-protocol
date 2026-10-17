@@ -194,11 +194,13 @@ describe("Anthropic SSE -> canonical (target parse)", () => {
     const events = await parseAnthropicStream(stream);
     expect(events).toEqual([
       { type: "message_start", id: "msg_1", model: "claude" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "Hello" },
-      { type: "text_delta", index: 0, text: " world" },
-      { type: "text_end", index: 0 },
+      { type: "choice_start", choice: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "Hello" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: " world" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
       { type: "usage", usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 } },
+      { type: "choice_end", choice: 0, finishReason: "end_turn" },
       { type: "message_end", finishReason: "end_turn" },
     ]);
   });
@@ -214,11 +216,12 @@ describe("Anthropic SSE -> canonical (target parse)", () => {
       anthropicFrame("message_stop", { type: "message_stop" });
 
     const events = await parseAnthropicStream(stream);
-    expect(events[1]).toEqual({ type: "tool_start", index: 0, id: "toolu_1", name: "get_weather" });
-    expect(events[2]).toEqual({ type: "tool_arguments_delta", index: 0, partialJson: '{"city"' });
-    expect(events[3]).toEqual({ type: "tool_arguments_delta", index: 0, partialJson: ':"Paris"}' });
-    expect(events[4]).toEqual({ type: "tool_end", index: 0 });
-    expect(events[5]).toEqual({ type: "message_end", finishReason: "tool_call" });
+    expect(events[2]).toEqual({ type: "tool_start", location: { choice: 0, content: 0 }, id: "toolu_1", name: "get_weather" });
+    expect(events[3]).toEqual({ type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '{"city"' });
+    expect(events[4]).toEqual({ type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: ':"Paris"}' });
+    expect(events[5]).toEqual({ type: "tool_end", location: { choice: 0, content: 0 } });
+    expect(events[6]).toEqual({ type: "choice_end", choice: 0, finishReason: "tool_call" });
+    expect(events[7]).toEqual({ type: "message_end", finishReason: "tool_call" });
   });
 
   it("maps thinking and signature deltas opaquely (TH-002)", async () => {
@@ -231,14 +234,14 @@ describe("Anthropic SSE -> canonical (target parse)", () => {
       anthropicFrame("message_stop", { type: "message_stop" });
 
     const events = await parseAnthropicStream(stream);
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       type: "reasoning_start",
-      index: 0,
+      location: { choice: 0, content: 0 },
       metadata: { type: "thinking", signature: "sig-0" },
     });
-    expect(events[2]).toEqual({ type: "reasoning_delta", index: 0, text: "step 1" });
-    expect(events[3]).toEqual({ type: "reasoning_delta", index: 0, opaque: "sig-1" });
-    expect(events[4]).toEqual({ type: "reasoning_end", index: 0 });
+    expect(events[3]).toEqual({ type: "reasoning_delta", location: { choice: 0, content: 0 }, text: "step 1" });
+    expect(events[4]).toEqual({ type: "reasoning_delta", location: { choice: 0, content: 0 }, opaque: "sig-1" });
+    expect(events[5]).toEqual({ type: "reasoning_end", location: { choice: 0, content: 0 } });
   });
 
   it("surfaces an in-stream error event (SR-006, TC-014)", async () => {
@@ -246,7 +249,7 @@ describe("Anthropic SSE -> canonical (target parse)", () => {
       anthropicFrame("message_start", { type: "message_start", message: { id: "m", model: "c", content: [] } }) +
       anthropicFrame("error", { type: "error", error: { type: "api_error", message: "boom" } });
     const events = await parseAnthropicStream(stream);
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       type: "error",
       error: { kind: "stream_protocol", message: "boom", providerCode: "api_error" },
     });
@@ -283,10 +286,12 @@ describe("OpenAI SSE -> canonical (target parse)", () => {
     const events = await parseOpenAiStream(stream);
     expect(events).toEqual([
       { type: "message_start", id: "chatcmpl-1", model: "gpt" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "Hel" },
-      { type: "text_delta", index: 0, text: "lo" },
-      { type: "text_end", index: 0 },
+      { type: "choice_start", choice: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "Hel" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "lo" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
+      { type: "choice_end", choice: 0, finishReason: "end_turn" },
       { type: "message_end", finishReason: "end_turn" },
     ]);
   });
@@ -300,11 +305,12 @@ describe("OpenAI SSE -> canonical (target parse)", () => {
       openaiFrame("[DONE]");
 
     const events = await parseOpenAiStream(stream);
-    expect(events[1]).toEqual({ type: "tool_start", index: 0, id: "call_1", name: "get_weather" });
-    expect(events[2]).toEqual({ type: "tool_arguments_delta", index: 0, partialJson: '{"city":' });
-    expect(events[3]).toEqual({ type: "tool_arguments_delta", index: 0, partialJson: '"Paris"}' });
-    expect(events[4]).toEqual({ type: "tool_end", index: 0 });
-    expect(events[5]).toEqual({ type: "message_end", finishReason: "tool_call" });
+    expect(events[2]).toEqual({ type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "get_weather" });
+    expect(events[3]).toEqual({ type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '{"city":' });
+    expect(events[4]).toEqual({ type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '"Paris"}' });
+    expect(events[5]).toEqual({ type: "tool_end", location: { choice: 0, content: 0 } });
+    expect(events[6]).toEqual({ type: "choice_end", choice: 0, finishReason: "tool_call" });
+    expect(events[7]).toEqual({ type: "message_end", finishReason: "tool_call" });
   });
 
   it("maps reasoning_content only when the profile declares it (TH-003)", async () => {
@@ -315,14 +321,14 @@ describe("OpenAI SSE -> canonical (target parse)", () => {
       openaiFrame("[DONE]");
 
     const events = await parseOpenAiStream(stream, Infinity, "reasoning_content");
-    expect(events[1]).toEqual({ type: "reasoning_start", index: 0 });
-    expect(events[2]).toEqual({ type: "reasoning_delta", index: 0, text: "chain" });
+    expect(events[2]).toEqual({ type: "reasoning_start", location: { choice: 0, content: 0 } });
+    expect(events[3]).toEqual({ type: "reasoning_delta", location: { choice: 0, content: 0 }, text: "chain" });
     // reasoning closes before text starts so the Anthropic renderer stays
     // sequential (GAP-001 / 6.3).
-    expect(events[3]).toEqual({ type: "reasoning_end", index: 0 });
-    expect(events[4]).toEqual({ type: "text_start", index: 0 });
-    expect(events[5]).toEqual({ type: "text_delta", index: 0, text: "answer" });
-    expect(events[6]).toEqual({ type: "text_end", index: 0 });
+    expect(events[4]).toEqual({ type: "reasoning_end", location: { choice: 0, content: 0 } });
+    expect(events[5]).toEqual({ type: "text_start", location: { choice: 0, content: 0 } });
+    expect(events[6]).toEqual({ type: "text_delta", location: { choice: 0, content: 0 }, text: "answer" });
+    expect(events[7]).toEqual({ type: "text_end", location: { choice: 0, content: 0 } });
 
     // Without a declared field the reasoning text is not guessed.
     const undeclared = await parseOpenAiStream(stream);
@@ -344,10 +350,10 @@ describe("OpenAI SSE -> canonical (target parse)", () => {
 describe("canonical -> Anthropic SSE (source render)", () => {
   const textEvents: CanonicalStreamEvent[] = [
     { type: "message_start", id: "msg_1", model: "claude" },
-    { type: "text_start", index: 0 },
-    { type: "text_delta", index: 0, text: "Hello" },
-    { type: "text_delta", index: 0, text: " world" },
-    { type: "text_end", index: 0 },
+    { type: "text_start", location: { choice: 0, content: 0 } },
+    { type: "text_delta", location: { choice: 0, content: 0 }, text: "Hello" },
+    { type: "text_delta", location: { choice: 0, content: 0 }, text: " world" },
+    { type: "text_end", location: { choice: 0, content: 0 } },
     { type: "usage", usage: { inputTokens: 5, outputTokens: 3 } },
     { type: "message_end", finishReason: "end_turn" },
   ];
@@ -384,15 +390,15 @@ describe("canonical -> Anthropic SSE (source render)", () => {
   it("renders tool and reasoning blocks with remapped global indexes", async () => {
     const frames = await renderAnthropicFrames([
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "checking" },
-      { type: "reasoning_start", index: 0, metadata: { type: "thinking", signature: "s0" } },
-      { type: "reasoning_delta", index: 0, text: "think" },
-      { type: "reasoning_delta", index: 0, opaque: "s1" },
-      { type: "reasoning_end", index: 0 },
-      { type: "tool_start", index: 0, id: "toolu_1", name: "get_weather" },
-      { type: "tool_arguments_delta", index: 0, partialJson: '{"city":"Paris"}' },
-      { type: "tool_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "checking" },
+      { type: "reasoning_start", location: { choice: 0, content: 0 }, metadata: { type: "thinking", signature: "s0" } },
+      { type: "reasoning_delta", location: { choice: 0, content: 0 }, text: "think" },
+      { type: "reasoning_delta", location: { choice: 0, content: 0 }, opaque: "s1" },
+      { type: "reasoning_end", location: { choice: 0, content: 0 } },
+      { type: "tool_start", location: { choice: 0, content: 0 }, id: "toolu_1", name: "get_weather" },
+      { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '{"city":"Paris"}' },
+      { type: "tool_end", location: { choice: 0, content: 0 } },
       { type: "message_end", finishReason: "tool_call" },
     ]);
     const starts = frames.filter((f) => f.event === "content_block_start").map((f) => JSON.parse(f.data));
@@ -424,9 +430,9 @@ describe("canonical -> Anthropic SSE (source render)", () => {
   it("ends with message_stop on flush", async () => {
     const frames = await renderAnthropicFrames([
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "hi" },
-      { type: "text_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "hi" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
     ]);
     expect(frames[frames.length - 1]).toEqual({ event: "message_stop", data: '{"type":"message_stop"}', id: undefined });
   });
@@ -436,10 +442,10 @@ describe("canonical -> OpenAI SSE (source render)", () => {
   it("renders text chunks, finish_reason and [DONE]", async () => {
     const frames = await renderOpenAiFrames([
       { type: "message_start", id: "msg_1", model: "claude" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "Hello" },
-      { type: "text_delta", index: 0, text: " world" },
-      { type: "text_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "Hello" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: " world" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
       { type: "message_end", finishReason: "end_turn" },
     ]);
     expect(frames[frames.length - 1]).toBe("[DONE]");
@@ -454,10 +460,10 @@ describe("canonical -> OpenAI SSE (source render)", () => {
   it("renders tool_calls with positional mapping and incremental arguments", async () => {
     const frames = await renderOpenAiFrames([
       { type: "message_start" },
-      { type: "tool_start", index: 2, id: "toolu_1", name: "get_weather" },
-      { type: "tool_arguments_delta", index: 2, partialJson: '{"city"' },
-      { type: "tool_arguments_delta", index: 2, partialJson: ':"Paris"}' },
-      { type: "tool_end", index: 2 },
+      { type: "tool_start", location: { choice: 0, content: 2 }, id: "toolu_1", name: "get_weather" },
+      { type: "tool_arguments_delta", location: { choice: 0, content: 2 }, partialJson: '{"city"' },
+      { type: "tool_arguments_delta", location: { choice: 0, content: 2 }, partialJson: ':"Paris"}' },
+      { type: "tool_end", location: { choice: 0, content: 2 } },
       { type: "message_end", finishReason: "tool_call" },
     ]);
     const chunks = frames.slice(0, -1).map((d) => JSON.parse(d));
@@ -481,9 +487,9 @@ describe("canonical -> OpenAI SSE (source render)", () => {
     const frames = await renderOpenAiFrames(
       [
         { type: "message_start" },
-        { type: "reasoning_start", index: 0 },
-        { type: "reasoning_delta", index: 0, text: "chain" },
-        { type: "text_delta", index: 0, text: "answer" },
+        { type: "reasoning_start", location: { choice: 0, content: 0 } },
+        { type: "reasoning_delta", location: { choice: 0, content: 0 }, text: "chain" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: "answer" },
         { type: "message_end", finishReason: "end_turn" },
       ],
       "reasoning_content",
@@ -495,7 +501,7 @@ describe("canonical -> OpenAI SSE (source render)", () => {
   it("emits an error chunk then [DONE] (SR-006)", async () => {
     const frames = await renderOpenAiFrames([
       { type: "message_start" },
-      { type: "text_delta", index: 0, text: "partial" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "partial" },
       { type: "error", error: { kind: "stream_protocol", message: "boom" } },
     ]);
     expect(frames[frames.length - 1]).toBe("[DONE]");
@@ -506,14 +512,16 @@ describe("canonical -> OpenAI SSE (source render)", () => {
   it("emits usage in the terminal chunk when it precedes message_end", async () => {
     const frames = await renderOpenAiFrames([
       { type: "message_start" },
-      { type: "text_delta", index: 0, text: "hi" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "hi" },
       { type: "usage", usage: { inputTokens: 5, outputTokens: 3 } },
       { type: "message_end", finishReason: "end_turn" },
     ]);
     const chunks = frames.slice(0, -1).map((d) => JSON.parse(d));
-    const last = chunks[chunks.length - 1];
-    expect(last.usage).toEqual({ prompt_tokens: 5, completion_tokens: 3 });
-    expect(last.choices[0].finish_reason).toBe("stop");
+    const finishChunk = chunks.find((c) => c.choices?.[0]?.finish_reason === "stop");
+    expect(finishChunk).toBeTruthy();
+    const usageChunk = chunks[chunks.length - 1];
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toEqual({ prompt_tokens: 5, completion_tokens: 3 });
   });
 
   it("drops an opaque thinking signature with a warning when no field is declared (P1-2)", async () => {
@@ -529,9 +537,9 @@ describe("canonical -> OpenAI SSE (source render)", () => {
       start(c) {
         for (const e of [
           { type: "message_start" } as const,
-          { type: "reasoning_start", index: 0 } as const,
-          { type: "reasoning_delta", index: 0, opaque: "SIG-1" } as const,
-          { type: "reasoning_end", index: 0 } as const,
+          { type: "reasoning_start", location: { choice: 0, content: 0 } } as const,
+          { type: "reasoning_delta", location: { choice: 0, content: 0 }, opaque: "SIG-1" } as const,
+          { type: "reasoning_end", location: { choice: 0, content: 0 } } as const,
           { type: "message_end", finishReason: "end_turn" } as const,
         ]) c.enqueue(e);
         c.close();
@@ -556,9 +564,9 @@ describe("canonical -> OpenAI SSE (source render)", () => {
       start(c) {
         for (const e of [
           { type: "message_start" } as const,
-          { type: "reasoning_start", index: 0 } as const,
-          { type: "reasoning_delta", index: 0, opaque: "SIG-1" } as const,
-          { type: "reasoning_end", index: 0 } as const,
+          { type: "reasoning_start", location: { choice: 0, content: 0 } } as const,
+          { type: "reasoning_delta", location: { choice: 0, content: 0 }, opaque: "SIG-1" } as const,
+          { type: "reasoning_end", location: { choice: 0, content: 0 } } as const,
           { type: "message_end", finishReason: "end_turn" } as const,
         ]) c.enqueue(e);
         c.close();

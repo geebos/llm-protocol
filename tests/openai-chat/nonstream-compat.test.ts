@@ -137,9 +137,9 @@ describe("NONSTREAM-002 reasoning_effort", () => {
       },
       ctx,
     );
-    // not a known effort -> preserved as an extension, not guessed
+    // not a known effort -> preserved as a native field, not guessed
     expect(canonical.thinking).toBeUndefined();
-    expect(canonical.extensions?.reasoning_effort).toBe("turbo");
+    expect(canonical.native?.chat?.reasoningEffort).toBe("turbo");
     const body = openai.request.renderRequest(canonical, false, ctx) as Record<string, unknown>;
     expect(body.reasoning_effort).toBe("turbo");
   });
@@ -215,15 +215,31 @@ describe("NONSTREAM-004 multi tool_result ordering", () => {
   it("normalizeAnthropicTurns merges consecutive same-role turns and reports", () => {
     const ctx = newCodecContext();
     const input: CanonicalMessage[] = [
+      { role: "assistant", content: [{ type: "tool_call", id: "c1", name: "f", argumentsText: "{}" }] },
       { role: "user", content: [{ type: "text", text: "a" }] },
       { role: "user", content: [{ type: "tool_result", toolCallId: "c1", content: [{ type: "text", text: "r1" }] }] },
       { role: "assistant", content: [{ type: "text", text: "next" }] },
     ];
     const out = normalizeAnthropicTurns(input, ctx);
-    expect(out).toHaveLength(2);
-    expect(out[0].content.map((p) => p.type)).toEqual(["tool_result", "text"]);
+    expect(out).toHaveLength(3);
+    expect(out[1].content.map((p) => p.type)).toEqual(["tool_result", "text"]);
     expect(ctx.warnings.some((w) => w.code === "merged_consecutive_turns")).toBe(true);
     expect(ctx.warnings.some((w) => w.code === "tool_result_reordered")).toBe(true);
+  });
+
+  it("fails closed on an orphan tool_result (E-2)", () => {
+    const ctx = newCodecContext();
+    expect(() =>
+      normalizeAnthropicTurns(
+        [
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolCallId: "missing", content: [] }],
+          },
+        ],
+        ctx,
+      ),
+    ).toThrow(/not representable/);
   });
 });
 
@@ -234,8 +250,7 @@ describe("NONSTREAM-005 cache usage semantics", () => {
       {
         id: "msg_1",
         model: "claude",
-        content: [{ type: "text", text: "ok" }],
-        finishReason: "end_turn",
+        choices: [{ index: 0, content: [{ type: "text", text: "ok" }], finishReason: "end_turn" }],
         usage: {
           inputTokens: 10,
           outputTokens: 5,
@@ -257,8 +272,7 @@ describe("NONSTREAM-005 cache usage semantics", () => {
       {
         id: "chatcmpl_1",
         model: "gpt-4o",
-        content: [{ type: "text", text: "ok" }],
-        finishReason: "end_turn",
+        choices: [{ index: 0, content: [{ type: "text", text: "ok" }], finishReason: "end_turn" }],
         usage: {
           inputTokens: 12,
           outputTokens: 5,
@@ -277,7 +291,7 @@ describe("NONSTREAM-005 cache usage semantics", () => {
     const body = anthropic.response.renderResponse(
       {
         id: "x",
-        content: [{ type: "text", text: "ok" }],
+        choices: [{ index: 0, content: [{ type: "text", text: "ok" }] }],
         usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 5 },
       },
       ctx,

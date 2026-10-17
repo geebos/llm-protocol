@@ -8,6 +8,8 @@ import type { TranslationPolicies } from "../ir/policies.js";
 import type { CacheAffinityResolver, PrivacySafeCacheAffinityResolver } from "../cache/resolver.js";
 import type { CacheTranslationReport } from "../cache/types.js";
 import type { CanonicalError } from "../errors.js";
+import type { DropRecord } from "../ir/projection/drop-record.js";
+import type { TranslationFailurePhase } from "../ir/projection/failure.js";
 import type { CanonicalStreamEvent } from "../streams/types.js";
 import type { PrivacyCompletionReport, PrivacyOptions, PrivacyRequestTrace } from "../privacy/types.js";
 
@@ -159,6 +161,10 @@ export interface TranslationTrace {
   /** Worst fidelity observed across warnings (EXACT if none). */
   fidelity: Fidelity;
   warnings: TranslationWarning[];
+  /** Field-projection drops (docs/07 §6.3). */
+  drops?: DropRecord[];
+  /** Layer where the translation failed (set on error paths, §6.4). */
+  failurePhase?: TranslationFailurePhase;
   /** Request-side privacy summary (when privacy is enabled). */
   privacy?: PrivacyRequestTrace;
   /** Cache affinity summary (when `cache` is enabled on the factory). */

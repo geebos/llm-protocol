@@ -7,8 +7,10 @@
  * detection on a JSON key is a rejection (§7.3).
  */
 import type { CanonicalRequest, ContentPart } from "../ir/types.js";
+import { getCacheControl } from "../ir/native/accessors.js";
 import type { NormalizedCoverage } from "./coverage.js";
 import { extensionAction } from "./coverage.js";
+import { nativeAction } from "./coverage.js";
 import { Region, setRegionAction, TextSegment } from "./redact.js";
 
 type Action = "redact" | "allow" | "reject";
@@ -29,7 +31,7 @@ function textSegments(parts: ContentPart[], indices: number[]): TextSegment[] {
       set: (v: string) => {
         part.text = v;
       },
-      cache: part.cache !== undefined,
+      cache: getCacheControl(part) !== undefined,
     };
   });
 }
@@ -272,12 +274,11 @@ export function collectRequestRegions(
   const regions: Region[] = [];
   const extraHaystack: string[] = [];
 
-  if (canonical.system?.length) {
-    pushTextRuns(canonical.system, "system", "system.content", coverage.system, regions);
-  }
-
   canonical.messages.forEach((message, mi) => {
     const content = message.content;
+    const isSystem = message.role === "system" || message.role === "developer";
+    const textChannel = isSystem ? "system" : "message_text";
+    const textAction = isSystem ? coverage.system : coverage.message_text;
     let i = 0;
     while (i < content.length) {
       const part = content[i];
@@ -290,9 +291,9 @@ export function collectRequestRegions(
         pushTextRegion(
           content,
           indices,
-          "message_text",
+          textChannel,
           `messages[${mi}].content`,
-          coverage.message_text,
+          textAction,
           regions,
         );
         i = j;
@@ -366,10 +367,24 @@ export function collectRequestRegions(
             ),
           );
         }
+      } else if (part.type === "opaque_native") {
+        // Unknown protocol block: its dynamic shape cannot be safely rewritten,
+        // so it is detection-gated (fail-closed) rather than silently forwarded
+        // (docs/07 §4.4 / §8.2.4).
+        regions.push({
+          channel: "native",
+          path: `${path}.raw`,
+          segments: [{ get: () => stringifyShallow(part.raw), set: () => undefined }],
+          detectOnly: true,
+          rejectCode: "privacy_uncovered_channel",
+        });
       }
       i++;
     }
   });
+
+  const extensions = canonical.extensions ?? {};
+  const extensionsCoverage: { path: string; action: "redact" | "reject" }[] = [];
 
   canonical.tools?.forEach((tool, ti) => {
     if (tool.description !== undefined) {
@@ -396,10 +411,18 @@ export function collectRequestRegions(
       );
     }
     walkSchema(tool.inputSchema, `tools[${ti}].inputSchema`, coverage, regions);
+    // Server-tool definitions carry native residue (type-specific parameters)
+    // that must be covered like any other native partition (§8.2.4).
+    collectNative(
+      tool.native,
+      coverage,
+      regions,
+      extraHaystack,
+      extensionsCoverage,
+      `tools[${ti}].native`,
+    );
   });
 
-  const extensions = canonical.extensions ?? {};
-  const extensionsCoverage: { path: string; action: "redact" | "reject" }[] = [];
   for (const [key, value] of Object.entries(extensions)) {
     const action = extensionAction(coverage, key);
     const path = `extensions.${key}`;
@@ -459,7 +482,80 @@ export function collectRequestRegions(
     }
   }
 
+  collectNative(canonical.native, coverage, regions, extraHaystack, extensionsCoverage);
   return { regions, extraHaystack, extensionsCoverage };
+}
+
+/**
+ * Walk native protocol partitions (docs/07 §8.2.4/§8.5). Native fields must be
+ * covered like extensions: `allow` feeds the collision/egress haystack,
+ * `redact` rewrites in place, `reject` is detection-gated. Non-allow paths join
+ * the covered set so the double-evidence check applies once codecs report them.
+ */
+function collectNative(
+  native: unknown,
+  coverage: NormalizedCoverage,
+  regions: Region[],
+  extraHaystack: string[],
+  coveredPaths: { path: string; action: "redact" | "reject" }[],
+  pathPrefix = "native",
+): void {
+  if (!native || typeof native !== "object") return;
+  for (const [proto, partition] of Object.entries(native as Record<string, unknown>)) {
+    if (!partition || typeof partition !== "object") continue;
+    for (const [key, value] of Object.entries(partition as Record<string, unknown>)) {
+      if (value === undefined) continue;
+      const path = `${pathPrefix}.${proto}.${key}`;
+      const action = nativeAction(coverage, `${proto}.${key}`);
+      if (action === "allow") {
+        collectStrings(value, extraHaystack);
+        continue;
+      }
+      coveredPaths.push({ path, action });
+      if (action === "reject") {
+        regions.push({
+          channel: "native",
+          path,
+          segments: [{ get: () => stringifyShallow(value), set: () => undefined }],
+          detectOnly: true,
+          rejectCode: "privacy_uncovered_channel",
+        });
+        continue;
+      }
+      if (typeof value === "string") {
+        const target = partition as Record<string, unknown>;
+        const holder = { value };
+        regions.push(
+          setRegionAction(
+            {
+              channel: "native",
+              path,
+              segments: [
+                {
+                  get: () => holder.value,
+                  set: (v: string) => {
+                    holder.value = v;
+                  },
+                },
+              ],
+              serialize: () => holder.value,
+              write: (text: string) => {
+                target[key] = text;
+              },
+            },
+            "redact",
+          ),
+        );
+      } else {
+        const slots = collectJsonSlots(value);
+        if (slots.values.length) {
+          regions.push(
+            setRegionAction({ channel: "native", path, segments: slots.values }, "redact"),
+          );
+        }
+      }
+    }
+  }
 }
 
 function collectStrings(value: unknown, out: string[]): void {

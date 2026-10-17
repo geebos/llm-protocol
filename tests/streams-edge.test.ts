@@ -72,7 +72,7 @@ function anthropicFrame(event: string, data: unknown): string {
 
 describe("canonical validator invariants (SR-002, 7.2)", () => {
   it("rejects a delta before message_start", async () => {
-    const out = await validate([{ type: "text_delta", index: 0, text: "x" }]);
+    const out = await validate([{ type: "text_delta", location: { choice: 0, content: 0 }, text: "x" }]);
     expect(out[0].type).toBe("error");
     expect((out[0] as { error: { kind: string } }).error.kind).toBe("stream_protocol");
   });
@@ -88,7 +88,7 @@ describe("canonical validator invariants (SR-002, 7.2)", () => {
   it("rejects a delta for an unstarted block", async () => {
     const out = await validate([
       { type: "message_start" },
-      { type: "text_delta", index: 0, text: "x" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "x" },
     ]);
     expect(out[1].type).toBe("error");
   });
@@ -96,11 +96,11 @@ describe("canonical validator invariants (SR-002, 7.2)", () => {
   it("rejects a duplicate end and events after message_end", async () => {
     const out = await validate([
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_end", index: 0 },
-      { type: "text_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_end", location: { choice: 0, content: 0 } },
+      { type: "text_end", location: { choice: 0, content: 0 } },
       { type: "message_end", finishReason: "end_turn" },
-      { type: "text_start", index: 1 },
+      { type: "text_start", location: { choice: 0, content: 1 } },
     ]);
     expect(out[3].type).toBe("error"); // duplicate end
     expect(out[5].type).toBe("error"); // event after message_end
@@ -109,9 +109,9 @@ describe("canonical validator invariants (SR-002, 7.2)", () => {
   it("passes through a valid stream unchanged", async () => {
     const events: CanonicalStreamEvent[] = [
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "hi" },
-      { type: "text_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "hi" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
       { type: "message_end", finishReason: "end_turn" },
     ];
     const out = await validate(events);
@@ -137,7 +137,7 @@ describe("Anthropic parser redacted thinking", () => {
         .pipeThrough(createSSEParser())
         .pipeThrough(createAnthropicStreamParser()),
     );
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       type: "reasoning_start",
       metadata: { type: "redacted_thinking", data: "REDACTED-BASE64" },
     });
@@ -148,9 +148,9 @@ describe("Anthropic renderer stop-reason and usage edges", () => {
   it("maps content_filter to end_turn", async () => {
     const frames = await renderAnthropicFrames([
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "x" },
-      { type: "text_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "x" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
       { type: "message_end", finishReason: "content_filter" },
     ]);
     const messageDelta = frames.find((f) => f.event === "message_delta");
@@ -160,9 +160,9 @@ describe("Anthropic renderer stop-reason and usage edges", () => {
   it("flushes a trailing usage with a null stop_reason when no message_end arrives", async () => {
     const frames = await renderAnthropicFrames([
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_delta", index: 0, text: "x" },
-      { type: "text_end", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "x" },
+      { type: "text_end", location: { choice: 0, content: 0 } },
       { type: "usage", usage: { inputTokens: 3, outputTokens: 2 } },
     ]);
     const messageDelta = frames.find((f) => f.event === "message_delta");
@@ -178,7 +178,7 @@ describe("OpenAI renderer late usage", () => {
   it("emits a standalone usage chunk when usage arrives after message_end", async () => {
     const frames = await renderOpenAiFrames([
       { type: "message_start" },
-      { type: "text_delta", index: 0, text: "hi" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "hi" },
       { type: "message_end", finishReason: "end_turn" },
       { type: "usage", usage: { inputTokens: 4, outputTokens: 2 } },
     ]);
@@ -220,9 +220,9 @@ describe("validator end/delta guard edges (SR-002)", () => {
   it("rejects a delta after block end", async () => {
     const out = await validate([
       { type: "message_start" },
-      { type: "text_start", index: 0 },
-      { type: "text_end", index: 0 },
-      { type: "text_delta", index: 0, text: "late" },
+      { type: "text_start", location: { choice: 0, content: 0 } },
+      { type: "text_end", location: { choice: 0, content: 0 } },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "late" },
     ]);
     expect(out[3].type).toBe("error");
   });
@@ -230,7 +230,7 @@ describe("validator end/delta guard edges (SR-002)", () => {
   it("rejects an end for an unstarted block", async () => {
     const out = await validate([
       { type: "message_start" },
-      { type: "text_end", index: 0 },
+      { type: "text_end", location: { choice: 0, content: 0 } },
     ]);
     expect(out[1].type).toBe("error");
   });
@@ -245,12 +245,12 @@ describe("validator end/delta guard edges (SR-002)", () => {
   it("validates tool/reasoning block pairing and rejects start-after-end", async () => {
     const ok = await validate([
       { type: "message_start" },
-      { type: "tool_start", index: 0, id: "t1", name: "echo" },
-      { type: "tool_arguments_delta", index: 0, partialJson: "{}" },
-      { type: "tool_end", index: 0 },
-      { type: "reasoning_start", index: 0 },
-      { type: "reasoning_delta", index: 0, text: "r" },
-      { type: "reasoning_end", index: 0 },
+      { type: "tool_start", location: { choice: 0, content: 0 }, id: "t1", name: "echo" },
+      { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: "{}" },
+      { type: "tool_end", location: { choice: 0, content: 0 } },
+      { type: "reasoning_start", location: { choice: 0, content: 0 } },
+      { type: "reasoning_delta", location: { choice: 0, content: 0 }, text: "r" },
+      { type: "reasoning_end", location: { choice: 0, content: 0 } },
       { type: "message_end", finishReason: "end_turn" },
     ]);
     expect(ok.every((e) => e.type !== "error")).toBe(true);
@@ -258,22 +258,22 @@ describe("validator end/delta guard edges (SR-002)", () => {
     const afterEnd = await validate([
       { type: "message_start" },
       { type: "message_end", finishReason: "end_turn" },
-      { type: "tool_start", index: 0, id: "t1", name: "echo" },
+      { type: "tool_start", location: { choice: 0, content: 0 }, id: "t1", name: "echo" },
     ]);
     expect(afterEnd[2].type).toBe("error");
 
     const dupStart = await validate([
       { type: "message_start" },
-      { type: "reasoning_start", index: 0 },
-      { type: "reasoning_start", index: 0 },
+      { type: "reasoning_start", location: { choice: 0, content: 0 } },
+      { type: "reasoning_start", location: { choice: 0, content: 0 } },
     ]);
     expect(dupStart[2].type).toBe("error");
 
     const deltaAfterEnd = await validate([
       { type: "message_start" },
-      { type: "reasoning_start", index: 0 },
-      { type: "reasoning_end", index: 0 },
-      { type: "reasoning_delta", index: 0, text: "late" },
+      { type: "reasoning_start", location: { choice: 0, content: 0 } },
+      { type: "reasoning_end", location: { choice: 0, content: 0 } },
+      { type: "reasoning_delta", location: { choice: 0, content: 0 }, text: "late" },
     ]);
     expect(deltaAfterEnd[3].type).toBe("error");
   });
@@ -281,7 +281,7 @@ describe("validator end/delta guard edges (SR-002)", () => {
   it("drops business events after a terminal error", async () => {
     const out = await validate([
       { type: "error", error: { kind: "upstream", message: "x" } },
-      { type: "text_start", index: 0 },
+      { type: "text_start", location: { choice: 0, content: 0 } },
     ]);
     expect(out[1].type).toBe("error");
   });
@@ -302,7 +302,7 @@ describe("Anthropic parse/render edges", () => {
         .pipeThrough(createSSEParser())
         .pipeThrough(createAnthropicStreamParser()),
     );
-    const err = events[1];
+    const err = events[2];
     expect(err.type).toBe("error");
     expect((err as { error: { message: string } }).error.message).toBe("upstream stream error");
   });
@@ -324,7 +324,7 @@ describe("Anthropic renderer error event (SR-006)", () => {
   it("emits an error event and suppresses later business events", async () => {
     const frames = await renderAnthropicFrames([
       { type: "message_start" },
-      { type: "text_delta", index: 0, text: "partial" },
+      { type: "text_delta", location: { choice: 0, content: 0 }, text: "partial" },
       { type: "error", error: { kind: "stream_protocol", message: "boom" } },
       { type: "message_end", finishReason: "end_turn" },
     ]);
@@ -354,9 +354,10 @@ describe("OpenAI parser tool index/usage edges", () => {
         .pipeThrough(createOpenAiChatStreamParser(openaiChatDefaultProfile)),
     );
     expect(events[0].type).toBe("message_start");
-    expect(events[1]).toEqual({ type: "text_start", index: 0 });
-    expect(events[2]).toEqual({ type: "text_delta", index: 0, text: "no role first" });
-    expect(events[3]).toEqual({ type: "text_end", index: 0 });
+    expect(events[1]).toEqual({ type: "choice_start", choice: 0 });
+    expect(events[2]).toEqual({ type: "text_start", location: { choice: 0, content: 0 } });
+    expect(events[3]).toEqual({ type: "text_delta", location: { choice: 0, content: 0 }, text: "no role first" });
+    expect(events[4]).toEqual({ type: "text_end", location: { choice: 0, content: 0 } });
   });
 });
 

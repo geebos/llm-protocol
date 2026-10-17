@@ -4,7 +4,9 @@
  * Renders canonical events into OpenAI data-only chunks consumable by the
  * OpenAI JS SDK. Text deltas become `delta.content`; tool calls become
  * `delta.tool_calls` with incremental `arguments`; a declared reasoningField
- * receives reasoning text; the stream always ends with `data: [DONE]`.
+ * receives reasoning text; each candidate gets its own `choices[].index`
+ * (`choice_start`/`choice_end`, docs/07 §7). The stream always ends with
+ * `data: [DONE]`.
  */
 import type { CanonicalStreamEvent } from "../types.js";
 import { encodeDataFrame } from "../sse-parser.js";
@@ -14,6 +16,8 @@ import type { ProviderProfile } from "../../capabilities/provider-profile.js";
 import type { TranslationWarning } from "../../ir/fidelity.js";
 import type { TranslationPolicies } from "../../ir/policies.js";
 import { DEFAULT_POLICIES } from "../../ir/policies.js";
+import { createStreamBlockKey, streamBlockKeyId } from "../../ir/stream-key.js";
+import type { NativeChoiceStreamMetadata } from "../../ir/native/index.js";
 
 const FINISH_REASON_MAP: Partial<Record<CanonicalFinishReason, string>> = {
   end_turn: "stop",
@@ -29,13 +33,17 @@ export function createOpenAiChatStreamRenderer(
   report?: (warning: TranslationWarning) => void,
 ): TransformStream<CanonicalStreamEvent, Uint8Array> {
   const reasoningField = profile.capabilities.reasoningField;
-  const toolPos = new Map<number, number>();
+  const toolPos = new Map<string, number>();
+  const toolCounters = new Map<number, number>();
+  const choiceMeta = new Map<number, NativeChoiceStreamMetadata>();
+  const seenChoices = new Set<number>();
+  const finishedChoices = new Set<number>();
   let messageStarted = false;
   let ended = false;
   let terminal = false;
-  let errorSent = false;
   let reasoningReported = false;
   let cacheUsageReported = false;
+  let usageSent = false;
   let cachedUsage: CanonicalUsage | undefined;
   let id = `chatcmpl-${crypto.randomUUID()}`;
   let model: string | undefined;
@@ -60,20 +68,20 @@ export function createOpenAiChatStreamRenderer(
 
   function chunk(
     controller: TransformStreamDefaultController<Uint8Array>,
+    choice: number,
     delta: Record<string, unknown>,
     finishReason: string | null,
-    usage?: CanonicalUsage,
   ): void {
+    const logprobs = choiceMeta.get(choice)?.logprobs;
     send(controller, {
       choices: [
         {
-          index: 0,
+          index: choice,
           delta,
           finish_reason: finishReason,
-          logprobs: null,
+          logprobs: logprobs ?? null,
         },
       ],
-      ...(usage ? { usage: renderUsage(usage) } : {}),
     });
   }
 
@@ -103,15 +111,21 @@ export function createOpenAiChatStreamRenderer(
     };
   }
 
+  function flushUsage(
+    controller: TransformStreamDefaultController<Uint8Array>,
+  ): void {
+    if (usageSent || cachedUsage === undefined) return;
+    usageSent = true;
+    send(controller, { choices: [], usage: renderUsage(cachedUsage) });
+  }
+
   return new TransformStream<CanonicalStreamEvent, Uint8Array>({
     transform(event, controller) {
       // Usage may legally arrive after message_end (compatible providers put it
       // in a final chunk); handle it before the terminal guard.
       if (event.type === "usage") {
         cachedUsage = event.usage;
-        if (ended) {
-          chunk(controller, {}, null, cachedUsage);
-        }
+        if (ended) flushUsage(controller);
         return;
       }
 
@@ -124,28 +138,54 @@ export function createOpenAiChatStreamRenderer(
           if (event.id) id = event.id;
           if (event.model) model = event.model;
           created = Math.floor(Date.now() / 1000);
-          chunk(controller, { role: "assistant", content: "" }, null);
+          seenChoices.add(0);
+          chunk(controller, 0, { role: "assistant", content: "" }, null);
           return;
         }
+
+        case "choice_start": {
+          if (event.choice === 0) return;
+          seenChoices.add(event.choice);
+          chunk(controller, event.choice, { role: "assistant", content: "" }, null);
+          return;
+        }
+
+        case "choice_end": {
+          if (finishedChoices.has(event.choice)) return;
+          finishedChoices.add(event.choice);
+          seenChoices.add(event.choice);
+          chunk(
+            controller,
+            event.choice,
+            {},
+            FINISH_REASON_MAP[event.finishReason ?? "end_turn"] ?? "stop",
+          );
+          return;
+        }
+
+        case "choice_metadata":
+          choiceMeta.set(event.choice, event.native);
+          return;
 
         case "text_start":
           return;
         case "text_delta":
-          chunk(controller, { content: event.text }, null);
+          chunk(controller, event.location.choice ?? 0, { content: event.text }, null);
           return;
         case "text_end":
           return;
 
         case "reasoning_start":
           return;
-        case "reasoning_delta":
+        case "reasoning_delta": {
+          const choice = event.location.choice ?? 0;
           // Opaque thinking signature (Anthropic signature_delta): only a
           // provider that declares an opaque-signature field can carry it
           // (P1-2); otherwise it is dropped with a warning, never silently.
           if (event.text === undefined) {
             const sigCap = profile.capabilities.reasoning;
             if (event.opaque !== undefined && sigCap?.opaqueSignature && sigCap.signatureField) {
-              chunk(controller, { [sigCap.signatureField]: event.opaque }, null);
+              chunk(controller, choice, { [sigCap.signatureField]: event.opaque }, null);
             } else if (event.opaque !== undefined) {
               report?.({
                 code: "thinking_signature_dropped",
@@ -158,7 +198,7 @@ export function createOpenAiChatStreamRenderer(
             return;
           }
           if (reasoningField) {
-            chunk(controller, { [reasoningField]: event.text }, null);
+            chunk(controller, choice, { [reasoningField]: event.text }, null);
             return;
           }
           if (!reasoningReported) {
@@ -182,16 +222,27 @@ export function createOpenAiChatStreamRenderer(
             }
           }
           if (policies.reasoning === "provider_metadata") {
-            chunk(controller, { reasoning_content: event.text }, null);
+            chunk(controller, choice, { reasoning_content: event.text }, null);
           }
           return;
+        }
         case "reasoning_end":
           return;
 
+        case "refusal_start":
+          return;
+        case "refusal_delta":
+          chunk(controller, event.location.choice ?? 0, { refusal: event.text }, null);
+          return;
+        case "refusal_end":
+          return;
+
         case "tool_start": {
-          const pos = toolPos.size;
-          toolPos.set(event.index, pos);
-          chunk(controller, {
+          const choice = event.location.choice ?? 0;
+          const pos = toolCounters.get(choice) ?? 0;
+          toolCounters.set(choice, pos + 1);
+          toolPos.set(streamBlockKeyId(createStreamBlockKey("tool", event.location)), pos);
+          chunk(controller, choice, {
             tool_calls: [
               {
                 index: pos,
@@ -204,9 +255,10 @@ export function createOpenAiChatStreamRenderer(
           return;
         }
         case "tool_arguments_delta": {
-          const pos = toolPos.get(event.index);
+          const choice = event.location.choice ?? 0;
+          const pos = toolPos.get(streamBlockKeyId(createStreamBlockKey("tool", event.location)));
           if (pos === undefined) return;
-          chunk(controller, {
+          chunk(controller, choice, {
             tool_calls: [
               {
                 index: pos,
@@ -223,19 +275,22 @@ export function createOpenAiChatStreamRenderer(
           if (ended) return;
           ended = true;
           terminal = true;
-          chunk(
-            controller,
-            {},
-            FINISH_REASON_MAP[event.finishReason ?? "end_turn"] ?? "stop",
-            cachedUsage,
-          );
+          if (seenChoices.size === 0 || !finishedChoices.has(0)) {
+            finishedChoices.add(0);
+            chunk(
+              controller,
+              0,
+              {},
+              FINISH_REASON_MAP[event.finishReason ?? "end_turn"] ?? "stop",
+            );
+          }
+          flushUsage(controller);
           return;
         }
 
         case "error": {
           if (ended) return;
           terminal = true;
-          errorSent = true;
           send(controller, {
             error: { message: event.error.message, type: "server_error" },
           });
@@ -249,7 +304,10 @@ export function createOpenAiChatStreamRenderer(
     flush(controller) {
       if (!terminal) {
         ended = true;
-        chunk(controller, {}, "stop", cachedUsage);
+        if (!finishedChoices.has(0)) {
+          chunk(controller, 0, {}, "stop");
+        }
+        flushUsage(controller);
       }
       controller.enqueue(encodeDataFrame("[DONE]"));
     },

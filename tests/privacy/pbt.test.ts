@@ -55,9 +55,9 @@ async function streamRestore(
 ): Promise<string> {
   const handle = createPrivacyStreamRestore(session, config, () => undefined);
   const events: CanonicalStreamEvent[] = [
-    { type: "text_start", index: 0 },
-    ...chunks.map((text): CanonicalStreamEvent => ({ type: "text_delta", index: 0, text })),
-    { type: "text_end", index: 0 },
+    { type: "text_start", location: { choice: 0, content: 0 } },
+    ...chunks.map((text): CanonicalStreamEvent => ({ type: "text_delta", location: { choice: 0, content: 0 }, text })),
+    { type: "text_end", location: { choice: 0, content: 0 } },
     { type: "message_end" },
   ];
   const input = new ReadableStream<CanonicalStreamEvent>({

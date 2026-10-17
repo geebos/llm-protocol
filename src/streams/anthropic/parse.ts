@@ -76,6 +76,7 @@ export function createAnthropicStreamParser(
             model:
               typeof data.message?.model === "string" ? data.message.model : undefined,
           });
+          enqueue(controller, { type: "choice_start", choice: 0 });
           return;
         }
 
@@ -88,7 +89,7 @@ export function createAnthropicStreamParser(
           switch (data.content_block?.type) {
             case "text":
               blocks.set(index, "text");
-              enqueue(controller, { type: "text_start", index });
+              enqueue(controller, { type: "text_start", location: { choice: 0, content: index } });
               return;
             case "tool_use": {
               blocks.set(index, "tool");
@@ -107,7 +108,7 @@ export function createAnthropicStreamParser(
               }
               enqueue(controller, {
                 type: "tool_start",
-                index,
+                location: { choice: 0, content: index },
                 id: id ?? `toolu_${index}`,
                 name:
                   typeof data.content_block.name === "string"
@@ -120,7 +121,7 @@ export function createAnthropicStreamParser(
               blocks.set(index, "reasoning");
               enqueue(controller, {
                 type: "reasoning_start",
-                index,
+                location: { choice: 0, content: index },
                 metadata: {
                   type: "thinking",
                   signature:
@@ -134,7 +135,7 @@ export function createAnthropicStreamParser(
               blocks.set(index, "reasoning");
               enqueue(controller, {
                 type: "reasoning_start",
-                index,
+                location: { choice: 0, content: index },
                 metadata: {
                   type: "redacted_thinking",
                   data:
@@ -164,14 +165,14 @@ export function createAnthropicStreamParser(
             case "text_delta":
               enqueue(controller, {
                 type: "text_delta",
-                index,
+                location: { choice: 0, content: index },
                 text: typeof data.delta.text === "string" ? data.delta.text : "",
               });
               return;
             case "input_json_delta":
               enqueue(controller, {
                 type: "tool_arguments_delta",
-                index,
+                location: { choice: 0, content: index },
                 partialJson:
                   typeof data.delta.partial_json === "string" ? data.delta.partial_json : "",
               });
@@ -179,14 +180,14 @@ export function createAnthropicStreamParser(
             case "thinking_delta":
               enqueue(controller, {
                 type: "reasoning_delta",
-                index,
+                location: { choice: 0, content: index },
                 text: typeof data.delta.thinking === "string" ? data.delta.thinking : "",
               });
               return;
             case "signature_delta":
               enqueue(controller, {
                 type: "reasoning_delta",
-                index,
+                location: { choice: 0, content: index },
                 opaque: typeof data.delta.signature === "string" ? data.delta.signature : "",
               });
               return;
@@ -204,9 +205,9 @@ export function createAnthropicStreamParser(
           const data = safeJson(frame.data) as { index?: unknown };
           const index = typeof data.index === "number" ? data.index : 0;
           const kind = blocks.get(index);
-          if (kind === "text") enqueue(controller, { type: "text_end", index });
-          else if (kind === "tool") enqueue(controller, { type: "tool_end", index });
-          else if (kind === "reasoning") enqueue(controller, { type: "reasoning_end", index });
+          if (kind === "text") enqueue(controller, { type: "text_end", location: { choice: 0, content: index } });
+          else if (kind === "tool") enqueue(controller, { type: "tool_end", location: { choice: 0, content: index } });
+          else if (kind === "reasoning") enqueue(controller, { type: "reasoning_end", location: { choice: 0, content: index } });
           else enqueue(controller, { type: "unknown", sourceType: "content_block_stop", raw: data });
           return;
         }
@@ -223,6 +224,7 @@ export function createAnthropicStreamParser(
               ? (FINISH_REASON_MAP[data.delta.stop_reason] ?? "unknown")
               : undefined;
           messageEnded = true;
+          enqueue(controller, { type: "choice_end", choice: 0, finishReason: stopReason });
           enqueue(controller, { type: "message_end", finishReason: stopReason });
           return;
         }
@@ -248,6 +250,8 @@ export function createAnthropicStreamParser(
 
         case "message_stop":
           if (!messageEnded) {
+            messageEnded = true;
+            enqueue(controller, { type: "choice_end", choice: 0 });
             enqueue(controller, { type: "message_end" });
           }
           return;

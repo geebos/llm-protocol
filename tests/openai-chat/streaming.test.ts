@@ -119,10 +119,14 @@ describe("openai-chat -> anthropic-messages streaming (TC-020, TC-002)", () => {
       .join("");
     expect(content).toBe("Hello from Claude");
 
-    const lastChunk = chunks[chunks.length - 1];
-    expect(((lastChunk.choices as Array<Record<string, unknown>>)[0]).finish_reason).toBe("stop");
-    expect((lastChunk.usage as Record<string, unknown>).prompt_tokens).toBe(8);
-    expect((lastChunk.usage as Record<string, unknown>).completion_tokens).toBe(5);
+    const finishChunk = chunks.find(
+      (c) => ((c.choices as Array<Record<string, unknown>>)[0] as { finish_reason?: string } | undefined)?.finish_reason === "stop",
+    );
+    expect(finishChunk).toBeTruthy();
+    const usageChunk = chunks[chunks.length - 1];
+    expect(usageChunk.choices).toEqual([]);
+    expect((usageChunk.usage as Record<string, unknown>).prompt_tokens).toBe(8);
+    expect((usageChunk.usage as Record<string, unknown>).completion_tokens).toBe(5);
     expect(frames[frames.length - 1].data).toBe("[DONE]");
   });
 

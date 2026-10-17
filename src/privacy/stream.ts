@@ -3,10 +3,15 @@
  *
  * Registered matches use Maximal Munch across chunks; tool arguments are
  * buffered until `tool_end` and restored JSON-aware. Lifecycle events
- * (`message_start/end`, `*_start/*_end` pairing, kind+index semantics) are
- * preserved exactly; only delta count/content/boundaries may change (INV-6).
+ * (`message_start/end`, `*_start/*_end` pairing) are preserved exactly; only
+ * delta count/content/boundaries may change (INV-6).
+ *
+ * Buffers are keyed by the unified `StreamBlockKey` (docs/07 §7.1/§8.3), never a
+ * bare index, so two choices at the same content index never share a buffer.
  */
 import type { CanonicalStreamEvent } from "../streams/types.js";
+import type { ResolvedStreamLocation } from "../ir/stream-key.js";
+import { createStreamBlockKey, streamBlockKeyId } from "../ir/stream-key.js";
 import type { ResolvedPrivacyConfig } from "./config.js";
 import { PrivacyGuardError } from "./errors.js";
 import { restoreJsonText, restoreText } from "./restore.js";
@@ -28,6 +33,16 @@ export interface StreamRestoreHandle {
   abort(): void;
 }
 
+interface PendingText {
+  location: ResolvedStreamLocation;
+  text: string;
+  kind: "text" | "refusal";
+}
+
+function blockKey(kind: "text" | "tool" | "refusal", location: ResolvedStreamLocation): string {
+  return streamBlockKeyId(createStreamBlockKey(kind, location));
+}
+
 export function createPrivacyStreamRestore(
   session: PrivacySession,
   config: ResolvedPrivacyConfig,
@@ -41,8 +56,8 @@ export function createPrivacyStreamRestore(
   };
   const entries = session.snapshot();
   const matcher = createPlaceholderMatcher(config.template, entries);
-  const pendingText = new Map<number, string>();
-  const pendingTool = new Map<number, string>();
+  const pendingText = new Map<string, PendingText>();
+  const pendingTool = new Map<string, string>();
   let released = false;
   session.acquireStream();
   const release = (): void => {
@@ -56,37 +71,64 @@ export function createPrivacyStreamRestore(
     transform(event, controller) {
       switch (event.type) {
         case "text_start":
-          pendingText.set(event.index, "");
+          pendingText.set(blockKey("text", event.location), {
+            location: event.location,
+            text: "",
+            kind: "text",
+          });
           controller.enqueue(event);
           break;
         case "text_delta": {
-          const pending = (pendingText.get(event.index) ?? "") + event.text;
-          pendingText.set(event.index, pending);
-          processText(event.index, false, controller);
+          const key = blockKey("text", event.location);
+          const pending = (pendingText.get(key)?.text ?? "") + event.text;
+          pendingText.set(key, { location: event.location, text: pending, kind: "text" });
+          processText("text", event.location, false, controller);
           break;
         }
         case "text_end":
-          processText(event.index, true, controller);
-          pendingText.delete(event.index);
+          processText("text", event.location, true, controller);
+          pendingText.delete(blockKey("text", event.location));
+          controller.enqueue(event);
+          break;
+        case "refusal_start":
+          pendingText.set(blockKey("refusal", event.location), {
+            location: event.location,
+            text: "",
+            kind: "refusal",
+          });
+          controller.enqueue(event);
+          break;
+        case "refusal_delta": {
+          const key = blockKey("refusal", event.location);
+          const pending = (pendingText.get(key)?.text ?? "") + event.text;
+          pendingText.set(key, { location: event.location, text: pending, kind: "refusal" });
+          processText("refusal", event.location, false, controller);
+          break;
+        }
+        case "refusal_end":
+          processText("refusal", event.location, true, controller);
+          pendingText.delete(blockKey("refusal", event.location));
           controller.enqueue(event);
           break;
         case "tool_start":
-          pendingTool.set(event.index, "");
+          pendingTool.set(blockKey("tool", event.location), "");
           controller.enqueue(event);
           break;
         case "tool_arguments_delta": {
-          const pending = (pendingTool.get(event.index) ?? "") + event.partialJson;
+          const key = blockKey("tool", event.location);
+          const pending = (pendingTool.get(key) ?? "") + event.partialJson;
           if (pending.length > config.streaming.maxToolArgumentBytes) {
-            handleOverflow(pending, "tool_arguments", event.index, controller);
-            pendingTool.set(event.index, "");
+            handleOverflow(pending, "tool_arguments", event.location, controller);
+            pendingTool.set(key, "");
           } else {
-            pendingTool.set(event.index, pending);
+            pendingTool.set(key, pending);
           }
           break;
         }
         case "tool_end": {
-          const pending = pendingTool.get(event.index) ?? "";
-          pendingTool.delete(event.index);
+          const key = blockKey("tool", event.location);
+          const pending = pendingTool.get(key) ?? "";
+          pendingTool.delete(key);
           if (pending) {
             const result = restoreJsonText(
               pending,
@@ -102,7 +144,7 @@ export function createPrivacyStreamRestore(
               });
               controller.enqueue({
                 type: "tool_arguments_delta",
-                index: event.index,
+                location: event.location,
                 partialJson: pending,
               });
             } else {
@@ -112,7 +154,7 @@ export function createPrivacyStreamRestore(
               if (result.text !== "null" && result.text !== "") {
                 controller.enqueue({
                   type: "tool_arguments_delta",
-                  index: event.index,
+                  location: event.location,
                   partialJson: result.text,
                 });
               }
@@ -128,8 +170,8 @@ export function createPrivacyStreamRestore(
           controller.enqueue(event);
           break;
         case "message_end": {
-          for (const index of [...pendingText.keys()]) {
-            processText(index, true, controller);
+          for (const entry of [...pendingText.values()]) {
+            processText(entry.kind, entry.location, true, controller);
           }
           pendingText.clear();
           pendingTool.clear();
@@ -143,8 +185,8 @@ export function createPrivacyStreamRestore(
       }
     },
     flush(controller) {
-      for (const index of [...pendingText.keys()]) {
-        processText(index, true, controller);
+      for (const entry of [...pendingText.values()]) {
+        processText(entry.kind, entry.location, true, controller);
       }
       pendingText.clear();
       pendingTool.clear();
@@ -154,31 +196,37 @@ export function createPrivacyStreamRestore(
   });
 
   function emitText(
-    index: number,
+    kind: "text" | "refusal",
+    location: ResolvedStreamLocation,
     text: string,
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
   ): void {
-    if (text) {
-      controller.enqueue({ type: "text_delta", index, text });
+    if (!text) return;
+    if (kind === "refusal") {
+      controller.enqueue({ type: "refusal_delta", location, text });
+    } else {
+      controller.enqueue({ type: "text_delta", location, text });
     }
   }
 
   function processText(
-    index: number,
+    kind: "text" | "refusal",
+    location: ResolvedStreamLocation,
     final: boolean,
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
   ): void {
-    const pending = pendingText.get(index) ?? "";
+    const key = blockKey(kind, location);
+    const pending = pendingText.get(key)?.text ?? "";
     if (pending.length > config.streaming.maxTextPendingBytes) {
-      handleOverflow(pending, "text", index, controller);
-      pendingText.set(index, "");
+      handleOverflow(pending, kind, location, controller);
+      pendingText.set(key, { location, text: "", kind });
       return;
     }
     const result = restoreText(pending, matcher, config.template, {
       final,
       maxPlaceholderLength: config.streaming.maxPlaceholderLength,
     });
-    emitText(index, result.out, controller);
+    emitText(kind, location, result.out, controller);
     stats.restored += result.matched;
     stats.unknown += result.unknown;
     for (const w of result.warnings) report(w);
@@ -196,17 +244,17 @@ export function createPrivacyStreamRestore(
         code: "privacy_unknown_placeholder",
         message: "Stream ended with an incomplete placeholder prefix",
       });
-      emitText(index, result.rest, controller);
-      pendingText.set(index, "");
+      emitText(kind, location, result.rest, controller);
+      pendingText.set(key, { location, text: "", kind });
       return;
     }
-    pendingText.set(index, result.rest);
+    pendingText.set(key, { location, text: result.rest, kind });
   }
 
   function handleOverflow(
     pending: string,
-    kind: string,
-    index: number,
+    kind: "text" | "refusal" | "tool_arguments",
+    location: ResolvedStreamLocation,
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
   ): void {
     stats.overflowed = true;
@@ -221,14 +269,14 @@ export function createPrivacyStreamRestore(
       code: "privacy_buffer_overflow",
       message: `Privacy ${kind} buffer overflowed; buffered content flushed raw`,
     });
-    if (kind === "text") {
-      emitText(index, pending, controller);
-    } else {
+    if (kind === "tool_arguments") {
       controller.enqueue({
         type: "tool_arguments_delta",
-        index,
+        location,
         partialJson: pending,
       });
+    } else {
+      emitText(kind, location, pending, controller);
     }
   }
 

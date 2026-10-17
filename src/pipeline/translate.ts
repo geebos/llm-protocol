@@ -49,6 +49,9 @@ import { PrivacyGuardError } from "../privacy/errors.js";
 import { redactCanonicalRequest, injectSystemNotice } from "../privacy/runtime.js";
 import { verifyEgress } from "../privacy/egress.js";
 import { verifyExtensions } from "../privacy/extension-verify.js";
+import { projectionContext } from "../ir/projection/context.js";
+import type { TranslationFailurePhase } from "../ir/projection/failure.js";
+import type { CanonicalResponse } from "../ir/response.js";
 import { restoreResponse } from "../privacy/response.js";
 import { restoreString } from "../privacy/restore.js";
 import { createPrivacyStreamRestore } from "../privacy/stream.js";
@@ -177,6 +180,25 @@ export async function translateCall(
       sourceEndpoint: url.pathname,
       targetEndpoint: url.pathname,
       warnings: ctx.warnings,
+      drops: ctx.drops,
+    };
+
+    // Non-streaming response projection failures become a source-protocol
+    // error Response instead of a thrown exception (docs/07 §6.4, L-5).
+    const respondWithError = (
+      err: unknown,
+      failurePhase: TranslationFailurePhase,
+    ): Response => {
+      const normalized = normalizeError(err);
+      const canonicalError = toCanonicalError(normalized);
+      recorder.setError(canonicalError);
+      emitTrace({ ...baseTrace, streaming: false, failurePhase });
+      finalizePrivacy("errored");
+      recorder.finish("errored");
+      return new Response(JSON.stringify(source.error.renderError(canonicalError)), {
+        status: statusForError(normalized),
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
     };
 
     const canonicalRequest = parseCanonicalRequest(
@@ -254,6 +276,7 @@ export async function translateCall(
       }
     }
 
+    ctx.projection = projectionContext("request", from, to, source.profile, target.profile);
     const targetPayload = target.request.renderRequest(canonicalRequest, streaming, ctx);
     const cacheApplication = cacheEnabled
       ? applyOpenAIChatCacheAffinity(targetPayload, cacheAffinity, target.profile, ctx)
@@ -363,12 +386,22 @@ export async function translateCall(
         status: targetResponse.status,
       });
     }
-    const canonicalResponse = target.response.parseResponse(targetPayloadJson, ctx);
+    let canonicalResponse: CanonicalResponse;
+    try {
+      canonicalResponse = target.response.parseResponse(targetPayloadJson, ctx);
+    } catch (err) {
+      return respondWithError(err, "parse");
+    }
     recorder.setUsage(toUnifiedUsage(canonicalResponse.usage));
     // Q2/Q10: source-protocol shape rendered BEFORE privacy restore. Warnings
     // are recorded from this render; the client-facing render uses a scratch
     // context so they are not duplicated.
-    recorder.setResponseBody(source.response.renderResponse(canonicalResponse, ctx));
+    ctx.projection = projectionContext("response", from, to, source.profile, target.profile);
+    try {
+      recorder.setResponseBody(source.response.renderResponse(canonicalResponse, ctx));
+    } catch (err) {
+      return respondWithError(err, "projection");
+    }
     if (privacyConfig && privacySession && reportState) {
       const counts = restoreResponse(
         canonicalResponse,
@@ -382,10 +415,15 @@ export async function translateCall(
       reportState.jsonParseFailures += counts.jsonParseFailures;
       for (const warning of counts.warnings) pushPrivacyWarning(warning);
     }
-    const sourcePayloadJson = source.response.renderResponse(
-      canonicalResponse,
-      newCodecContext(),
-    );
+    let sourcePayloadJson: unknown;
+    try {
+      sourcePayloadJson = source.response.renderResponse(
+        canonicalResponse,
+        newCodecContext(),
+      );
+    } catch (err) {
+      return respondWithError(err, "render");
+    }
     emitTrace({ ...baseTrace, streaming: false });
     finalizePrivacy("completed");
     recorder.finish("completed");
@@ -783,4 +821,24 @@ function worstFidelity(warnings: TranslationWarning[]): Fidelity {
 /** Keep target status where it is protocol-meaningful; never fabricate 2xx. */
 function mapStatus(status: number): number {
   return status >= 200 && status < 600 ? status : 502;
+}
+
+/** HTTP status for a locally-produced source-protocol error response (§6.4). */
+function statusForError(err: TranslationError): number {
+  if (err.status !== undefined) return mapStatus(err.status);
+  switch (err.kind) {
+    case "validation":
+    case "unsupported":
+    case "privacy":
+    case "stream_protocol":
+      return 400;
+    case "rate_limit":
+      return 429;
+    case "timeout":
+      return 504;
+    case "cancelled":
+      return 499;
+    default:
+      return 502;
+  }
 }
