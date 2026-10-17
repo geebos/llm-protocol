@@ -13,8 +13,10 @@ A clean-room LLM protocol translation core: **Anthropic Messages ↔ OpenAI Chat
 | Content | system / multi-turn text / images / Tool definitions / Tool calls / Tool results / multi-turn resubmission / parallel calls |
 | Thinking | thinking / redacted_thinking / signature bidirectional mapping, three policies: reject / drop_with_warning / provider_metadata |
 | State | usage (unified), finish/stop reason, ID, model, reverse error translation |
+| Fidelity | field-level droppability driven by `ProviderProfile` capabilities: droppable fields are recorded in `trace.drops`, non-droppable ones fail closed instead of being lost |
 | Observability | per-call `onComplete` (request body, response body, canonical SSE events, unified usage), `logid`, diagnostic trace |
 | Security | caller-owned credentials, final headers forwarded verbatim, body size limits, timeouts, cancellation propagation, trace redaction |
+| Privacy | optional recognizer-driven redaction / restore across request, response and stream (incremental tool-argument restore) |
 
 **Not yet supported:** OpenAI Responses format `openai-responses`.
 
@@ -26,13 +28,7 @@ A clean-room LLM protocol translation core: **Anthropic Messages ↔ OpenAI Chat
 npm install llm-protocol
 ```
 
-Requires Node.js ≥ 20.
-
-The 2.x line is currently published under the `beta` tag:
-
-```bash
-npm install llm-protocol@beta   # or: llm-protocol@2.0.0-beta.0
-```
+Requires Node.js ≥ 20. The current line is 3.x (canonical IR v0.5, native-partition codecs, privacy transform).
 
 ### Usage
 
@@ -74,6 +70,8 @@ const chat = await response.json(); // OpenAI Chat response
 | `translate.responses.*` | OpenAI Responses → … | P1 (unsupported) |
 
 > `messages` = Anthropic Messages, `chat` = OpenAI Chat, `responses` = OpenAI Responses.
+
+Same-protocol calls (`messages.messages`, `chat.chat`) are not byte echoes: they run the full `parse → IR → render` round-trip and report the same fidelity and drop data as cross-protocol calls.
 
 ### SSE streaming
 
@@ -145,6 +143,50 @@ for (;;) {
 | `policies` | `TranslationPolicies` | no | Translation policies (default `DEFAULT_POLICIES`). |
 | `cache` | `{ resolvers?, privacySafeResolvers?, key?, namespace? }` | no | Prompt-cache affinity (Anthropic `cache_control` → Chat `prompt_cache_key`). |
 | `privacy` | `PrivacyOptions` | no | Privacy recognition / redaction / restore. |
+
+### Fidelity and drops
+
+Every call records what the translation did to the payload. `trace` receives a `TranslationTrace` with `fidelity`, `warnings`, `drops` and — on failures — `failurePhase`:
+
+| Fidelity | Meaning |
+| --- | --- |
+| `EXACT` | Semantically identical render. |
+| `COMPATIBLE` | An explicitly enabled feature was approximated (e.g. `cache_control` → `prompt_cache_key`). |
+| `LOSSY` | At least one field was dropped (see `drops`) or a feature adaptation lost information. |
+| `UNSUPPORTED` | The target cannot express the construct at all. |
+
+Droppability is decided per field from the `ProviderProfile` capabilities: fields the target can express are adapted, droppable fields are dropped and listed in `trace.drops` (`path`, `cause`, `authorization`), and fields that may not be dropped fail closed — the call rejects with a `TranslationError` (`code: "non_droppable_field"`) instead of losing data. Response-side projection failures surface as a source-protocol error `Response` with `failurePhase` set. Nothing is dropped silently.
+
+### Privacy transform
+
+Recognition is supplied by the caller; the core owns span resolution, deterministic placeholder allocation, replacement and restoration. Redaction runs after parsing and before rendering, and the reverse restore runs on the way back — including incremental restoration while tool arguments stream.
+
+```ts
+await translate.chat.messages({
+  // url / headers / body as above
+  privacy: {
+    recognizers: [
+      {
+        priority: 1,
+        recognize(text) {
+          return [...text.matchAll(/\d{11}/g)].map((m) => ({
+            start: m.index!,
+            end: m.index! + m[0].length,
+            type: "phone",
+          }));
+        },
+      },
+    ],
+  },
+  onPrivacyComplete: (r) => console.log(r.redacted, r.restored, r.unknownPlaceholders),
+});
+```
+
+The upstream sees `<private_placeholder_{type}_{N}>` placeholders plus an injected system notice; the caller gets the originals back. `trace` and `onPrivacyComplete` only ever carry counts and warning codes — never raw values, placeholder mappings, credentials or prompt bodies. Defaults are `securityMode: "strict"` (no leakage permitted) and `egress: "policy"`; coverage, templates, HMAC tags and streaming budgets are configurable through `PrivacyOptions`.
+
+### Prompt-cache affinity
+
+Anthropic `cache_control` breakpoints have no Chat equivalent. When the target is OpenAI Chat, the core derives a stable `prompt_cache_key` (affinity, not breakpoint semantics), reports it in `trace.cache`, and only emits it when the target profile declares `capabilities.cache.promptCacheKey` — nothing is sent to providers that would reject the field. Under privacy, resolvers that read raw bodies are disabled unless `cache.allowLegacyCacheResolvers` is set.
 
 ### Observability (`onComplete`)
 

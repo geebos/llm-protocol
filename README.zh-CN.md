@@ -13,8 +13,10 @@
 | 内容 | system / 多轮文本 / 图片 / Tool 定义 / Tool 调用 / Tool 结果 / 多轮回注 / 并行调用 |
 | Thinking | thinking / redacted_thinking / signature 双向映射，三策略：reject / drop_with_warning / provider_metadata |
 | 状态 | usage（统一结构）、finish/stop reason、ID、model、错误反向转换 |
+| 保真 | 由 `ProviderProfile` 能力声明驱动的字段级可丢弃策略：可丢弃字段记入 `trace.drops`，不可丢弃字段 fail-closed 报错而非静默丢失 |
 | 可观测 | 每次调用的 `onComplete`（请求体、响应体、canonical SSE 事件、统一 usage）、`logid`、诊断 trace |
 | 安全 | 凭据由调用方持有、最终 headers 原样转发、body 大小限制、超时、取消传播、trace 脱敏 |
+| 隐私 | 可选的识别/替换/还原，覆盖请求、响应与流式（含工具参数增量还原） |
 
 **暂不支持**：OpenAI Responses 格式 `openai-responses`。
 
@@ -26,13 +28,7 @@
 npm install llm-protocol
 ```
 
-Node.js ≥ 20。
-
-2.x 系列目前发布在 `beta` dist-tag 下：
-
-```bash
-npm install llm-protocol@beta   # 或：llm-protocol@2.0.0-beta.0
-```
+Node.js ≥ 20。当前主线为 3.x（Canonical IR v0.5、协议原生分区 codec、隐私转换）。
 
 ### 使用示例
 
@@ -74,6 +70,8 @@ const chat = await response.json(); // OpenAI Chat 响应
 | `translate.responses.*` | OpenAI Responses → … | P1（未支持） |
 
 > `messages` = Anthropic Messages，`chat` = OpenAI Chat，`responses` = OpenAI Responses。
+
+同协议调用（`messages.messages`、`chat.chat`）不是字节回声：同样走完整的 `parse → IR → render` 往返，并输出与跨协议调用一致的保真/丢弃数据。
 
 ### SSE 流式示例
 
@@ -145,6 +143,50 @@ for (;;) {
 | `policies` | `TranslationPolicies` | 否 | 转换策略（默认 `DEFAULT_POLICIES`）。 |
 | `cache` | `{ resolvers?, privacySafeResolvers?, key?, namespace? }` | 否 | Prompt-cache 亲和性（Anthropic `cache_control` → Chat `prompt_cache_key`）。 |
 | `privacy` | `PrivacyOptions` | 否 | 隐私识别 / 替换 / 还原。 |
+
+### 保真与字段丢弃
+
+每次调用都会记录转换对载荷做了什么。`trace` 回调收到的 `TranslationTrace` 包含 `fidelity`、`warnings`、`drops`，失败时还有 `failurePhase`：
+
+| Fidelity | 含义 |
+| --- | --- |
+| `EXACT` | 渲染语义等价。 |
+| `COMPATIBLE` | 显式启用的特性被近似（如 `cache_control` → `prompt_cache_key`）。 |
+| `LOSSY` | 至少一个字段被丢弃（见 `drops`），或特性适配有信息损失。 |
+| `UNSUPPORTED` | 目标协议完全无法表达该构造。 |
+
+可丢弃性由 `ProviderProfile` 能力声明逐字段裁决：目标能等价表达的字段做适配；可丢弃字段被丢弃并记入 `trace.drops`（`path`、`cause`、`authorization`）；不可丢弃字段 fail-closed——调用以 `TranslationError`（`code: "non_droppable_field"`）失败，而不是丢数据。响应侧投影失败则以源协议错误 `Response` 返回并带上 `failurePhase`。不存在静默降级。
+
+### 隐私转换
+
+识别规则由调用方提供，内核负责 span 裁决、确定性占位符分配、替换与还原。替换在 parse 之后、render 之前执行，回程做反向还原——包括工具参数流式输出时的增量还原。
+
+```ts
+await translate.chat.messages({
+  // url / headers / body 同上
+  privacy: {
+    recognizers: [
+      {
+        priority: 1,
+        recognize(text) {
+          return [...text.matchAll(/\d{11}/g)].map((m) => ({
+            start: m.index!,
+            end: m.index! + m[0].length,
+            type: "phone",
+          }));
+        },
+      },
+    ],
+  },
+  onPrivacyComplete: (r) => console.log(r.redacted, r.restored, r.unknownPlaceholders),
+});
+```
+
+上游看到的是 `<private_placeholder_{type}_{N}>` 占位符外加注入的 system 提示，调用方拿到原文。`trace` 与 `onPrivacyComplete` 只携带计数与 warning code——不含原始值、占位符映射、凭据或完整 prompt。默认 `securityMode: "strict"`（不允许泄漏）与 `egress: "policy"`；覆盖率、模板、HMAC tag 与流式预算通过 `PrivacyOptions` 配置。
+
+### Prompt-cache 亲和性
+
+Anthropic `cache_control` 断点在 Chat 侧没有对应语义。目标为 OpenAI Chat 时，内核推导稳定的 `prompt_cache_key`（亲和性，而非断点语义）并写入 `trace.cache`；仅当目标 profile 声明 `capabilities.cache.promptCacheKey` 时才发送，不会把字段推给会因此报错的 provider。隐私模式下，读取原始 body 的 resolver 默认禁用，除非显式开启 `cache.allowLegacyCacheResolvers`。
 
 ### 可观测（`onComplete`）
 
