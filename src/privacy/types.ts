@@ -99,6 +99,7 @@ export interface PrivacyRecognitionOptions {
 
 export interface PrivacyStreamingOptions {
   maxTextPendingBytes?: number;
+  /** Cumulative byte budget for one streamed tool block (enforced, not buffered). */
   maxToolArgumentBytes?: number;
   maxPlaceholderLength?: number;
   maxTypeLength?: number;

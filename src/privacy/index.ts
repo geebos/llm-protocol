@@ -69,6 +69,12 @@ export {
 } from "./redact.js";
 export { restoreResponse, type RestoreCounts } from "./response.js";
 export { createPrivacyStreamRestore, type StreamRestoreHandle, type StreamRestoreStats } from "./stream.js";
+export {
+  createToolArgumentsRestorer,
+  type ToolArgumentsRestorer,
+  type ToolArgumentsRestoreOptions,
+  type ToolRestoreStats,
+} from "./json-stream.js";
 export { buildSystemNotice, DEFAULT_SYSTEM_NOTICE } from "./system.js";
 export { verifyEgress } from "./egress.js";
 export {

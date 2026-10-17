@@ -132,6 +132,93 @@ describe("streaming restore", () => {
     expect(result.events[result.events.length - 2].type).toBe("tool_end");
   });
 
+  it("emits tool argument deltas before tool_end (incremental)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
+        {
+          type: "tool_arguments_delta",
+          location: { choice: 0, content: 0 },
+          partialJson: '{"a":"',
+        },
+        {
+          type: "tool_arguments_delta",
+          location: { choice: 0, content: 0 },
+          partialJson: "<private_placeholder_a_10>",
+        },
+        { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '"}' },
+        { type: "tool_end", location: { choice: 0, content: 0 } },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    const argEvents = result.events.filter(
+      (e): e is Extract<CanonicalStreamEvent, { type: "tool_arguments_delta" }> =>
+        e.type === "tool_arguments_delta",
+    );
+    // Arguments flow incrementally, never as a single block at `tool_end`.
+    expect(argEvents.length).toBeGreaterThan(1);
+    expect(result.events.indexOf(argEvents[0])).toBeLessThan(
+      result.events.findIndex((e) => e.type === "tool_end"),
+    );
+    expect(JSON.parse(argEvents.map((e) => e.partialJson).join(""))).toEqual({ a: "x10" });
+  });
+
+  it("warns and leaves malformed tool arguments unrestored (PT-05)", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
+        {
+          type: "tool_arguments_delta",
+          location: { choice: 0, content: 0 },
+          partialJson: '{"a":<private_placeholder_a_1>}',
+        },
+        { type: "tool_end", location: { choice: 0, content: 0 } },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    const json = result.events
+      .filter(
+        (e): e is Extract<CanonicalStreamEvent, { type: "tool_arguments_delta" }> =>
+          e.type === "tool_arguments_delta",
+      )
+      .map((e) => e.partialJson)
+      .join("");
+    expect(json).toBe('{"a":<private_placeholder_a_1>}');
+    expect(result.warnings.some((w) => w.code === "privacy_json_parse_failed")).toBe(true);
+  });
+
+  it("drops the unconfirmed tool tail when an error terminates the stream", async () => {
+    const { session, config } = makeSession(10);
+    const result = await run(
+      [
+        { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
+        {
+          type: "tool_arguments_delta",
+          location: { choice: 0, content: 0 },
+          partialJson: '{"a":"<private_placeholder_a_1',
+        },
+        { type: "error", error: { kind: "upstream", message: "boom" } },
+      ],
+      session,
+      config,
+    );
+    const json = result.events
+      .filter(
+        (e): e is Extract<CanonicalStreamEvent, { type: "tool_arguments_delta" }> =>
+          e.type === "tool_arguments_delta",
+      )
+      .map((e) => e.partialJson)
+      .join("");
+    expect(json).not.toContain("<private_placeholder_a_1");
+    expect(result.events.some((e) => e.type === "error")).toBe(true);
+  });
+
   it("does not restore unknown placeholders and warns (PT-07)", async () => {
     const { session, config } = makeSession(1);
     const result = await run(

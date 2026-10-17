@@ -2,9 +2,10 @@
  * Streaming restore transform (§8.2, §9).
  *
  * Registered matches use Maximal Munch across chunks; tool arguments are
- * buffered until `tool_end` and restored JSON-aware. Lifecycle events
- * (`message_start/end`, `*_start/*_end` pairing) are preserved exactly; only
- * delta count/content/boundaries may change (INV-6).
+ * restored incrementally by a JSON-aware state machine that forwards every
+ * confirmed byte immediately and only withholds a bounded tail (§8.4).
+ * Lifecycle events (`message_start/end`, `*_start/*_end` pairing) are preserved
+ * exactly; only delta count/content/boundaries may change (INV-6).
  *
  * Buffers are keyed by the unified `StreamBlockKey` (docs/07 §7.1/§8.3), never a
  * bare index, so two choices at the same content index never share a buffer.
@@ -14,7 +15,8 @@ import type { ResolvedStreamLocation } from "../ir/stream-key.js";
 import { createStreamBlockKey, streamBlockKeyId } from "../ir/stream-key.js";
 import type { ResolvedPrivacyConfig } from "./config.js";
 import { PrivacyGuardError } from "./errors.js";
-import { restoreJsonText, restoreText } from "./restore.js";
+import { createToolArgumentsRestorer, type ToolArgumentsRestorer } from "./json-stream.js";
+import { restoreText } from "./restore.js";
 import { createPlaceholderMatcher } from "./trie.js";
 import type { PrivacyWarning } from "./types.js";
 import type { PrivacySession } from "./session.js";
@@ -39,6 +41,10 @@ interface PendingText {
   kind: "text" | "refusal";
 }
 
+interface ToolBlock {
+  restorer: ToolArgumentsRestorer;
+}
+
 function blockKey(kind: "text" | "tool" | "refusal", location: ResolvedStreamLocation): string {
   return streamBlockKeyId(createStreamBlockKey(kind, location));
 }
@@ -57,7 +63,7 @@ export function createPrivacyStreamRestore(
   const entries = session.snapshot();
   const matcher = createPlaceholderMatcher(config.template, entries);
   const pendingText = new Map<string, PendingText>();
-  const pendingTool = new Map<string, string>();
+  const toolBlocks = new Map<string, ToolBlock>();
   let released = false;
   session.acquireStream();
   const release = (): void => {
@@ -111,61 +117,44 @@ export function createPrivacyStreamRestore(
           controller.enqueue(event);
           break;
         case "tool_start":
-          pendingTool.set(blockKey("tool", event.location), "");
+          toolBlocks.set(blockKey("tool", event.location), {
+            restorer: createToolArgumentsRestorer({
+              compiled: config.template,
+              matcher,
+              maxPlaceholderLength: config.streaming.maxPlaceholderLength,
+              maxBytes: config.streaming.maxToolArgumentBytes,
+              overflowAction: config.streaming.overflowAction,
+              stats,
+              report,
+            }),
+          });
           controller.enqueue(event);
           break;
         case "tool_arguments_delta": {
-          const key = blockKey("tool", event.location);
-          const pending = (pendingTool.get(key) ?? "") + event.partialJson;
-          if (pending.length > config.streaming.maxToolArgumentBytes) {
-            handleOverflow(pending, "tool_arguments", event.location, controller);
-            pendingTool.set(key, "");
-          } else {
-            pendingTool.set(key, pending);
+          const block = toolBlocks.get(blockKey("tool", event.location));
+          if (!block) {
+            controller.enqueue(event);
+            break;
           }
+          emitToolArguments(controller, event.location, () =>
+            block.restorer.feed(event.partialJson),
+          );
           break;
         }
         case "tool_end": {
           const key = blockKey("tool", event.location);
-          const pending = pendingTool.get(key) ?? "";
-          pendingTool.delete(key);
-          if (pending) {
-            const result = restoreJsonText(
-              pending,
-              config.template,
-              entries,
-              config.streaming.maxPlaceholderLength,
-            );
-            if (result.parseFailed) {
-              stats.jsonParseFailures++;
-              report({
-                code: "privacy_json_parse_failed",
-                message: "Buffered tool arguments were not valid JSON; left unrestored",
-              });
-              controller.enqueue({
-                type: "tool_arguments_delta",
-                location: event.location,
-                partialJson: pending,
-              });
-            } else {
-              stats.restored += result.matched;
-              stats.unknown += result.unknown;
-              for (const w of result.warnings) report(w);
-              if (result.text !== "null" && result.text !== "") {
-                controller.enqueue({
-                  type: "tool_arguments_delta",
-                  location: event.location,
-                  partialJson: result.text,
-                });
-              }
-            }
+          const block = toolBlocks.get(key);
+          toolBlocks.delete(key);
+          if (block) {
+            emitToolArguments(controller, event.location, () => block.restorer.end());
           }
           controller.enqueue(event);
           break;
         }
         case "error":
           pendingText.clear();
-          pendingTool.clear();
+          for (const block of toolBlocks.values()) block.restorer.abort();
+          toolBlocks.clear();
           release();
           controller.enqueue(event);
           break;
@@ -174,7 +163,8 @@ export function createPrivacyStreamRestore(
             processText(entry.kind, entry.location, true, controller);
           }
           pendingText.clear();
-          pendingTool.clear();
+          for (const block of toolBlocks.values()) block.restorer.abort();
+          toolBlocks.clear();
           release();
           controller.enqueue(event);
           break;
@@ -189,11 +179,35 @@ export function createPrivacyStreamRestore(
         processText(entry.kind, entry.location, true, controller);
       }
       pendingText.clear();
-      pendingTool.clear();
+      for (const block of toolBlocks.values()) block.restorer.abort();
+      toolBlocks.clear();
       release();
       void controller;
     },
   });
+
+  /** Emit the restorer fragments, releasing the session if it throws. */
+  function emitToolArguments(
+    controller: TransformStreamDefaultController<CanonicalStreamEvent>,
+    location: ResolvedStreamLocation,
+    run: () => string[],
+  ): void {
+    let fragments: string[];
+    try {
+      fragments = run();
+    } catch (err) {
+      release();
+      throw err;
+    }
+    for (const fragment of fragments) {
+      if (!fragment) continue;
+      controller.enqueue({
+        type: "tool_arguments_delta",
+        location,
+        partialJson: fragment,
+      });
+    }
+  }
 
   function emitText(
     kind: "text" | "refusal",
@@ -253,7 +267,7 @@ export function createPrivacyStreamRestore(
 
   function handleOverflow(
     pending: string,
-    kind: "text" | "refusal" | "tool_arguments",
+    kind: "text" | "refusal",
     location: ResolvedStreamLocation,
     controller: TransformStreamDefaultController<CanonicalStreamEvent>,
   ): void {
@@ -269,15 +283,7 @@ export function createPrivacyStreamRestore(
       code: "privacy_buffer_overflow",
       message: `Privacy ${kind} buffer overflowed; buffered content flushed raw`,
     });
-    if (kind === "tool_arguments") {
-      controller.enqueue({
-        type: "tool_arguments_delta",
-        location,
-        partialJson: pending,
-      });
-    } else {
-      emitText(kind, location, pending, controller);
-    }
+    emitText(kind, location, pending, controller);
   }
 
   return {
@@ -285,7 +291,8 @@ export function createPrivacyStreamRestore(
     stats,
     abort(): void {
       pendingText.clear();
-      pendingTool.clear();
+      for (const block of toolBlocks.values()) block.restorer.abort();
+      toolBlocks.clear();
       release();
     },
   };

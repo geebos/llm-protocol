@@ -14,6 +14,8 @@ import type {
 } from "../../src/index.js";
 
 const encoder = new TextEncoder();
+const BS = String.fromCharCode(92);
+const NL = String.fromCharCode(10);
 
 function phoneRecognizer(): PrivacyRecognizer {
   return {
@@ -133,6 +135,43 @@ function anthropicTextStream(textChunks: string[]): string {
     anthropicFrame("message_delta", {
       type: "message_delta",
       delta: { stop_reason: "end_turn" },
+      usage: { input_tokens: 8, output_tokens: 4 },
+    }) +
+    anthropicFrame("message_stop", { type: "message_stop" });
+  return out;
+}
+
+function anthropicToolStream(argChunks: string[]): string {
+  let out =
+    anthropicFrame("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5",
+        content: [],
+        stop_reason: null,
+        usage: {},
+      },
+    }) +
+    anthropicFrame("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "write", input: {} },
+    });
+  for (const chunk of argChunks) {
+    out += anthropicFrame("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: chunk },
+    });
+  }
+  out +=
+    anthropicFrame("content_block_stop", { type: "content_block_stop", index: 0 }) +
+    anthropicFrame("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
       usage: { input_tokens: 8, output_tokens: 4 },
     }) +
     anthropicFrame("message_stop", { type: "message_stop" });
@@ -348,6 +387,53 @@ describe("privacy through translate", () => {
       })
       .join("");
     expect(text).toBe("Sure, call 13800138000 now.");
+    expect(report?.status).toBe("completed");
+    expect(report?.restored).toBeGreaterThanOrEqual(1);
+  });
+
+  it("streams restored tool arguments before the tool block ends (PT-05/PT-24)", async () => {
+    const cap = capturingFetch(
+      () =>
+        new Response(
+          bytesStream(
+            anthropicToolStream([
+              `{"path":"a.ts","content":"line one${BS}n`,
+              "call <private_",
+              "placeholder_phone_1> now",
+              '"}',
+            ]),
+          ),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    let report: PrivacyCompletionReport | undefined;
+    const response = await translate.chat.messages({
+      ...openaiOptions({ stream: true }),
+      fetch: cap.fetch,
+      privacy: { recognizers: [phoneRecognizer()] },
+      onPrivacyComplete: (r) => {
+        report = r;
+      },
+    });
+    const frames = await collectSSEFrames(response.body);
+    const argDeltas: string[] = [];
+    for (const frame of frames) {
+      let parsed: {
+        choices?: { delta?: { tool_calls?: { function?: { arguments?: string } }[] } }[];
+      };
+      try {
+        parsed = JSON.parse(frame.data) as typeof parsed;
+      } catch {
+        continue;
+      }
+      const args = parsed.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments;
+      if (args) argDeltas.push(args);
+    }
+    // Incremental: the arguments arrive in several deltas, not one block.
+    expect(argDeltas.length).toBeGreaterThan(1);
+    const restored = JSON.parse(argDeltas.join("")) as { path: string; content: string };
+    expect(restored.path).toBe("a.ts");
+    expect(restored.content).toBe(`line one${NL}call 13800138000 now`);
     expect(report?.status).toBe("completed");
     expect(report?.restored).toBeGreaterThanOrEqual(1);
   });
