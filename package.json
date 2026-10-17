@@ -1,6 +1,6 @@
 {
   "name": "llm-protocol",
-  "version": "3.0.2",
+  "version": "4.0.0",
   "description": "Clean-room LLM protocol translation core: Anthropic Messages <-> OpenAI Chat",
   "type": "module",
   "engines": {
