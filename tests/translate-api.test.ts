@@ -481,7 +481,7 @@ describe("unified usage", () => {
 
 describe("privacy observation boundary", () => {
   it("keeps onComplete at the restore-before view and the Response restored", async () => {
-    const token = /<private_placeholder_phone-[a-z2-7]{5}>/;
+    const token = /<PP-phone-[a-z2-7]{5}>/;
     const { fetch } = fakeFetch((_req, body) => {
       const sent = JSON.stringify(body);
       const found = token.exec(sent)?.[0];

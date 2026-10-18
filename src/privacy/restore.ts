@@ -13,6 +13,8 @@ import {
   parsePlaceholder,
   partialPlaceholderStart,
   scanTemplateShape,
+  shapeHead,
+  tokenHead,
   type CompiledTemplate,
 } from "./template.js";
 import type { PrivacyWarning } from "./types.js";
@@ -121,11 +123,37 @@ export function restoreText(
         options.maxPlaceholderLength,
       );
     }
-    if (holdStart < buffer.length) {
-      out += buffer.slice(pos, holdStart);
-      return holdTail(holdStart);
+    // Nothing matches at `pos`. Emit forward, but stop before the next position
+    // a token could start at or before `holdStart` (the tail that may still
+    // grow into one). Jumping straight to `holdStart` would swallow a *complete*
+    // token starting in between — `<token>a<token>` with a partial prefix at the
+    // buffer end restored serially but not while streaming.
+    const nextHead = buffer.indexOf(shapeHead(compiled), pos + 1);
+    // A legacy escape unit must not be split: its backslash would be emitted
+    // while the decoded shape still went through the matcher.
+    const nextEscape =
+      options.escape === true ? buffer.indexOf(ESCAPE_CHAR, pos + 1) : -1;
+    const limit = Math.min(
+      nextHead === -1 ? Number.POSITIVE_INFINITY : nextHead,
+      nextEscape === -1 ? Number.POSITIVE_INFINITY : nextEscape,
+      holdStart,
+    );
+    if (limit === Number.POSITIVE_INFINITY) {
+      out += buffer.slice(pos);
+      pos = buffer.length;
+      continue;
     }
-    out += buffer[pos];
+    if (limit > pos + 1) {
+      out += buffer.slice(pos, limit);
+      pos = limit;
+      continue;
+    }
+    if (limit > pos) {
+      out += buffer[pos];
+      pos++;
+      continue;
+    }
+    return holdTail(pos);
     pos++;
   }
   return { out, rest: "", unknown, matched, warnings };
@@ -142,7 +170,7 @@ function isKnownTypeToken(
   knownTypes: Set<string>,
 ): boolean {
   for (const type of knownTypes) {
-    if (shapeText.startsWith(compiled.prefix + type + compiled.mid1)) return true;
+    if (shapeText.startsWith(tokenHead(compiled, type))) return true;
   }
   return false;
 }

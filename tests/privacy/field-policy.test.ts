@@ -63,7 +63,7 @@ describe("field-level escaping policy (E4)", () => {
                 name: "t",
                 parameters: {
                   type: "object",
-                  properties: { id: { type: "string", enum: ["<private_placeholder_phone_7>"] } },
+                  properties: { id: { type: "string", enum: ["<PP-phone-abcde>"] } },
                 },
               },
             },
@@ -72,7 +72,7 @@ describe("field-level escaping policy (E4)", () => {
         fetch: fetchOk(),
         privacy: {
           recognizers: [phoneRecognizer()],
-          mapping: { escape: true, tagMode: false },
+          mapping: { escape: true },
         },
       }),
     ).rejects.toMatchObject({ kind: "privacy", code: "privacy_field_unescapable" });
@@ -93,7 +93,7 @@ describe("field-level escaping policy (E4)", () => {
                   type: "function",
                   function: {
                     name: "f",
-                    arguments: JSON.stringify({ "<private_placeholder_phone_1>": "x" }),
+                    arguments: JSON.stringify({ "<PP-phone-abcde>": "x" }),
                   },
                 },
               ],
@@ -103,7 +103,7 @@ describe("field-level escaping policy (E4)", () => {
         fetch: fetchOk(),
         privacy: {
           recognizers: [phoneRecognizer()],
-          mapping: { escape: true, tagMode: false },
+          mapping: { escape: true },
         },
       }),
     ).rejects.toMatchObject({ kind: "privacy", code: "privacy_field_unescapable" });

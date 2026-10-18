@@ -206,7 +206,9 @@ describe("incremental tool-argument restore", () => {
       prevLen = out.length;
     }
     out += h.restorer.end().join("");
-    expect(out.length).toBeGreaterThan(100_000);
+    // Prefix-independent: everything is released in the end, and the hold never
+    // exceeded its budget along the way.
+    expect(out.length).toBe(doc.length);
     expect(h.stats.overflowed).toBe(false);
   });
 

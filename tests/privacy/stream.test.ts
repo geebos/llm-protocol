@@ -1,6 +1,6 @@
 /**
- * Streaming restore invariants (P3/P4): Maximal Munch across chunks and
- * JSON-aware tool-argument restore. Covers PT-04/05/55/63.
+ * Streaming restore invariants (P3/P4): token hold points across chunks and
+ * JSON-aware tool-argument restore. Covers PT-04/05/06/07/13/14/30/36/41/55/63.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -11,14 +11,18 @@ import {
 } from "../../src/privacy/index.js";
 import type { CanonicalStreamEvent } from "../../src/streams/index.js";
 
+/** Partial placeholder start (prefix + separator, no type yet). */
+const PARTIAL = "<PP-";
+/** A longer partial prefix: exceeds the small overflow budgets in these tests. */
+const overflowText = `${PARTIAL}abcdef`;
+
 function makeSession(mappings: number): {
   session: PrivacySession;
   config: ReturnType<typeof resolvePrivacyConfig>;
+  token(n: number): string;
 } {
-  // Mechanics are template-agnostic; numbered tokens keep the fixtures legible.
   const config = resolvePrivacyConfig({
     recognizers: [{ priority: 1, recognize: () => [] }],
-    mapping: { tagMode: false },
   });
   const session = new PrivacySession("stream-test", {
     compiled: config.template,
@@ -27,7 +31,11 @@ function makeSession(mappings: number): {
   for (let i = 1; i <= mappings; i++) {
     session.getOrCreate("a", `x${i}`);
   }
-  return { session, config };
+  return {
+    session,
+    config,
+    token: (n: number) => session.entries()[n - 1].placeholder,
+  };
 }
 
 async function run(
@@ -43,8 +51,8 @@ async function run(
       controller.close();
     },
   });
-  const out: CanonicalStreamEvent[] = [];
   const reader = input.pipeThrough(handle.stream).getReader();
+  const out: CanonicalStreamEvent[] = [];
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -61,44 +69,64 @@ function deltas(events: CanonicalStreamEvent[]): string {
 }
 
 describe("streaming restore", () => {
-  it("uses maximal munch across a chunk boundary (PT-55)", async () => {
-    const { session, config } = makeSession(10);
+  it("restores a token split across chunk boundaries (PT-55)", async () => {
+    const { session, config, token } = makeSession(10);
+    const t = token(1);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "see <private_placeholder_a_1" },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "0> end" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `see ${t.slice(0, 12)}` },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `${t.slice(12)} end` },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    expect(deltas(result.events)).toBe("see x10 end");
+    expect(deltas(result.events)).toBe("see x1 end");
   });
 
-  it("waits for a longer placeholder before committing a short one (PT-63)", async () => {
-    const { session, config } = makeSession(10);
+  it("holds a partial tag until it completes (PT-63)", async () => {
+    const { session, config, token } = makeSession(10);
+    const t = token(2);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: t.slice(0, t.length - 2) },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `${t.slice(t.length - 2)} tail` },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    // Incomplete at end of stream: emitted as-is, never partially restored.
-    expect(deltas(result.events)).toBe("<private_placeholder_a_1");
+    expect(deltas(result.events)).toBe("x2 tail");
   });
 
-  it("restores a completed short placeholder immediately", async () => {
-    const { session, config } = makeSession(10);
+  it("does not restore a token that never completes", async () => {
+    const { session, config, token } = makeSession(10);
+    const t = token(1);
+    const truncated = t.slice(0, t.length - 3);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1>" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: truncated },
+        { type: "text_end", location: { choice: 0, content: 0 } },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe(truncated);
+    expect(result.warnings.some((w) => w.code === "privacy_unknown_placeholder")).toBe(true);
+  });
+
+  it("restores a completed token immediately", async () => {
+    const { session, config, token } = makeSession(10);
+    const result = await run(
+      [
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: token(1) },
         { type: "text_delta", location: { choice: 0, content: 0 }, text: " tail" },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
@@ -110,12 +138,21 @@ describe("streaming restore", () => {
   });
 
   it("restores buffered tool arguments as valid JSON (PT-05)", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
+    const t = token(1);
     const result = await run(
       [
         { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
-        { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '{"a":"<private_placeholder_a_1' },
-        { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '0>","b":[1,2]}' },
+        {
+          type: "tool_arguments_delta",
+          location: { choice: 0, content: 0 },
+          partialJson: `{"a":"${t.slice(0, 6)}`,
+        },
+        {
+          type: "tool_arguments_delta",
+          location: { choice: 0, content: 0 },
+          partialJson: `${t.slice(6)}","b":[1,2]}`,
+        },
         { type: "tool_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
@@ -126,14 +163,14 @@ describe("streaming restore", () => {
       .filter((e): e is Extract<CanonicalStreamEvent, { type: "tool_arguments_delta" }> => e.type === "tool_arguments_delta")
       .map((e) => e.partialJson)
       .join("");
-    expect(JSON.parse(json)).toEqual({ a: "x10", b: [1, 2] });
+    expect(JSON.parse(json)).toEqual({ a: "x1", b: [1, 2] });
     // Lifecycle preserved: start/tool_end pairing intact.
     expect(result.events[0].type).toBe("tool_start");
     expect(result.events[result.events.length - 2].type).toBe("tool_end");
   });
 
   it("emits tool argument deltas before tool_end (incremental)", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
     const result = await run(
       [
         { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
@@ -145,7 +182,7 @@ describe("streaming restore", () => {
         {
           type: "tool_arguments_delta",
           location: { choice: 0, content: 0 },
-          partialJson: "<private_placeholder_a_10>",
+          partialJson: token(10),
         },
         { type: "tool_arguments_delta", location: { choice: 0, content: 0 }, partialJson: '"}' },
         { type: "tool_end", location: { choice: 0, content: 0 } },
@@ -167,14 +204,15 @@ describe("streaming restore", () => {
   });
 
   it("warns and leaves malformed tool arguments unrestored (PT-05)", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
+    const malformed = `{"a":${token(1)}}`;
     const result = await run(
       [
         { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
         {
           type: "tool_arguments_delta",
           location: { choice: 0, content: 0 },
-          partialJson: '{"a":<private_placeholder_a_1>}',
+          partialJson: malformed,
         },
         { type: "tool_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
@@ -189,19 +227,20 @@ describe("streaming restore", () => {
       )
       .map((e) => e.partialJson)
       .join("");
-    expect(json).toBe('{"a":<private_placeholder_a_1>}');
+    expect(json).toBe(malformed);
     expect(result.warnings.some((w) => w.code === "privacy_json_parse_failed")).toBe(true);
   });
 
   it("drops the unconfirmed tool tail when an error terminates the stream", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
+    const t = token(1);
     const result = await run(
       [
         { type: "tool_start", location: { choice: 0, content: 0 }, id: "call_1", name: "f" },
         {
           type: "tool_arguments_delta",
           location: { choice: 0, content: 0 },
-          partialJson: '{"a":"<private_placeholder_a_1',
+          partialJson: `{"a":"${t.slice(0, 8)}`,
         },
         { type: "error", error: { kind: "upstream", message: "boom" } },
       ],
@@ -215,50 +254,68 @@ describe("streaming restore", () => {
       )
       .map((e) => e.partialJson)
       .join("");
-    expect(json).not.toContain("<private_placeholder_a_1");
+    expect(json).not.toContain(t.slice(0, 8));
     expect(result.events.some((e) => e.type === "error")).toBe(true);
   });
 
-  it("does not restore unknown placeholders and warns (PT-07)", async () => {
+  it("does not restore unknown tokens and warns for a mangled one (PT-07)", async () => {
+    const { session, config, token } = makeSession(1);
+    // Same type, wrong tag: the model rewrote a token we issued. The wrong tag
+    // must stay inside the base32 alphabet, otherwise it is not token-shaped.
+    const issued = token(1);
+    const last = issued[issued.length - 1] === "a" ? "b" : "a";
+    const mangled = `${issued.slice(0, -1)}${last}`;
+    const result = await run(
+      [
+        { type: "text_start", location: { choice: 0, content: 0 } },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `x ${mangled} y` },
+        { type: "text_end", location: { choice: 0, content: 0 } },
+        { type: "message_end" },
+      ],
+      session,
+      config,
+    );
+    expect(deltas(result.events)).toBe(`x ${mangled} y`);
+    expect(result.warnings.some((w) => w.code === "privacy_unknown_placeholder")).toBe(true);
+  });
+
+  it("leaves a token of an unknown type alone without warning", async () => {
     const { session, config } = makeSession(1);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "x <private_placeholder_a_42> y" },
+        {
+          type: "text_delta",
+          location: { choice: 0, content: 0 },
+          text: `see ${PARTIAL}other-abcde> y`,
+        },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    expect(deltas(result.events)).toBe("x <private_placeholder_a_42> y");
-    expect(result.warnings.some((w) => w.code === "privacy_unknown_placeholder")).toBe(true);
+    expect(deltas(result.events)).toBe(`see ${PARTIAL}other-abcde> y`);
+    expect(result.warnings).toHaveLength(0);
   });
 
   it("restores a default tag token split across chunks", async () => {
-    // Default configuration: identity is the tag, not a counter.
-    const config = resolvePrivacyConfig({
-      recognizers: [{ priority: 1, recognize: () => [] }],
-    });
-    const session = new PrivacySession("tag-stream", {
-      compiled: config.template,
-      namespace: config.namespace,
-    });
-    const token = session.getOrCreate("phone", "13800138000").placeholder;
-    expect(token).toMatch(/^<private_placeholder_phone-[a-z2-7]{5}>$/);
-    const cut = token.length - 2;
+    const { session, config, token } = makeSession(1);
+    const t = token(1);
+    expect(t).toMatch(/^<PP-a-[a-z2-7]{5}>$/);
+    const cut = t.length - 2;
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: `call ${token.slice(0, cut)}` },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: `${token.slice(cut)} now` },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `call ${t.slice(0, cut)}` },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `${t.slice(cut)} now` },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    expect(deltas(result.events)).toBe("call 13800138000 now");
+    expect(deltas(result.events)).toBe("call x1 now");
     expect(result.warnings).toHaveLength(0);
   });
 
@@ -275,7 +332,7 @@ describe("streaming restore", () => {
       run(
         [
           { type: "text_start", location: { choice: 0, content: 0 } },
-          { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_" },
+          { type: "text_delta", location: { choice: 0, content: 0 }, text: overflowText },
           { type: "text_end", location: { choice: 0, content: 0 } },
           { type: "message_end" },
         ],
@@ -298,30 +355,31 @@ describe("streaming restore", () => {
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: overflowText },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    expect(deltas(result.events)).toContain("<private_placeholder_");
+    expect(deltas(result.events)).toContain(overflowText);
     expect(result.warnings.some((w) => w.code === "privacy_buffer_overflow")).toBe(true);
   });
 
   it("emits an incomplete placeholder as-is at EOF with a warning (PT-36)", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
+    const truncated = token(1).slice(0, -1);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "tail <private_placeholder_a_1" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `tail ${truncated}` },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    expect(deltas(result.events)).toBe("tail <private_placeholder_a_1");
+    expect(deltas(result.events)).toBe(`tail ${truncated}`);
     expect(result.warnings.length).toBeGreaterThan(0);
   });
 
@@ -338,7 +396,7 @@ describe("streaming restore", () => {
       run(
         [
           { type: "text_start", location: { choice: 0, content: 0 } },
-          { type: "text_delta", location: { choice: 0, content: 0 }, text: "x <private_placeholder_" },
+          { type: "text_delta", location: { choice: 0, content: 0 }, text: `x ${PARTIAL}` },
           { type: "text_end", location: { choice: 0, content: 0 } },
           { type: "message_end" },
         ],
@@ -349,11 +407,11 @@ describe("streaming restore", () => {
   });
 
   it("drops buffered text when an error event terminates the stream", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "partial <private_placeholder_a_1" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `partial ${token(1).slice(0, 8)}` },
         { type: "error", error: { kind: "upstream", message: "boom" } },
       ],
       session,
@@ -364,15 +422,17 @@ describe("streaming restore", () => {
   });
 
   it("keeps per-index buffers independent (PT-06)", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
+    const a = token(1);
+    const b = token(2);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
         { type: "text_start", location: { choice: 0, content: 1 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1" },
-        { type: "text_delta", location: { choice: 0, content: 1 }, text: "other <private_placeholder_a_2" },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "0>" },
-        { type: "text_delta", location: { choice: 0, content: 1 }, text: ">" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: a.slice(0, 10) },
+        { type: "text_delta", location: { choice: 0, content: 1 }, text: `other ${b.slice(0, 10)}` },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: a.slice(10) },
+        { type: "text_delta", location: { choice: 0, content: 1 }, text: b.slice(10) },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "text_end", location: { choice: 0, content: 1 } },
         { type: "message_end" },
@@ -388,25 +448,26 @@ describe("streaming restore", () => {
         )
         .map((e) => e.text)
         .join("");
-    expect(byIndex(0)).toBe("x10");
+    expect(byIndex(0)).toBe("x1");
     expect(byIndex(1)).toBe("other x2");
   });
 
   it("preserves restore state across an unknown event (PT-53)", async () => {
-    const { session, config } = makeSession(10);
+    const { session, config, token } = makeSession(10);
+    const t = token(1);
     const result = await run(
       [
         { type: "text_start", location: { choice: 0, content: 0 } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "<private_placeholder_a_1" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: t.slice(0, 9) },
         { type: "unknown", sourceType: "ping", raw: { type: "ping" } },
-        { type: "text_delta", location: { choice: 0, content: 0 }, text: "0> tail" },
+        { type: "text_delta", location: { choice: 0, content: 0 }, text: `${t.slice(9)} tail` },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
       ],
       session,
       config,
     );
-    expect(deltas(result.events)).toBe("x10 tail");
+    expect(deltas(result.events)).toBe("x1 tail");
     expect(result.events.some((e) => e.type === "unknown")).toBe(true);
   });
 

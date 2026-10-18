@@ -28,11 +28,7 @@ export function createPrivacyEngine(): PrivacyEngine {
   ): PrivacySessionView => {
     const resolved = resolvePrivacyConfig({
       recognizers: [{ priority: 0, recognize: () => [] }],
-      mapping: {
-        template: options.template,
-        tagMode: options.tagMode,
-        tagLength: options.tagLength,
-      },
+      mapping: { prefix: options.prefix, tagLength: options.tagLength },
     });
     const session = new PrivacySession(id ?? randomUUID(), {
       compiled: resolved.template,
@@ -72,8 +68,7 @@ export function createPrivacyEngine(): PrivacyEngine {
       const config = resolvePrivacyConfig({
         recognizers,
         mapping: {
-          template: active.compiled.raw,
-          tagMode: active.compiled.tagMode,
+          prefix: active.compiled.raw,
           tagLength: active.compiled.tagLength,
         },
       });

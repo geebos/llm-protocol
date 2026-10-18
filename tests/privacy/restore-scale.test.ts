@@ -10,8 +10,8 @@
 import { describe, expect, it } from "vitest";
 import { compileTemplate, restoreString } from "../../src/index.js";
 
-const compiled = compileTemplate("<PP_{type}_{N}>", { tagMode: false });
-const entries = [{ placeholder: "<PP_phone_1>", original: "13800138000" }];
+const compiled = compileTemplate("PP_");
+const entries = [{ placeholder: "<PP-phone-abcde>", original: "13800138000" }];
 
 const PLAIN_TEXT_GUARD_MS = 1000;
 
@@ -26,7 +26,7 @@ describe("restore scale (linear hold-point scan)", () => {
   });
 
   it("stays linear on prefix-dense input", () => {
-    const text = "<PP_!".repeat(100_000);
+    const text = "<PP-".repeat(100_000);
     const t0 = performance.now();
     const result = restoreString(text, compiled, entries, 128);
     const elapsed = performance.now() - t0;
@@ -35,12 +35,12 @@ describe("restore scale (linear hold-point scan)", () => {
   });
 
   it("still restores registered placeholders", () => {
-    expect(restoreString("a<PP_phone_1>b", compiled, entries, 128).text).toBe(
+    expect(restoreString("a<PP-phone-abcde>b", compiled, entries, 128).text).toBe(
       "a13800138000b",
     );
   });
 
   it("still preserves a trailing partial placeholder", () => {
-    expect(restoreString("x<PP_ph", compiled, entries, 128).text).toBe("x<PP_ph");
+    expect(restoreString("x<PP-ph", compiled, entries, 128).text).toBe("x<PP-ph");
   });
 });

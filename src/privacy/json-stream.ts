@@ -18,6 +18,7 @@
  *   never lie further than that from the end (docs/06 §9.4).
  */
 import { ESCAPE_CHAR, containsShape } from "./escape.js";
+import { shapeStart } from "./template.js";
 import { PrivacyGuardError } from "./errors.js";
 import { restoreText } from "./restore.js";
 import type { CompiledTemplate } from "./template.js";
@@ -198,7 +199,7 @@ export function createToolArgumentsRestorer(
   const { compiled, matcher, maxPlaceholderLength, maxBytes, overflowAction, stats, report } =
     options;
   const decodeEscapes = options.escape === true;
-  const prefixHead = compiled.prefix[0];
+  const prefixHead = shapeStart();
   const keyTailLimit = maxPlaceholderLength + KEY_TAIL_MARGIN;
   const scalarChars = "0123456789+-.eEtrufalsn";
 

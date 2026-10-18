@@ -74,7 +74,7 @@ describe("privacy configuration", () => {
       body: {
         model: "gpt-4o",
         messages: [
-          { role: "system", content: "Custom notice: <private_placeholder_{type}-{tag}>" },
+          { role: "system", content: "Custom notice: <PP-{type}-{tag}>" },
           { role: "user", content: "hi" },
         ],
       },
@@ -110,7 +110,7 @@ describe("privacy configuration", () => {
     });
     const json = JSON.stringify(cap.lastBody());
     expect(json).not.toContain("13800138000");
-    expect(json).toMatch(/<private_placeholder_phone-[a-z2-7]{5}>/);
+    expect(json).toMatch(/<PP-phone-[a-z2-7]{5}>/);
   });
 
   it("preserves Anthropic cache_control through the IR (PT-49/59)", async () => {
@@ -146,12 +146,10 @@ describe("privacy configuration", () => {
 
   it("supports a custom template with a round trip (PT-21)", async () => {
     const engine = createPrivacyEngine();
-    const session = engine.createSession("custom", {
-      template: "[[{type}:{N}]]",
-      tagMode: false,
-    });
+    const session = engine.createSession("custom", { prefix: "[[_" });
     const redacted = await engine.redact("call 13800138000", session, [phoneRecognizer()]);
-    expect(redacted).toBe("call [[phone:1]]");
+    // Trailing separators are trimmed, the tail is joined with one "-".
+    expect(redacted).toMatch(/^call <\[\[-phone-[a-z2-7]{5}>$/);
     expect(engine.restore(redacted, session)).toBe("call 13800138000");
   });
 
@@ -169,7 +167,7 @@ describe("privacy configuration", () => {
         fetch: cap.fetch,
         privacy: {
           recognizers: [phoneRecognizer()],
-          mapping: { template: "<p_{type}_{N}_{tag}>", tagMode: true, tagLength: 5 },
+          mapping: { prefix: "<p_", tagLength: 5 },
           tagKey: () => new Uint8Array([1, 2, 3, 4]),
           tagNamespace: "tenant-1",
         },
@@ -178,11 +176,11 @@ describe("privacy configuration", () => {
     };
     await run();
     await run();
-    expect(captured[0]).toMatch(/<p_phone_1_[a-z2-7]{5}>/);
+    expect(captured[0]).toMatch(/<p-phone-[a-z2-7]{5}/);
     // Stable key + namespace => identical placeholder bytes across requests.
-    expect(captured[0]).toContain("<p_phone_1_");
-    const tagA = captured[0].match(/<p_phone_1_([a-z2-7]{5})>/)?.[1];
-    const tagB = captured[1].match(/<p_phone_1_([a-z2-7]{5})>/)?.[1];
+    expect(captured[0]).toContain("<p-phone-");
+    const tagA = captured[0].match(/<p-phone-([a-z2-7]{5})/)?.[1];
+    const tagB = captured[1].match(/<p-phone-([a-z2-7]{5})/)?.[1];
     expect(tagA).toBeDefined();
     expect(tagA).toBe(tagB);
   });

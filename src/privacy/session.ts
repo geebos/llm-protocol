@@ -45,7 +45,6 @@ export class PrivacySession implements PrivacySessionView {
   private readonly namespace: string;
   private readonly placeholderToReal = new Map<string, MappingEntry>();
   private readonly realToPlaceholder = new Map<string, MappingEntry>();
-  private readonly counters = new Map<string, number>();
 
   constructor(id: string, config: SessionConfig) {
     this.id = id;
@@ -92,54 +91,32 @@ export class PrivacySession implements PrivacySessionView {
     if (existing) return existing;
 
     const compiled = this.compiled;
+    // Identity is the tag; the same (type, value) always maps to the same token
+    // inside this session. `salt` only advances on a truncated-digest collision
+    // between two distinct values of the same type.
     let entry: MappingEntry;
-    if (compiled.tagMode) {
-      // Identity is the tag; the same (type, value) always maps to the same
-      // token inside this session. `salt` only advances on a truncated-digest
-      // collision between two distinct values of the same type.
-      let salt = 0;
-      // A custom tag-mode template may keep `{N}`; identity is still the tag,
-      // so the counter is positional (allocation order) only.
-      let n = compiled.hasN ? (this.counters.get(type) ?? 0) + 1 : undefined;
-      for (;;) {
-        const tag = tokenTag(
-          this.key,
-          this.namespace,
-          type,
-          original,
-          compiled.tagLength,
-          salt,
-        );
-        const placeholder = renderPlaceholder(compiled, type, n, tag);
-        if (!this.placeholderToReal.has(placeholder)) {
-          if (n !== undefined) this.counters.set(type, n);
-          entry = {
-            id: `${type}:${tag}`,
-            type,
-            original,
-            placeholder,
-            createdAt: Date.now(),
-          };
-          break;
-        }
-        salt++;
-        if (n !== undefined) n++;
-      }
-    } else {
-      let n = (this.counters.get(type) ?? 0) + 1;
-      let placeholder = renderPlaceholder(compiled, type, n);
-      while (this.placeholderToReal.has(placeholder)) {
-        n++;
-        placeholder = renderPlaceholder(compiled, type, n);
-      }
-      this.counters.set(type, n);
-      entry = {
-        id: `${type}:${n}`,
+    let salt = 0;
+    for (;;) {
+      const tag = tokenTag(
+        this.key,
+        this.namespace,
         type,
         original,
-        placeholder,
-        createdAt: Date.now(),
-      };
+        compiled.tagLength,
+        salt,
+      );
+      const placeholder = renderPlaceholder(compiled, type, tag);
+      if (!this.placeholderToReal.has(placeholder)) {
+        entry = {
+          id: `${type}:${tag}`,
+          type,
+          original,
+          placeholder,
+          createdAt: Date.now(),
+        };
+        break;
+      }
+      salt++;
     }
 
     this.placeholderToReal.set(entry.placeholder, entry);

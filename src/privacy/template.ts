@@ -1,34 +1,32 @@
 /**
- * Placeholder template compile / render / parse and token tag.
+ * Placeholder shape: `<` + prefix + `-{type}-{tag}` + `>`.
  *
- * A token's identity is its `{tag}`: a short base32 digest of
+ * The brackets are added automatically, so the caller supplies only the label
+ * inside them. A token's identity is its `{tag}`: a short base32 digest of
  * `HMAC-SHA256(key, namespace, type, value)`. The same `(type, value)` yields
- * the same token inside one session, and a caller-supplied stable key makes it
- * stable across requests — so no counter (`{N}`) is needed.
+ * the same token inside one process, and a caller-supplied stable key makes it
+ * stable across processes — so no counter is needed.
  *
- * Grammar:
- *   prefix {type} mid1 [ {N} mid2 ] {tag} suffix   (tag mode, default)
- *   prefix {type} mid1 {N} suffix                  (legacy numbered mode)
- *
- * The grammar must stay unambiguous. In tag mode `{tag}` is required and is
- * parsed by stripping the fixed-length trailing tag run first; in legacy mode
- * `{N}` is required and is parsed by anchoring on the trailing digit run, which
- * is why `mid1` may not end with a digit there.
+ * The prefix is normalized: surrounding angle brackets and trailing `-` / `_`
+ * are trimmed, so `<private_placeholder_`, `private_placeholder-` and
+ * `private_placeholder` all produce `<private_placeholder-{type}-{tag}>`.
  */
 import { createHmac } from "node:crypto";
 
-/** Default template (tag mode): identity comes from the tag, not a counter. */
-export const DEFAULT_TEMPLATE = "<private_placeholder_{type}-{tag}>";
-/** Legacy numbered template; used only when `tagMode` is disabled. */
-export const LEGACY_TEMPLATE = "<private_placeholder_{type}_{N}>";
+/** Default prefix content; tokens render as `<PP-{type}-{tag}>`. */
+export const DEFAULT_PREFIX = "PP";
+/** Fixed token brackets (added automatically). */
+const OPEN = "<";
+const CLOSE = ">";
 /** Default tag length in characters (base32, 5 chars = 25 bits). */
 export const DEFAULT_TAG_LENGTH = 5;
 /** Frozen HMAC domain separation string. */
 export const TAG_DOMAIN = "llm-protocol-privacy-v1";
+/** Literal between `{type}` and `{tag}`. */
+const TYPE_TAG_SEPARATOR = "-";
 
 const TYPE_RE = /^[a-z0-9_]+$/;
 const TYPE_CHARS = /[a-z0-9_]/;
-const DIGIT_CHARS = /[0-9]/;
 /** Tag alphabet: RFC 4648 base32, lowercase, no padding. */
 const TAG_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const TAG_CHARS = /[a-z2-7]/;
@@ -41,27 +39,18 @@ const MAX_TYPE_SCAN = 128;
 const MIN_TAG_LENGTH = 4;
 const MAX_TAG_LENGTH = 64;
 
-/** Template literal characters that cannot appear (Appendix B rule 5). */
-const FORBIDDEN_LITERAL = /["\\\u0000-\u001f\u007f]/;
+/** Prefix characters that cannot appear (quotes, backslash, control chars). */
+const FORBIDDEN_PREFIX = /["\\\u0000-\u001f\u007f]/;
 
 export interface CompiledTemplate {
-  raw: string;
-  /** Literal before `{type}`. */
+  /** Normalized label inside the brackets (no `<`/`>`, no trailing `-`/`_`). */
   prefix: string;
-  /** Literal between `{type}` and `{N}`/`{tag}`. */
+  /** Raw caller-supplied prefix, kept for round-tripping the config. */
+  raw: string;
+  /** Literal between `{type}` and `{tag}`; always `-`. */
   mid1: string;
-  /** Literal between `{N}` and `{tag}` (empty unless both are present). */
-  mid2: string;
-  /** Literal after the last dynamic token. */
-  suffix: string;
-  /** Tag mode: the token carries an HMAC tag (default). */
-  tagMode: boolean;
-  /** Whether the template carries a legacy `{N}` counter. */
-  hasN: boolean;
-  /** Tag length in characters (0 when not in tag mode). */
+  /** Length of the base32 tag in characters. */
   tagLength: number;
-  /** Whether the template contains only printable ASCII. */
-  ascii: boolean;
 }
 
 export class TemplateError extends Error {
@@ -73,208 +62,105 @@ export class TemplateError extends Error {
   }
 }
 
-function occurrences(haystack: string, needle: string): number {
-  let count = 0;
-  let idx = haystack.indexOf(needle);
-  while (idx !== -1) {
-    count++;
-    idx = haystack.indexOf(needle, idx + needle.length);
-  }
-  return count;
+/**
+ * Normalize a placeholder prefix: strip surrounding angle brackets (they are
+ * added automatically) and trim trailing `-` / `_` so the tail is always joined
+ * with exactly one `-`.
+ */
+export function normalizePrefix(raw: string): string {
+  let value = raw.trim();
+  if (value.startsWith(OPEN)) value = value.slice(1);
+  if (value.endsWith(CLOSE)) value = value.slice(0, -1);
+  return value.replace(/[-_]+$/, "");
 }
 
 /**
- * Compile and validate a placeholder template. Throws `TemplateError` when the
- * template is ambiguous or malformed.
+ * Compile a placeholder prefix into the fixed shape `<prefix>-{type}-{tag}`.
+ * Throws `TemplateError` when the prefix is empty or contains characters that
+ * cannot appear in a placeholder (quotes, backslashes, control characters).
  */
 export function compileTemplate(
   raw: string,
-  options: { tagMode?: boolean; tagLength?: number } = {},
+  options: { tagLength?: number } = {},
 ): CompiledTemplate {
-  const tagMode = options.tagMode ?? true;
   const tagLength = options.tagLength ?? DEFAULT_TAG_LENGTH;
   if (typeof raw !== "string" || raw === "") {
-    throw new TemplateError("template_empty", "template must be a non-empty string");
+    throw new TemplateError("prefix_empty", "prefix must be a non-empty string");
   }
-  if (FORBIDDEN_LITERAL.test(raw)) {
+  if (FORBIDDEN_PREFIX.test(raw)) {
     throw new TemplateError(
-      "template_forbidden_char",
-      "template must not contain quotes, backslashes, control characters or newlines",
+      "prefix_forbidden_char",
+      "prefix must not contain quotes, backslashes, control characters or newlines",
     );
   }
-  if (
-    tagMode &&
-    (!Number.isInteger(tagLength) || tagLength < MIN_TAG_LENGTH || tagLength > MAX_TAG_LENGTH)
-  ) {
+  if (!Number.isInteger(tagLength) || tagLength < MIN_TAG_LENGTH || tagLength > MAX_TAG_LENGTH) {
     throw new TemplateError(
       "template_tag_length",
       `tagLength must be an integer in [${MIN_TAG_LENGTH}, ${MAX_TAG_LENGTH}]`,
     );
   }
-
-  const typeCount = occurrences(raw, "{type}");
-  const nCount = occurrences(raw, "{N}");
-  const tagCount = occurrences(raw, "{tag}");
-  if (typeCount !== 1) {
-    throw new TemplateError("template_type_count", "{type} must occur exactly once");
+  const normalized = normalizePrefix(raw);
+  if (normalized === "") {
+    throw new TemplateError("prefix_empty", "prefix must not consist only of separators");
   }
-  if (nCount > 1) {
-    throw new TemplateError("template_n_count", "{N} must occur at most once");
-  }
-  if (tagMode && tagCount !== 1) {
-    throw new TemplateError("template_tag_count", "tagMode requires {tag} exactly once");
-  }
-  if (!tagMode) {
-    if (tagCount !== 0) {
-      throw new TemplateError("template_unexpected_tag", "{tag} requires tagMode");
-    }
-    if (nCount !== 1) {
-      throw new TemplateError("template_n_count", "numbered mode requires {N} exactly once");
-    }
-  }
-
-  const idxType = raw.indexOf("{type}");
-  const idxN = raw.indexOf("{N}");
-  const idxTag = raw.indexOf("{tag}");
-  const hasN = nCount === 1;
-  if (hasN && idxType > idxN) {
-    throw new TemplateError("template_token_order", "{type} must precede {N}");
-  }
-  if (tagMode && hasN && idxN > idxTag) {
-    throw new TemplateError("template_token_order", "{N} must precede {tag}");
-  }
-
-  const prefix = raw.slice(0, idxType);
-  const afterType = idxType + "{type}".length;
-  const mid1 = hasN
-    ? raw.slice(afterType, idxN)
-    : tagMode
-      ? raw.slice(afterType, idxTag)
-      : raw.slice(afterType);
-  const mid2 = hasN && tagMode ? raw.slice(idxN + "{N}".length, idxTag) : "";
-  const suffix = tagMode
-    ? raw.slice(idxTag + "{tag}".length)
-    : hasN
-      ? raw.slice(idxN + "{N}".length)
-      : raw.slice(afterType + mid1.length);
-
-  const stripped = raw
-    .replace("{type}", "")
-    .replace("{N}", "")
-    .replace("{tag}", "");
-  if (stripped.includes("{") || stripped.includes("}")) {
-    throw new TemplateError("template_token_unknown", "template contains an unknown token");
-  }
-  if (prefix === "") {
-    throw new TemplateError("template_no_prefix", "template must start with a literal prefix");
-  }
-  if (mid1 === "") {
+  if (normalized.includes(OPEN) || normalized.includes(CLOSE)) {
     throw new TemplateError(
-      "template_ambiguous",
-      "a literal separator is required between {type} and the next token",
+      "prefix_brackets",
+      "angle brackets are added automatically and cannot appear inside the prefix",
     );
   }
-  if (hasN && DIGIT_CHARS.test(mid1[mid1.length - 1])) {
-    throw new TemplateError(
-      "template_ambiguous",
-      "a literal separator not ending in a digit is required between {type} and {N}",
-    );
-  }
-  if (hasN && tagMode && mid2 === "") {
-    throw new TemplateError(
-      "template_ambiguous",
-      "a literal separator is required between {N} and the tag",
-    );
-  }
-
-  return {
-    raw,
-    prefix,
-    mid1,
-    mid2,
-    suffix,
-    tagMode,
-    hasN,
-    tagLength: tagMode ? tagLength : 0,
-    ascii: /^[\x20-\x7e]*$/.test(raw),
-  };
+  const prefix = normalized;
+  return { prefix, raw, mid1: TYPE_TAG_SEPARATOR, tagLength };
 }
 
 export function renderPlaceholder(
   compiled: CompiledTemplate,
   type: string,
-  n?: number,
-  tag?: string,
+  tag: string,
 ): string {
-  if (!compiled.hasN) {
-    return compiled.prefix + type + compiled.mid1 + (tag ?? "") + compiled.suffix;
-  }
-  const core = type + compiled.mid1 + (n === undefined ? "" : String(n));
-  if (!compiled.tagMode) return compiled.prefix + core + compiled.suffix;
-  return compiled.prefix + core + compiled.mid2 + (tag ?? "") + compiled.suffix;
+  return `${OPEN}${compiled.prefix}-${type}${compiled.mid1}${tag}${CLOSE}`;
+}
+
+/** Literal head shared by every token of `type`. */
+export function tokenHead(compiled: CompiledTemplate, type: string): string {
+  return `${OPEN}${compiled.prefix}-${type}${compiled.mid1}`;
+}
+
+/** Literal head shared by every token of this shape. */
+export function shapeHead(compiled: CompiledTemplate): string {
+  return `${OPEN}${compiled.prefix}-`;
+}
+
+/** First character of every token (the opening bracket). */
+export function shapeStart(): string {
+  return OPEN;
 }
 
 export interface ParsedPlaceholder {
   type: string;
-  n?: number;
-  tag?: string;
+  tag: string;
 }
 
 /**
- * Deterministically parse `text` against the compiled template. Returns
- * `undefined` when `text` is not a well-formed placeholder of this template.
+ * Deterministically parse `text` against the compiled shape. Returns
+ * `undefined` when `text` is not a well-formed token of this shape.
  */
 export function parsePlaceholder(
   compiled: CompiledTemplate,
   text: string,
 ): ParsedPlaceholder | undefined {
-  if (!text.startsWith(compiled.prefix)) return undefined;
-  let coreEnd = text.length;
-  if (compiled.suffix !== "") {
-    if (!text.endsWith(compiled.suffix)) return undefined;
-    coreEnd -= compiled.suffix.length;
-  }
-  if (coreEnd < compiled.prefix.length) return undefined;
-  return parseCore(compiled, text.slice(compiled.prefix.length, coreEnd));
-}
-
-/** Parse `type + mid1 + N + mid2 + tag` after prefix/suffix stripping. */
-function parseCore(
-  compiled: CompiledTemplate,
-  core: string,
-): ParsedPlaceholder | undefined {
-  let rest = core;
-  let tag: string | undefined;
-  if (compiled.tagMode) {
-    const tagLength = compiled.tagLength;
-    if (rest.length < tagLength) return undefined;
-    tag = rest.slice(rest.length - tagLength);
-    if (![...tag].every((c) => TAG_CHARS.test(c))) return undefined;
-    rest = rest.slice(0, rest.length - tagLength);
-    if (compiled.hasN) {
-      if (rest.length < compiled.mid2.length) return undefined;
-      if (!rest.endsWith(compiled.mid2)) return undefined;
-      rest = rest.slice(0, rest.length - compiled.mid2.length);
-    }
-  }
-  if (!compiled.hasN) {
-    if (!rest.endsWith(compiled.mid1)) return undefined;
-    const type = rest.slice(0, rest.length - compiled.mid1.length);
-    if (!TYPE_RE.test(type)) return undefined;
-    return { type, tag };
-  }
-  let digitStart = rest.length;
-  while (digitStart > 0 && DIGIT_CHARS.test(rest[digitStart - 1])) digitStart--;
-  if (digitStart === rest.length) return undefined;
-  const digits = rest.slice(digitStart);
-  if (digits.length > 1 && digits[0] === "0") return undefined;
-  const n = Number(digits);
-  if (!Number.isSafeInteger(n) || n < 1) return undefined;
-  const beforeN = rest.slice(0, digitStart);
-  if (!beforeN.endsWith(compiled.mid1)) return undefined;
-  const type = beforeN.slice(0, beforeN.length - compiled.mid1.length);
+  const { mid1, tagLength } = compiled;
+  const head = shapeHead(compiled);
+  if (!text.startsWith(head) || !text.endsWith(CLOSE)) return undefined;
+  if (text.length < head.length + mid1.length + tagLength + CLOSE.length + 1) return undefined;
+  const body = text.slice(0, -CLOSE.length);
+  const tag = body.slice(body.length - tagLength);
+  if (![...tag].every((c) => TAG_CHARS.test(c))) return undefined;
+  const core = body.slice(head.length, body.length - tagLength);
+  if (!core.endsWith(mid1)) return undefined;
+  const type = core.slice(0, core.length - mid1.length);
   if (!TYPE_RE.test(type)) return undefined;
-  return tag === undefined ? { type, n } : { type, n, tag };
+  return { type, tag };
 }
 
 /**
@@ -331,7 +217,7 @@ function base32(digest: Uint8Array, length: number): string {
   return out;
 }
 
-/** Reject type strings that cannot round-trip through the template grammar. */
+/** Reject type strings that cannot round-trip through the shape. */
 export function isValidType(type: string, maxTypeLength: number): boolean {
   return TYPE_RE.test(type) && type.length <= maxTypeLength;
 }
@@ -348,7 +234,7 @@ export function partialPlaceholderStart(
   from: number,
   maxPlaceholderLength: number,
 ): number {
-  const pre = compiled.prefix;
+  const pre = shapeHead(compiled);
   let best = text.length;
   const max = Math.min(pre.length - 1, text.length - from);
   for (let len = max; len >= 1; len--) {
@@ -359,8 +245,8 @@ export function partialPlaceholderStart(
   }
   // A placeholder start can never lie further than `maxPlaceholderLength` from
   // the end, so scan only that tail window. Forward `indexOf` keeps this
-  // O(window); the previous `lastIndexOf` walk rescaned the whole buffer on
-  // every call, which made a per-character caller quadratic.
+  // O(window); a backward walk rescaned the whole buffer on every call, which
+  // made a per-character caller quadratic.
   const windowStart = Math.max(from, text.length - maxPlaceholderLength);
   let idx = text.indexOf(pre, windowStart);
   while (idx !== -1) {
@@ -380,85 +266,48 @@ function isPartialCore(compiled: CompiledTemplate, rest: string): boolean {
   const afterType = rest.slice(i);
   if (compiled.mid1.startsWith(afterType)) return true;
   if (!afterType.startsWith(compiled.mid1)) return false;
-  const afterMid1 = afterType.slice(compiled.mid1.length);
-  if (afterMid1 === "") return true;
-  if (!compiled.hasN) {
-    return (
-      afterMid1.length <= compiled.tagLength &&
-      [...afterMid1].every((c) => TAG_CHARS.test(c))
-    );
-  }
-  let j = 0;
-  while (j < afterMid1.length && DIGIT_CHARS.test(afterMid1[j])) j++;
-  if (j === afterMid1.length) return true;
-  if (!compiled.tagMode) return false;
-  const afterN = afterMid1.slice(j);
-  if (compiled.mid2.startsWith(afterN)) return true;
-  if (!afterN.startsWith(compiled.mid2)) return false;
-  const tag = afterN.slice(compiled.mid2.length);
-  return tag.length <= compiled.tagLength && [...tag].every((c) => TAG_CHARS.test(c));
+  // A tag shorter than the configured length still grows; a full-length tag may
+  // still be followed by the closing bracket, so it stays open too.
+  const tag = afterType.slice(compiled.mid1.length);
+  return (
+    tag.length <= compiled.tagLength &&
+    [...tag].every((c) => TAG_CHARS.test(c))
+  );
 }
 
 /**
- * Scan a template-shaped placeholder (registered or not) starting at `pos`.
- * Returns the end index (exclusive) of the core (including tag when tag mode),
- * or `undefined`. Used by the unknown syntax scanner sharing the registered
- * matcher's safety boundary (PR-022).
+ * Scan a token-shaped text (registered or not) starting at `pos`. Returns the
+ * end index (exclusive), or `undefined`. Used by the unknown syntax scanner
+ * sharing the registered matcher's safety boundary (PR-022).
  */
 export function scanTemplateShape(
   compiled: CompiledTemplate,
   text: string,
   pos: number,
 ): number | undefined {
-  if (!text.startsWith(compiled.prefix, pos)) return undefined;
-  const bodyStart = pos + compiled.prefix.length;
-  let best: number | undefined;
-  // A valid `type` is a non-empty run of TYPE_CHARS, so no `mid1` beyond the
-  // first non-type character can yield a match. Bounding the run keeps the
-  // scan linear instead of quadratic (the `type` substring is therefore always
-  // a valid, non-empty TYPE_CHARS run and needs no re-validation).
+  const pre = shapeHead(compiled);
+  if (!text.startsWith(pre, pos)) return undefined;
+  const bodyStart = pos + pre.length;
+  // A valid `type` is a non-empty run of TYPE_CHARS, so no separator beyond the
+  // first non-type character can yield a match. Bounding the run keeps the scan
+  // linear instead of quadratic.
   const limit = Math.min(text.length, bodyStart + MAX_TYPE_SCAN);
   let typeEnd = bodyStart;
   while (typeEnd < limit && TYPE_CHARS.test(text[typeEnd])) typeEnd++;
+  let best: number | undefined;
   let from = bodyStart + 1;
   while (from <= typeEnd) {
     const m = text.indexOf(compiled.mid1, from);
     if (m === -1 || m > typeEnd) break;
-    const cursor = m + compiled.mid1.length;
-    let coreEnd: number | undefined;
-    if (!compiled.hasN) {
-      const tag = text.slice(cursor, cursor + compiled.tagLength);
-      if (tag.length === compiled.tagLength && [...tag].every((c) => TAG_CHARS.test(c))) {
-        coreEnd = cursor + compiled.tagLength;
-      }
-    } else {
-      let nEnd = cursor;
-      while (nEnd < text.length && DIGIT_CHARS.test(text[nEnd])) nEnd++;
-      if (nEnd > cursor) {
-        if (compiled.tagMode) {
-          if (text.startsWith(compiled.mid2, nEnd)) {
-            const tagStart = nEnd + compiled.mid2.length;
-            const tag = text.slice(tagStart, tagStart + compiled.tagLength);
-            if (
-              tag.length === compiled.tagLength &&
-              [...tag].every((c) => TAG_CHARS.test(c))
-            ) {
-              coreEnd = tagStart + compiled.tagLength;
-            }
-          }
-        } else {
-          coreEnd = nEnd;
-        }
-      }
-    }
-    if (coreEnd !== undefined && (best === undefined || coreEnd > best)) {
-      best = coreEnd;
+    const tagStart = m + compiled.mid1.length;
+    const tag = text.slice(tagStart, tagStart + compiled.tagLength);
+    if (tag.length === compiled.tagLength && [...tag].every((c) => TAG_CHARS.test(c))) {
+      let end = tagStart + compiled.tagLength;
+      // The closing bracket is part of the shape when present.
+      if (text.startsWith(CLOSE, end)) end += CLOSE.length;
+      if (best === undefined || end > best) best = end;
     }
     from = m + 1;
-  }
-  if (best === undefined) return undefined;
-  if (compiled.suffix && text.startsWith(compiled.suffix, best)) {
-    return best + compiled.suffix.length;
   }
   return best;
 }

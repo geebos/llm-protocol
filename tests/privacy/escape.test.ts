@@ -9,14 +9,15 @@
 import { describe, expect, it } from "vitest";
 import { translate } from "../../src/index.js";
 import type { PrivacyCompletionReport, PrivacyRecognizer } from "../../src/index.js";
-import { compileTemplate, LEGACY_TEMPLATE } from "../../src/privacy/template.js";
+import { compileTemplate, tokenTag } from "../../src/privacy/template.js";
 import { escapeLiteral, escapeStep } from "../../src/privacy/escape.js";
 import { restoreJsonText, restoreText } from "../../src/privacy/restore.js";
 import { createPlaceholderMatcher } from "../../src/privacy/trie.js";
 
 const BS = String.fromCharCode(92);
-const compiled = compileTemplate(LEGACY_TEMPLATE, { tagMode: false });
-const SHAPE = "<private_placeholder_phone_1>";
+const compiled = compileTemplate("private_placeholder_");
+const KEY = new Uint8Array(32).fill(3);
+const SHAPE = `<private_placeholder-phone-${tokenTag(KEY, "", "phone", "13800138000", 5)}>`;
 
 function phoneRecognizer(): PrivacyRecognizer {
   return {
@@ -97,9 +98,8 @@ describe("escape-aware restore", () => {
     const text = `A ${BS}${SHAPE} B`;
     expect(restoreChunked([text])).toBe(`A ${SHAPE} B`);
     expect(restoreChunked([`A ${BS}`, `${SHAPE} B`])).toBe(`A ${SHAPE} B`);
-    expect(restoreChunked(["A ", BS, "<private_", "placeholder_phone_1>", " B"])).toBe(
-      `A ${SHAPE} B`,
-    );
+    const parts = [SHAPE.slice(0, 5), SHAPE.slice(5, 12), SHAPE.slice(12)];
+    expect(restoreChunked(["A ", BS, ...parts, " B"])).toBe(`A ${SHAPE} B`);
   });
 
   it("decodes escaped values inside JSON tool arguments (PE-01)", () => {
@@ -161,7 +161,7 @@ describe("literal text through translate", () => {
     expect(outbound).not.toContain("13800138000");
     const sent = cap.lastBody() as { messages: { content: string }[] };
     const content = sent.messages[0].content;
-    const token = /<private_placeholder_phone-[a-z2-7]{5}>/.exec(content);
+    const token = /<PP-phone-[a-z2-7]{5}>/.exec(content);
     expect(token).not.toBeNull();
     // Replacing the token with a marker reproduces the input verbatim: no
     // escape character was inserted and no backslash was doubled.
@@ -177,22 +177,26 @@ describe("literal text through translate", () => {
   it("still escapes when legacy escaping is enabled (PE-02)", async () => {
     let report: PrivacyCompletionReport | undefined;
     const cap = capturingFetch();
+    // Shape-identical to the *default* token shape, but not a registered token.
+    const literal = "<PP-phone-zzzzz>";
     const response = await translate.chat.messages({
-      ...options(`call 13800138000 and note ${SHAPE}`),
+      ...options(`call 13800138000 and note ${literal}`),
       fetch: cap.fetch,
       privacy: {
         recognizers: [phoneRecognizer()],
-        mapping: { escape: true, tagMode: false, template: LEGACY_TEMPLATE },
+        mapping: { escape: true },
       },
       onPrivacyComplete: (r) => {
         report = r;
       },
     });
     const sent = cap.lastBody() as { messages: { content: string }[] };
-    // The external literal is prefix-escaped in the model-visible text.
-    expect(sent.messages[0].content).toBe(
-      `call ${SHAPE} and note ${BS}${SHAPE}`,
-    );
+    const content = sent.messages[0].content;
+    // Only the caller-supplied literal is escaped; the fresh token replaces the
+    // detected value and stays unescaped.
+    const token = /<PP-phone-[a-z2-7]{5}>/.exec(content)?.[0];
+    expect(token).toBeDefined();
+    expect(content).toBe(`call ${token} and note ${BS}${literal}`);
     const body = (await response.json()) as {
       choices: { message: { content: string } }[];
     };

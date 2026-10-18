@@ -35,10 +35,8 @@ function makeSession(id: string, mappings: number): {
   config: ReturnType<typeof resolvePrivacyConfig>;
   entries: { placeholder: string; original: string }[];
 } {
-  // Mechanics are template-agnostic; numbered tokens keep the fixtures legible.
   const config = resolvePrivacyConfig({
     recognizers: [{ priority: 1, recognize: () => [] }],
-    mapping: { tagMode: false },
   });
   const session = new PrivacySession(id, {
     compiled: config.template,
@@ -92,13 +90,15 @@ describe("privacy property-based tests", () => {
     for (let seed = 1; seed <= 30; seed++) {
       const random = rng(seed);
       const { session, config, entries } = makeSession(`s${seed}`, 10);
+      const tokens = entries.map((e) => e.placeholder);
       const pool = [
         "hello ",
         "x",
-        "<private_placeholder_a_1>",
-        "<private_placeholder_a_2>",
-        "<private_placeholder_a_10>",
-        "<private_placeholder_a_99>",
+        tokens[0],
+        tokens[1],
+        tokens[9],
+        // Unregistered token of a known type: plain text, never restored.
+        `${tokens[0].slice(0, -1)}a`,
         "<private_pl",
         "🙂",
         " ",
@@ -116,7 +116,7 @@ describe("privacy property-based tests", () => {
     for (let seed = 100; seed <= 130; seed++) {
       const random = rng(seed);
       const { session, config, entries } = makeSession(`p${seed}`, 12);
-      const pool = Array.from({ length: 12 }, (_, i) => `<private_placeholder_a_${i + 1}>`);
+      const pool = entries.map((e) => e.placeholder);
       let text = "";
       for (let i = 0; i < 8; i++) text += pick(random, pool) + pick(random, ["", " ", "|"]);
       const serial = restoreString(text, config.template, entries, 128).text;
@@ -190,14 +190,14 @@ describe("privacy property-based tests", () => {
     }
   });
 
-  it("keeps numbering stable as history grows (PT-26 generalized)", () => {
+  it("keeps a token stable as history grows (PT-26 generalized)", () => {
     const { session } = makeSession("grow", 0);
     const first = session.getOrCreate("a", "alpha");
     for (let i = 0; i < 20; i++) session.getOrCreate("b", `beta-${i}`);
     const again = session.getOrCreate("a", "alpha");
+    // Identity is the value's tag, so later allocations cannot move it.
+    expect(first.placeholder).toMatch(/^<PP-a-[a-z2-7]{5}>$/);
     expect(again.placeholder).toBe(first.placeholder);
-    expect(first.placeholder).toBe("<private_placeholder_a_1>");
-    const newA = session.getOrCreate("a", "gamma");
-    expect(newA.placeholder).toBe("<private_placeholder_a_2>");
+    expect(session.getOrCreate("a", "gamma").placeholder).not.toBe(first.placeholder);
   });
 });

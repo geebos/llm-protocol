@@ -79,7 +79,9 @@ export function injectSystemNotice(
     .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
     .map((p) => p.text)
     .join("\n");
-  const notice = buildSystemNotice(config.system, config.template.raw, existing);
+  // The notice must advertise the token shape, not the bare prefix.
+  const shape = `<${config.template.prefix}-{type}-{tag}>`;
+  const notice = buildSystemNotice(config.system, shape, existing);
   if (!notice) return undefined;
   const injected = leadingCount > 0 ? `\n\n${notice}` : notice;
   canonical.messages.splice(leadingCount, 0, {

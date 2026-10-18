@@ -73,7 +73,7 @@ describe("coverage policy", () => {
     await expect(
       translate.chat.messages({
         ...openaiOptions({
-          metadata: { note: `<private_placeholder_phone-${tag}>` },
+          metadata: { note: `<PP-phone-${tag}>` },
           messages: [{ role: "user", content: "call 13800138000" }],
         }),
         fetch: fetchOk(),
@@ -125,7 +125,7 @@ describe("coverage policy", () => {
               content: [
                 {
                   type: "thinking",
-                  thinking: "I referenced <private_placeholder_phone_1>",
+                  thinking: "I referenced <PP_phone_1>",
                   signature: "sig",
                 },
               ],
@@ -153,7 +153,7 @@ describe("coverage policy", () => {
               content: [
                 {
                   type: "thinking",
-                  thinking: "ref <private_placeholder_foo_9>",
+                  thinking: "ref <PP_foo_9>",
                   signature: "sig",
                 },
               ],
@@ -179,7 +179,7 @@ describe("coverage policy", () => {
         fetch: fetchAnthropicOk(),
         privacy: {
           recognizers: [phoneRecognizer()],
-          system: "Placeholders look like <private_placeholder_example_1>.",
+          system: "Placeholders look like <PP_example_1>.",
         },
       }),
     ).resolves.toBeDefined();

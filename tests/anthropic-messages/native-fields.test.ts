@@ -114,7 +114,7 @@ describe("Anthropic native request fields (L-8)", () => {
     });
     const metadata = JSON.stringify(lastRequest().body.metadata);
     expect(metadata).not.toContain(PHONE);
-    expect(metadata).toContain("<private_placeholder_");
+    expect(metadata).toMatch(/<PP-phone-[a-z2-7]{5}>/);
   });
 
   it("preserves output_config keys other than effort and merges effort", async () => {

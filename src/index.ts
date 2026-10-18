@@ -196,9 +196,9 @@ export {
   tokenTag,
   isValidType,
   scanTemplateShape,
-  DEFAULT_TEMPLATE,
-  LEGACY_TEMPLATE,
+  DEFAULT_PREFIX,
   DEFAULT_TAG_LENGTH,
+  normalizePrefix,
   TemplateError,
 } from "./privacy/template.js";
 export type { CompiledTemplate, ParsedPlaceholder } from "./privacy/template.js";

@@ -10,9 +10,8 @@ import { validationError } from "../errors.js";
 import type { TranslationWarning } from "../ir/fidelity.js";
 import {
   compileTemplate,
+  DEFAULT_PREFIX,
   DEFAULT_TAG_LENGTH,
-  DEFAULT_TEMPLATE,
-  LEGACY_TEMPLATE,
   TemplateError,
   type CompiledTemplate,
 } from "./template.js";
@@ -44,8 +43,9 @@ export interface ResolvedPrivacyConfig {
   recognizers: PrivacyRecognizer[];
   coverage: NormalizedCoverage;
   template: CompiledTemplate;
-  tagMode: boolean;
-  /** Tag length in characters (0 in legacy numbered mode). */
+  /** Normalized placeholder prefix (trailing `-`/`_` trimmed). */
+  prefix: string;
+  /** Tag length in characters. */
   tagLength: number;
   /** Reversible literal escaping (docs/06 §7); opt-in, default false. */
   escape: boolean;
@@ -104,18 +104,13 @@ export function resolvePrivacyConfig(options: PrivacyOptions): ResolvedPrivacyCo
   const warnings: PrivacyWarning[] = [];
 
   let template: CompiledTemplate;
-  const tagMode = options.mapping?.tagMode ?? true;
   try {
-    template = compileTemplate(
-      options.mapping?.template ?? (tagMode ? DEFAULT_TEMPLATE : LEGACY_TEMPLATE),
-      {
-        tagMode,
-        tagLength: options.mapping?.tagLength ?? DEFAULT_TAG_LENGTH,
-      },
-    );
+    template = compileTemplate(options.mapping?.prefix ?? DEFAULT_PREFIX, {
+      tagLength: options.mapping?.tagLength ?? DEFAULT_TAG_LENGTH,
+    });
   } catch (err) {
     if (err instanceof TemplateError) {
-      throw validationError(`Invalid privacy placeholder template: ${err.code}`);
+      throw validationError(`Invalid privacy placeholder prefix: ${err.code}`);
     }
     throw err;
   }
@@ -153,7 +148,7 @@ export function resolvePrivacyConfig(options: PrivacyOptions): ResolvedPrivacyCo
     recognizers: options.recognizers,
     coverage: normalizeCoverage(coverageInput),
     template,
-    tagMode: template.tagMode,
+    prefix: template.prefix,
     tagLength: template.tagLength,
     escape: options.mapping?.escape ?? false,
     namespace: options.tagNamespace ?? "",

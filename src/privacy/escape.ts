@@ -13,7 +13,7 @@
  * the escape character (INV-E2). Decoding is non-recursive and never feeds its
  * output back into matching (INV-E3).
  */
-import { scanTemplateShape, type CompiledTemplate } from "./template.js";
+import { scanTemplateShape, shapeStart, type CompiledTemplate } from "./template.js";
 
 export const ESCAPE_CHAR = "\\";
 
@@ -41,7 +41,7 @@ export function escapeLiteralWithCount(
       i++;
       continue;
     }
-    if (ch === compiled.prefix[0]) {
+    if (ch === shapeStart()) {
       const end = scanTemplateShape(compiled, text, i);
       if (end !== undefined) {
         out += ESCAPE_CHAR + text.slice(i, end);
@@ -62,10 +62,11 @@ export type EscapeStep =
 
 /** Whether `text` contains at least one template-shaped literal. */
 export function containsShape(compiled: CompiledTemplate, text: string): boolean {
-  let i = text.indexOf(compiled.prefix[0]);
+  const start = shapeStart();
+  let i = text.indexOf(start);
   while (i !== -1) {
     if (scanTemplateShape(compiled, text, i) !== undefined) return true;
-    i = text.indexOf(compiled.prefix[0], i + 1);
+    i = text.indexOf(start, i + 1);
   }
   return false;
 }
@@ -84,8 +85,8 @@ export function escapeStep(
   const next = buffer[pos + 1];
   if (next === undefined) return { kind: "need_more" };
   if (next === ESCAPE_CHAR) return { kind: "emit", text: ESCAPE_CHAR, end: pos + 2 };
-  if (next === compiled.prefix[0]) {
-    return { kind: "emit", text: compiled.prefix[0], end: pos + 2 };
+  if (next === shapeStart()) {
+    return { kind: "emit", text: shapeStart(), end: pos + 2 };
   }
   return { kind: "emit", text: ESCAPE_CHAR, end: pos + 1 };
 }

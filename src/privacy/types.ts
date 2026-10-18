@@ -71,16 +71,12 @@ export interface PrivacyCoveragePolicy {
 
 export interface PrivacyMappingOptions {
   /**
-   * Placeholder template. Default `<private_placeholder_{type}-{tag}>` in tag
-   * mode, or `<private_placeholder_{type}_{N}>` in legacy numbered mode.
+   * Placeholder label. Tokens render as `<prefix-{type}-{tag}>`: the angle
+   * brackets are added automatically, and surrounding brackets plus trailing
+   * `-` / `_` on the caller value are trimmed, so `PP_`, `<PP_` and
+   * `PP-` are equivalent. Default `PP`.
    */
-  template?: string;
-  /**
-   * Tag mode (default `true`): the token carries an HMAC tag derived from
-   * `(type, value)`, so a token is self-identifying and needs no counter.
-   * Disabling it falls back to legacy numbered tokens (docs/06 §10.2).
-   */
-  tagMode?: boolean;
+  prefix?: string;
   /** Tag length in base32 characters. Default 5. */
   tagLength?: number;
   /**
@@ -148,8 +144,7 @@ export interface PrivacySessionView {
 }
 
 export interface PrivacySessionOptions {
-  template?: string;
-  tagMode?: boolean;
+  prefix?: string;
   tagLength?: number;
 }
 

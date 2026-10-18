@@ -130,7 +130,7 @@ describe("request region coverage", () => {
 
     const serialized = JSON.stringify(canonical);
     expect(serialized).not.toContain(PHONE);
-    expect(serialized).toContain("<private_placeholder_");
+    expect(serialized).toContain("<PP-");
   });
 
   it("rejects sensitive content in a native field configured as reject", async () => {
