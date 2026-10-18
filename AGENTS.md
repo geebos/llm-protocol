@@ -1,6 +1,6 @@
 # AGENTS.md — llm-protocol
 
-Clean-room LLM 协议转换内核（Anthropic Messages ↔ OpenAI Chat）。规格见 [`docs/01.tech.md`](docs/01.tech.md)（v0.5）。本文件补充项目级约定；全局规则（安全边界、开发分支、提交规范）遵循 `/Users/tongyulong/.pi/agent/AGENTS.md`，两者冲突时以更严格者为准。
+Clean-room LLM 协议转换内核（Anthropic Messages ↔ OpenAI Chat）。历史设计文档已归档至 [`docs/archive/`](docs/archive/)，**不再更新、仅供参考，具体实现以代码为准**。本文件补充项目级约定；全局规则（安全边界、开发分支、提交规范）遵循 `/Users/tongyulong/.pi/agent/AGENTS.md`，两者冲突时以更严格者为准。
 
 ## 项目结构
 
@@ -35,7 +35,7 @@ llm-protocol/
 │   │   ├── translate.ts        #   translateCall(from, to, options) 透明转换
 │   │   ├── completion.ts       #   onComplete 完成态聚合（恰好一次）
 │   │   └── usage.ts            #   CanonicalUsage -> UnifiedUsage
-│   ├── privacy/                # 隐私识别-替换（P1-P6，docs/04.privacy-transform.md）
+│   ├── privacy/                # 隐私识别-替换（P1-P6，见 docs/archive/04.privacy-transform.md）
 │   │   ├── types.ts            #   Detection / Recognizer / Session / PrivacyOptions
 │   │   ├── template.ts         #   占位符模板编译 / HMAC tag
 │   │   ├── detection.ts        #   Span 校验与裁决
@@ -64,10 +64,17 @@ llm-protocol/
 │   │   └── reporters/          #     JSON / JUnit / Markdown 报告
 │   ├── fixtures/               #   离线 fixture 资产（requests/responses/streams）
 │   └── *.test.ts               #   vitest 测试（端到端直用 translate.<source>.<target>）
-├── docs/                        # 设计文档（按创建时间编号 NN.title.md）
+├── docs/                        # 文档目录
+│   └── archive/                #   归档设计文档（按创建时间编号 NN.title.md）
 ├── .github/workflows/          # publish-npm.yml（Trusted Publishing）
 └── package.json                # private 已移除；publishConfig 固定 npmjs 公共源
 ```
+
+**文档约定**：
+
+- `docs/archive/` 下的文档是历史设计记录，**不再维护、不再更新**，仅供追溯设计决策与需求来源参考。
+- 归档文档中的路径、API、行为描述可能已与当前实现不一致，**具体实现以代码（`src/` 与 `tests/`）为准**。
+- 新增或变更行为时，不要求同步更新归档文档；需要长期维护的文档应放在 `docs/` 根目录（非 `archive/`）。
 
 **架构边界（必须遵守）**：
 - 一切转换经 **Canonical IR**，禁止编写大量 A→B 直接映射。
