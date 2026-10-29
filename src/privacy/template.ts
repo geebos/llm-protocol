@@ -1,23 +1,23 @@
 /**
- * Placeholder shape: `<` + prefix + `-{type}-{tag}` + `>`.
+ * Placeholder shape: `{` + prefix + `-{type}-{tag}` + `}`.
  *
- * The brackets are added automatically, so the caller supplies only the label
+ * The braces are added automatically, so the caller supplies only the label
  * inside them. A token's identity is its `{tag}`: a short base32 digest of
  * `HMAC-SHA256(key, namespace, type, value)`. The same `(type, value)` yields
  * the same token inside one process, and a caller-supplied stable key makes it
  * stable across processes — so no counter is needed.
  *
- * The prefix is normalized: surrounding angle brackets and trailing `-` / `_`
- * are trimmed, so `<private_placeholder_`, `private_placeholder-` and
- * `private_placeholder` all produce `<private_placeholder-{type}-{tag}>`.
+ * The prefix is normalized: surrounding braces and trailing `-` / `_`
+ * are trimmed, so `{private_placeholder_`, `private_placeholder-` and
+ * `private_placeholder` all produce `{private_placeholder-{type}-{tag}}`.
  */
 import { createHmac } from "node:crypto";
 
-/** Default prefix content; tokens render as `<PP-{type}-{tag}>`. */
+/** Default prefix content; tokens render as `{PP-{type}-{tag}}`. */
 export const DEFAULT_PREFIX = "PP";
-/** Fixed token brackets (added automatically). */
-const OPEN = "<";
-const CLOSE = ">";
+/** Fixed token braces (added automatically). */
+const OPEN = "{";
+const CLOSE = "}";
 /** Default tag length in characters (base32, 5 chars = 25 bits). */
 export const DEFAULT_TAG_LENGTH = 5;
 /** Frozen HMAC domain separation string. */
@@ -43,7 +43,7 @@ const MAX_TAG_LENGTH = 64;
 const FORBIDDEN_PREFIX = /["\\\u0000-\u001f\u007f]/;
 
 export interface CompiledTemplate {
-  /** Normalized label inside the brackets (no `<`/`>`, no trailing `-`/`_`). */
+  /** Normalized label inside the braces (no `{`/`}`, no trailing `-`/`_`). */
   prefix: string;
   /** Raw caller-supplied prefix, kept for round-tripping the config. */
   raw: string;
@@ -63,9 +63,9 @@ export class TemplateError extends Error {
 }
 
 /**
- * Normalize a placeholder prefix: strip surrounding angle brackets (they are
- * added automatically) and trim trailing `-` / `_` so the tail is always joined
- * with exactly one `-`.
+ * Normalize a placeholder prefix: strip surrounding braces (they are added
+ * automatically) and trim trailing `-` / `_` so the tail is always joined with
+ * exactly one `-`.
  */
 export function normalizePrefix(raw: string): string {
   let value = raw.trim();
@@ -75,7 +75,7 @@ export function normalizePrefix(raw: string): string {
 }
 
 /**
- * Compile a placeholder prefix into the fixed shape `<prefix>-{type}-{tag}`.
+ * Compile a placeholder prefix into the fixed shape `{prefix}-{type}-{tag}`.
  * Throws `TemplateError` when the prefix is empty or contains characters that
  * cannot appear in a placeholder (quotes, backslashes, control characters).
  */
@@ -105,8 +105,8 @@ export function compileTemplate(
   }
   if (normalized.includes(OPEN) || normalized.includes(CLOSE)) {
     throw new TemplateError(
-      "prefix_brackets",
-      "angle brackets are added automatically and cannot appear inside the prefix",
+      "prefix_braces",
+      "braces are added automatically and cannot appear inside the prefix",
     );
   }
   const prefix = normalized;
@@ -131,7 +131,7 @@ export function shapeHead(compiled: CompiledTemplate): string {
   return `${OPEN}${compiled.prefix}-`;
 }
 
-/** First character of every token (the opening bracket). */
+/** First character of every token (the opening brace). */
 export function shapeStart(): string {
   return OPEN;
 }
@@ -267,7 +267,7 @@ function isPartialCore(compiled: CompiledTemplate, rest: string): boolean {
   if (compiled.mid1.startsWith(afterType)) return true;
   if (!afterType.startsWith(compiled.mid1)) return false;
   // A tag shorter than the configured length still grows; a full-length tag may
-  // still be followed by the closing bracket, so it stays open too.
+  // still be followed by the closing brace, so it stays open too.
   const tag = afterType.slice(compiled.mid1.length);
   return (
     tag.length <= compiled.tagLength &&
@@ -303,7 +303,7 @@ export function scanTemplateShape(
     const tag = text.slice(tagStart, tagStart + compiled.tagLength);
     if (tag.length === compiled.tagLength && [...tag].every((c) => TAG_CHARS.test(c))) {
       let end = tagStart + compiled.tagLength;
-      // The closing bracket is part of the shape when present.
+      // The closing brace is part of the shape when present.
       if (text.startsWith(CLOSE, end)) end += CLOSE.length;
       if (best === undefined || end > best) best = end;
     }

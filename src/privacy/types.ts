@@ -71,10 +71,10 @@ export interface PrivacyCoveragePolicy {
 
 export interface PrivacyMappingOptions {
   /**
-   * Placeholder label. Tokens render as `<prefix-{type}-{tag}>`: the angle
-   * brackets are added automatically, and surrounding brackets plus trailing
-   * `-` / `_` on the caller value are trimmed, so `PP_`, `<PP_` and
-   * `PP-` are equivalent. Default `PP`.
+   * Placeholder label. Tokens render as `{prefix-{type}-{tag}}`: the braces
+   * are added automatically, and surrounding braces plus trailing `-` / `_` on
+   * the caller value are trimmed, so `PP_`, `{PP_` and `PP-` are equivalent.
+   * Default `PP`.
    */
   prefix?: string;
   /** Tag length in base32 characters. Default 5. */

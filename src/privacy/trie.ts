@@ -20,7 +20,7 @@ export interface PlaceholderMatcher {
   root: TrieNode;
   /**
    * Entity types this matcher holds registered tokens for. Used to tell a
-   * mangled token of ours (`<..._phone-ab3kf>` typo'd by the model) from
+   * mangled token of ours (`{..._phone-ab3kf}` typo'd by the model) from
    * unrelated external literal text: only the former is worth a warning.
    */
   knownTypes: Set<string>;

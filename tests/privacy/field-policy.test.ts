@@ -63,7 +63,7 @@ describe("field-level escaping policy (E4)", () => {
                 name: "t",
                 parameters: {
                   type: "object",
-                  properties: { id: { type: "string", enum: ["<PP-phone-abcde>"] } },
+                  properties: { id: { type: "string", enum: ["{PP-phone-abcde}"] } },
                 },
               },
             },
@@ -93,7 +93,7 @@ describe("field-level escaping policy (E4)", () => {
                   type: "function",
                   function: {
                     name: "f",
-                    arguments: JSON.stringify({ "<PP-phone-abcde>": "x" }),
+                    arguments: JSON.stringify({ "{PP-phone-abcde}": "x" }),
                   },
                 },
               ],

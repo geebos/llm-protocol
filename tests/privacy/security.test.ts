@@ -38,7 +38,7 @@ function capturingFetch(handler: (req: Request, body: unknown) => Response): Cap
   return { fetch: fetchImpl, lastBody: () => body };
 }
 
-const TOKEN_RE = /<PP-phone-[a-z2-7]{5}>/;
+const TOKEN_RE = /\{PP-phone-[a-z2-7]{5}\}/;
 
 /** The token the pipeline actually sent upstream (fixtures must echo it). */
 function tokenIn(body: unknown): string {
@@ -158,7 +158,7 @@ describe("privacy security invariants", () => {
                 type: "tool_use",
                 id: "t1",
                 name: "f",
-                input: { blob: "x".repeat(200), ref: "<PP_phone_1>" },
+                input: { blob: "x".repeat(200), ref: "{PP_phone_1}" },
               },
             ],
             stop_reason: "tool_use",
@@ -184,7 +184,7 @@ describe("privacy security invariants", () => {
     };
     expect(overflowed).toBe(true);
     expect(body.choices[0].message.tool_calls?.[0].function.arguments).toContain(
-      "<PP_phone_1>",
+      "{PP_phone_1}",
     );
   });
 

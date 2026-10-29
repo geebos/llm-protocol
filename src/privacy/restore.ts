@@ -126,7 +126,7 @@ export function restoreText(
     // Nothing matches at `pos`. Emit forward, but stop before the next position
     // a token could start at or before `holdStart` (the tail that may still
     // grow into one). Jumping straight to `holdStart` would swallow a *complete*
-    // token starting in between — `<token>a<token>` with a partial prefix at the
+    // token starting in between — `{token}a{token}` with a partial prefix at the
     // buffer end restored serially but not while streaming.
     const nextHead = buffer.indexOf(shapeHead(compiled), pos + 1);
     // A legacy escape unit must not be split: its backslash would be emitted

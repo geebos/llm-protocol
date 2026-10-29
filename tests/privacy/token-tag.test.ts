@@ -14,7 +14,7 @@ import { PrivacySession, type SessionConfig } from "../../src/privacy/session.js
 
 const compiled = compileTemplate("private_placeholder_");
 const key = new Uint8Array(32).fill(7);
-const TOKEN_RE = /<private_placeholder-phone-([a-z2-7]{5})/;
+const TOKEN_RE = /\{private_placeholder-phone-([a-z2-7]{5})/;
 
 function config(sessionKey: Uint8Array): SessionConfig {
   return { compiled, namespace: "tenant", tagKey: sessionKey };
@@ -75,7 +75,7 @@ describe("tag identity", () => {
     const eb = b.getOrCreate("phone", "13800138000");
     expect(ea.placeholder).toBe(eb.placeholder);
     expect(ea.placeholder).toBe(
-      `<private_placeholder-phone-${tokenTag(key, "tenant", "phone", "13800138000", 5)}>`,
+      `{private_placeholder-phone-${tokenTag(key, "tenant", "phone", "13800138000", 5)}}`,
     );
     expect(a.getOrCreate("phone", "13900139000").placeholder).not.toBe(ea.placeholder);
     // Idempotent within a session.
@@ -85,7 +85,7 @@ describe("tag identity", () => {
   it("uses a 5-character base32 tag and no counter", () => {
     const session = new PrivacySession("shape", config(key));
     const entry = session.getOrCreate("phone", "13800138000");
-    expect(entry.placeholder).toMatch(/^<private_placeholder-phone-[a-z2-7]{5}>$/);
+    expect(entry.placeholder).toMatch(/^\{private_placeholder-phone-[a-z2-7]{5}\}$/);
     expect(entry.id).toBe(`phone:${TOKEN_RE.exec(entry.placeholder)![1]}`);
   });
 
@@ -119,7 +119,7 @@ describe("tag identity", () => {
     const first = JSON.stringify(cap.lastBody());
     await run("a different prefix, call 13800138000 too");
     const second = JSON.stringify(cap.lastBody());
-    const pipelineToken = /<PP-phone-([a-z2-7]{5})>/;
+    const pipelineToken = /\{PP-phone-([a-z2-7]{5})\}/;
     const firstTag = pipelineToken.exec(first)?.[1];
     expect(firstTag).toBeDefined();
     expect(pipelineToken.exec(second)?.[1]).toBe(firstTag);

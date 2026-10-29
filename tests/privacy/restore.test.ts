@@ -11,7 +11,7 @@ import { compileTemplate, restoreString, tokenTag } from "../../src/index.js";
 const BS = String.fromCharCode(92);
 const compiled = compileTemplate("private_placeholder_");
 const KEY = new Uint8Array(32).fill(11);
-const TOKEN = `<private_placeholder-phone-${tokenTag(KEY, "", "phone", "13800138000", 5)}>`;
+const TOKEN = `{private_placeholder-phone-${tokenTag(KEY, "", "phone", "13800138000", 5)}}`;
 const entries = [{ placeholder: TOKEN, original: "13800138000" }];
 
 function restore(text: string, escape = false): string {
@@ -27,9 +27,9 @@ describe("restore hold-point boundaries", () => {
   });
 
   it("restores a token followed by a partial prefix at the end", () => {
-    expect(restore(`${TOKEN}<private_pl`)).toBe(`13800138000<private_pl`);
-    expect(restore(`x${TOKEN}<private_placeholder-`)).toBe(
-      `x13800138000<private_placeholder-`,
+    expect(restore(`${TOKEN}{private_pl`)).toBe(`13800138000{private_pl`);
+    expect(restore(`x${TOKEN}{private_placeholder-`)).toBe(
+      `x13800138000{private_placeholder-`,
     );
   });
 

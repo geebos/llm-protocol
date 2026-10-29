@@ -17,7 +17,7 @@ import { createPlaceholderMatcher } from "../../src/privacy/trie.js";
 const BS = String.fromCharCode(92);
 const compiled = compileTemplate("private_placeholder_");
 const KEY = new Uint8Array(32).fill(3);
-const SHAPE = `<private_placeholder-phone-${tokenTag(KEY, "", "phone", "13800138000", 5)}>`;
+const SHAPE = `{private_placeholder-phone-${tokenTag(KEY, "", "phone", "13800138000", 5)}}`;
 
 function phoneRecognizer(): PrivacyRecognizer {
   return {
@@ -68,7 +68,7 @@ describe("escapeLiteral", () => {
   it("prefix-escapes only template shapes and doubles backslashes (PE-04)", () => {
     expect(escapeLiteral(compiled, "hello")).toBe("hello");
     expect(escapeLiteral(compiled, BS)).toBe(BS + BS);
-    expect(escapeLiteral(compiled, "<not a shape>")).toBe("<not a shape>");
+    expect(escapeLiteral(compiled, "{not a shape}")).toBe("{not a shape}");
     expect(escapeLiteral(compiled, SHAPE)).toBe(BS + SHAPE);
     expect(escapeLiteral(compiled, BS + SHAPE)).toBe(BS + BS + BS + SHAPE);
   });
@@ -76,7 +76,7 @@ describe("escapeLiteral", () => {
   it("reports need_more for a bare trailing escape (PE-05)", () => {
     expect(escapeStep(compiled, BS, 0)).toEqual({ kind: "need_more" });
     expect(escapeStep(compiled, BS + BS, 0)).toEqual({ kind: "emit", text: BS, end: 2 });
-    expect(escapeStep(compiled, BS + "<", 0)).toEqual({ kind: "emit", text: "<", end: 2 });
+    expect(escapeStep(compiled, BS + "{", 0)).toEqual({ kind: "emit", text: "{", end: 2 });
   });
 });
 
@@ -161,7 +161,7 @@ describe("literal text through translate", () => {
     expect(outbound).not.toContain("13800138000");
     const sent = cap.lastBody() as { messages: { content: string }[] };
     const content = sent.messages[0].content;
-    const token = /<PP-phone-[a-z2-7]{5}>/.exec(content);
+    const token = /\{PP-phone-[a-z2-7]{5}\}/.exec(content);
     expect(token).not.toBeNull();
     // Replacing the token with a marker reproduces the input verbatim: no
     // escape character was inserted and no backslash was doubled.
@@ -178,7 +178,7 @@ describe("literal text through translate", () => {
     let report: PrivacyCompletionReport | undefined;
     const cap = capturingFetch();
     // Shape-identical to the *default* token shape, but not a registered token.
-    const literal = "<PP-phone-zzzzz>";
+    const literal = "{PP-phone-zzzzz}";
     const response = await translate.chat.messages({
       ...options(`call 13800138000 and note ${literal}`),
       fetch: cap.fetch,
@@ -194,7 +194,7 @@ describe("literal text through translate", () => {
     const content = sent.messages[0].content;
     // Only the caller-supplied literal is escaped; the fresh token replaces the
     // detected value and stays unescaped.
-    const token = /<PP-phone-[a-z2-7]{5}>/.exec(content)?.[0];
+    const token = /\{PP-phone-[a-z2-7]{5}\}/.exec(content)?.[0];
     expect(token).toBeDefined();
     expect(content).toBe(`call ${token} and note ${BS}${literal}`);
     const body = (await response.json()) as {

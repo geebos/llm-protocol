@@ -7,7 +7,7 @@
  * can never be confused with an engine-generated trusted token:
  *
  *   E(x): `\` -> `\\`; each template shape -> `\` + shape
- *   D(y): `\\` -> `\`;  `\<prefix[0]>` -> `<prefix[0]>` (single pass)
+ *   D(y): `\\` -> `\`;  `\{prefix[0]}` -> `{prefix[0]}` (single pass)
  *
  * The template forbids `\` in literals, so generated placeholders never contain
  * the escape character (INV-E2). Decoding is non-recursive and never feeds its
@@ -74,7 +74,7 @@ export function containsShape(compiled: CompiledTemplate, text: string): boolean
 /**
  * Consume one escape unit at `pos`. Returns `undefined` when `pos` does not
  * start with the escape character. `need_more` means the buffer ends in a bare
- * escape character, which may still become `\\` or `\<prefix[0]>` (INV-E6).
+ * escape character, which may still become `\\` or `\{prefix[0]}` (INV-E6).
  */
 export function escapeStep(
   compiled: CompiledTemplate,

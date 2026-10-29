@@ -182,7 +182,7 @@ await translate.chat.messages({
 });
 ```
 
-The upstream sees `<PP-{type}-{tag}>` tokens (label configurable, brackets and tail added automatically) plus an injected system notice; the caller gets the originals back. Only recognized spans are rewritten: literal text — including placeholder-shaped strings and backslashes — is forwarded byte-for-byte, and a token restores only if this session issued it. `trace` and `onPrivacyComplete` only ever carry counts and warning codes — never raw values, placeholder mappings, credentials or prompt bodies. Defaults are `securityMode: "strict"` (no leakage permitted) and `egress: "policy"`; coverage, templates, HMAC tags and streaming budgets are configurable through `PrivacyOptions`.
+The upstream sees `{PP-{type}-{tag}}` tokens (label configurable, braces and tail added automatically) plus an injected system notice; the caller gets the originals back. Only recognized spans are rewritten: literal text — including placeholder-shaped strings and backslashes — is forwarded byte-for-byte, and a token restores only if this session issued it. `trace` and `onPrivacyComplete` only ever carry counts and warning codes — never raw values, placeholder mappings, credentials or prompt bodies. Defaults are `securityMode: "strict"` (no leakage permitted) and `egress: "policy"`; coverage, templates, HMAC tags and streaming budgets are configurable through `PrivacyOptions`.
 
 ### Prompt-cache affinity
 

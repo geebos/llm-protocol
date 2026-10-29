@@ -12,7 +12,7 @@ import {
 import type { CanonicalStreamEvent } from "../../src/streams/index.js";
 
 /** Partial placeholder start (prefix + separator, no type yet). */
-const PARTIAL = "<PP-";
+const PARTIAL = "{PP-";
 /** A longer partial prefix: exceeds the small overflow budgets in these tests. */
 const overflowText = `${PARTIAL}abcdef`;
 
@@ -287,7 +287,7 @@ describe("streaming restore", () => {
         {
           type: "text_delta",
           location: { choice: 0, content: 0 },
-          text: `see ${PARTIAL}other-abcde> y`,
+          text: `see ${PARTIAL}other-abcde} y`,
         },
         { type: "text_end", location: { choice: 0, content: 0 } },
         { type: "message_end" },
@@ -295,14 +295,14 @@ describe("streaming restore", () => {
       session,
       config,
     );
-    expect(deltas(result.events)).toBe(`see ${PARTIAL}other-abcde> y`);
+    expect(deltas(result.events)).toBe(`see ${PARTIAL}other-abcde} y`);
     expect(result.warnings).toHaveLength(0);
   });
 
   it("restores a default tag token split across chunks", async () => {
     const { session, config, token } = makeSession(1);
     const t = token(1);
-    expect(t).toMatch(/^<PP-a-[a-z2-7]{5}>$/);
+    expect(t).toMatch(/^\{PP-a-[a-z2-7]{5}\}$/);
     const cut = t.length - 2;
     const result = await run(
       [
@@ -417,7 +417,7 @@ describe("streaming restore", () => {
       session,
       config,
     );
-    expect(deltas(result.events)).not.toContain("<private_placeholder");
+    expect(deltas(result.events)).not.toContain("{private_placeholder");
     expect(result.events.some((e) => e.type === "error")).toBe(true);
   });
 

@@ -72,7 +72,7 @@ describe("native partition coverage", () => {
     expect(result.redacted).toBe(1);
     const metadata = canonical.native?.anthropic?.metadata as { note: string };
     expect(metadata.note).not.toContain(PHONE);
-    expect(metadata.note).toContain("<PP-");
+    expect(metadata.note).toContain("{PP-");
   });
 
   it("rejects a sensitive value in a configured reject native field", async () => {

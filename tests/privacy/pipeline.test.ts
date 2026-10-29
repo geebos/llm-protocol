@@ -76,7 +76,7 @@ function openaiOptions(overrides: Record<string, unknown> = {}): {
   };
 }
 
-const TOKEN_RE = /<PP-phone-[a-z2-7]{5}>/;
+const TOKEN_RE = /\{PP-phone-[a-z2-7]{5}\}/;
 
 /** The token the pipeline actually sent upstream (fixtures must echo it). */
 function tokenIn(body: unknown): string {
@@ -90,7 +90,7 @@ const anthropicResponse = {
   type: "message",
   role: "assistant",
   model: "claude-sonnet-4-5",
-  content: [{ type: "text", text: "Sure, I will call <PP_phone_1>." }],
+  content: [{ type: "text", text: "Sure, I will call {PP_phone_1}." }],
   stop_reason: "end_turn",
   usage: { input_tokens: 8, output_tokens: 4 },
 };
@@ -241,7 +241,7 @@ describe("privacy through translate", () => {
     const body = cap.lastBody() as { system?: unknown };
     const system = JSON.stringify(body.system);
     expect(system).toContain("Privacy notice");
-    expect(system).toContain("<PP-{type}-{tag}>");
+    expect(system).toContain("{PP-{type}-{tag}}");
     expect(system).toContain("ordinary characters");
     expect(system).toContain("never attempt to restore it in any form");
     expect(system).toContain("placeholder replacement is correct and will not cause errors");
@@ -350,7 +350,7 @@ describe("privacy through translate", () => {
         new Response(
           JSON.stringify({
             ...anthropicResponse,
-            content: [{ type: "text", text: "see <PP_phone_9>" }],
+            content: [{ type: "text", text: "see {PP_phone_9}" }],
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
@@ -361,7 +361,7 @@ describe("privacy through translate", () => {
       privacy: { recognizers: [phoneRecognizer()] },
     });
     const body = (await response.json()) as { choices: { message: { content: string } }[] };
-    expect(body.choices[0].message.content).toBe("see <PP_phone_9>");
+    expect(body.choices[0].message.content).toBe("see {PP_phone_9}");
   });
 
   it("restores a placeholder split across streaming deltas (PT-04)", async () => {

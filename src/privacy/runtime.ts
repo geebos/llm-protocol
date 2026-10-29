@@ -80,7 +80,7 @@ export function injectSystemNotice(
     .map((p) => p.text)
     .join("\n");
   // The notice must advertise the token shape, not the bare prefix.
-  const shape = `<${config.template.prefix}-{type}-{tag}>`;
+  const shape = `{${config.template.prefix}-{type}-{tag}}`;
   const notice = buildSystemNotice(config.system, shape, existing);
   if (!notice) return undefined;
   const injected = leadingCount > 0 ? `\n\n${notice}` : notice;

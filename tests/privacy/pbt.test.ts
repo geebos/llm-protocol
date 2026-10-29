@@ -99,7 +99,7 @@ describe("privacy property-based tests", () => {
         tokens[9],
         // Unregistered token of a known type: plain text, never restored.
         `${tokens[0].slice(0, -1)}a`,
-        "<private_pl",
+        "{PP-",
         "🙂",
         " ",
       ];
@@ -196,7 +196,7 @@ describe("privacy property-based tests", () => {
     for (let i = 0; i < 20; i++) session.getOrCreate("b", `beta-${i}`);
     const again = session.getOrCreate("a", "alpha");
     // Identity is the value's tag, so later allocations cannot move it.
-    expect(first.placeholder).toMatch(/^<PP-a-[a-z2-7]{5}>$/);
+    expect(first.placeholder).toMatch(/^\{PP-a-[a-z2-7]{5}\}$/);
     expect(again.placeholder).toBe(first.placeholder);
     expect(session.getOrCreate("a", "gamma").placeholder).not.toBe(first.placeholder);
   });

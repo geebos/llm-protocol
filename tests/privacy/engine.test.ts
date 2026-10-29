@@ -36,18 +36,29 @@ describe("placeholder prefix", () => {
   });
 
   it("rejects characters a placeholder cannot carry", () => {
-    expect(() => compileTemplate('<p "x"_')).toThrow(TemplateError);
+    expect(() => compileTemplate('{p "x"_')).toThrow(TemplateError);
     const BS = String.fromCharCode(92);
-    expect(() => compileTemplate(`<p${BS}x_`)).toThrow(TemplateError);
+    expect(() => compileTemplate(`{p${BS}x_`)).toThrow(TemplateError);
+  });
+
+  it("rejects braces inside the prefix (they are added automatically)", () => {
+    let caught: unknown;
+    try {
+      compileTemplate("p{x");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TemplateError);
+    expect(caught).toMatchObject({ code: "prefix_braces" });
   });
 
   it("normalizes trailing separators", () => {
-    for (const prefix of ["p_", "p-", "p_-_", "p", "<p_", "<p>"]) {
+    for (const prefix of ["p_", "p-", "p_-_", "p", "{p_", "{p}"]) {
       const compiled = compileTemplate(prefix);
       expect(compiled.prefix).toBe("p");
       const text = renderPlaceholder(compiled, "phone", "abcde");
-      // Brackets are added automatically.
-      expect(text).toBe("<p-phone-abcde>");
+      // Braces are added automatically.
+      expect(text).toBe("{p-phone-abcde}");
       expect(parsePlaceholder(compiled, text)).toEqual({ type: "phone", tag: "abcde" });
     }
   });
@@ -55,31 +66,36 @@ describe("placeholder prefix", () => {
   it("renders and parses a custom prefix (PT-21)", () => {
     const compiled = compileTemplate("[[");
     expect(compiled.prefix).toBe("[[");
-    expect(renderPlaceholder(compiled, "phone", "abcde")).toBe("<[[-phone-abcde>");
-    expect(parsePlaceholder(compiled, "<[[-phone-abcde>")).toEqual({
+    expect(renderPlaceholder(compiled, "phone", "abcde")).toBe("{[[-phone-abcde}");
+    expect(parsePlaceholder(compiled, "{[[-phone-abcde}")).toEqual({
       type: "phone",
       tag: "abcde",
     });
   });
 
   it("scans a token shape (PT-27)", () => {
-    const compiled = compileTemplate("<p_", { tagLength: 12 });
+    const compiled = compileTemplate("{p_", { tagLength: 12 });
     const tag = "a".repeat(12);
-    const text = `<p-phone-${tag}>`;
+    const text = `{p-phone-${tag}}`;
     expect(scanTemplateShape(compiled, text, 0)).toBe(text.length);
     expect(parsePlaceholder(compiled, text)).toEqual({ type: "phone", tag });
   });
 
   it("rejects tag lengths outside the supported range", () => {
-    expect(() => compileTemplate("<p_", { tagLength: 2 })).toThrow(TemplateError);
-    expect(() => compileTemplate("<p_", { tagLength: 128 })).toThrow(TemplateError);
+    expect(() => compileTemplate("{p_", { tagLength: 2 })).toThrow(TemplateError);
+    expect(() => compileTemplate("{p_", { tagLength: 128 })).toThrow(TemplateError);
   });
 
-  it("does not accept a tag made of characters outside base32", () => {
-    const compiled = compileTemplate("<p_");
-    expect(parsePlaceholder(compiled, "<p-phone-01890")).toBeUndefined();
-    expect(parsePlaceholder(compiled, "<p-phone-abc")).toBeUndefined();
-    expect(parsePlaceholder(compiled, "<p-phone-abcde")).toBeUndefined();
+  it("accepts a well-formed base32 tag and rejects malformed ones", () => {
+    const compiled = compileTemplate("{p_");
+    expect(parsePlaceholder(compiled, "{p-phone-abcde}")).toEqual({
+      type: "phone",
+      tag: "abcde",
+    });
+    // Characters outside the base32 alphabet.
+    expect(parsePlaceholder(compiled, "{p-phone-01890}")).toBeUndefined();
+    // A tag shorter than the configured length.
+    expect(parsePlaceholder(compiled, "{p-phone-abc}")).toBeUndefined();
   });
 });
 
@@ -90,7 +106,7 @@ describe("privacy engine", () => {
     const text = "call 13800138000 now";
     const redacted = await engine.redact(text, session, [phoneRecognizer()]);
     const token = session.entries()[0].placeholder;
-    expect(token).toMatch(/^<PP-phone-[a-z2-7]{5}>$/);
+    expect(token).toMatch(/^\{PP-phone-[a-z2-7]{5}\}$/);
     expect(redacted).toBe(`call ${token} now`);
     expect(engine.restore(redacted, session)).toBe(text);
     // idempotent: re-redacting already-mapped text is stable
@@ -120,7 +136,7 @@ describe("privacy engine", () => {
     };
     const redacted = await engine.redact("mail user@example.com x", session, [outer, inner]);
     expect(redacted).toBe(`${session.entries()[0].placeholder} x`);
-    expect(redacted).toContain("<PP-outer-");
+    expect(redacted).toContain("{PP-outer-");
   });
 
   it("rejects crossing spans", async () => {
@@ -169,7 +185,7 @@ describe("privacy engine", () => {
   it("leaves a placeholder-shaped literal untouched (PT-34)", async () => {
     const engine = createPrivacyEngine();
     const session = engine.createSession("s8");
-    const literal = "<PP_phone_1>";
+    const literal = "{PP_phone_1}";
     const text = `13800138000 ${literal}`;
     const redacted = await engine.redact(text, session, [phoneRecognizer()]);
     // No escaping by default: only the detected value is replaced.
@@ -191,7 +207,7 @@ describe("privacy engine", () => {
   it("does not restore unknown placeholders (PT-07)", () => {
     const engine = createPrivacyEngine();
     const session = engine.createSession("s10");
-    const text = "see <PP-phone-zzzzz";
+    const text = "see {PP-phone-zzzzz";
     expect(engine.restore(text, session)).toBe(text);
   });
 
