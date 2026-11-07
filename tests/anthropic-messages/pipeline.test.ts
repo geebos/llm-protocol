@@ -180,3 +180,80 @@ describe("translate: Anthropic Messages -> OpenAI Chat", () => {
     });
   });
 });
+
+describe("tool_result content rendering for a Chat target", () => {
+  function toolResultBody(content: unknown): Record<string, unknown> {
+    return {
+      model: "gpt-4o",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "read_image", input: {} }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content }],
+        },
+      ],
+      tools: [
+        {
+          name: "read_image",
+          description: "d",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    };
+  }
+
+  it("renders a text+image tool_result as Chat text and image_url", async () => {
+    const { fetch, lastRequest } = fakeFetch(() => jsonResponse(openaiTextResponse));
+    await translate.messages.chat({
+      url: TARGET_URL,
+      headers: HEADERS,
+      body: toolResultBody([
+        { type: "text", text: "saved" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+      ]),
+      fetch,
+    });
+    const messages = (lastRequest().body as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
+    const toolMessage = messages.find((m) => m.role === "tool");
+    expect(toolMessage?.content).toEqual([
+      { type: "text", text: "saved" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+    ]);
+  });
+
+  it("fails closed on an unknown block nested in tool_result instead of emitting IR", async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
+    await expect(
+      translate.messages.chat({
+        url: TARGET_URL,
+        headers: HEADERS,
+        body: toolResultBody([
+          { type: "text", text: "x" },
+          { type: "server_tool_use", id: "s1", input: {} },
+        ]),
+        fetch,
+      }),
+    ).rejects.toMatchObject({ kind: "unsupported", code: "non_droppable_field" });
+  });
+
+  it("fails closed on a thinking block nested in tool_result instead of emitting IR", async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(openaiTextResponse));
+    await expect(
+      translate.messages.chat({
+        url: TARGET_URL,
+        headers: HEADERS,
+        body: toolResultBody([
+          { type: "thinking", thinking: "secret", signature: "sig-1" },
+        ]),
+        fetch,
+      }),
+    ).rejects.toMatchObject({ kind: "unsupported", code: "non_droppable_field" });
+  });
+});

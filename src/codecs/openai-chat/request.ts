@@ -8,6 +8,7 @@ import type {
   CanonicalTool,
   CanonicalToolChoice,
   ContentPart,
+  ImageSource,
 } from "../../ir/types.js";
 import type { ProviderProfile } from "../../capabilities/provider-profile.js";
 import { unsupportedError, validationError } from "../../errors.js";
@@ -381,9 +382,11 @@ function parseMessages(
     } else if (role === "user") {
       messages.push({ role: "user", content: parseUserParts(m.content, ctx) });
     } else if (role === "assistant") {
+      const functionCall = parseChatFunctionCall(m.function_call, i);
       messages.push({
         role: "assistant",
         content: parseAssistantParts(m, reasoningField, ctx, signatureField),
+        ...(functionCall ? { native: { chat: { functionCall } } } : {}),
       });
     } else if (role === "tool") {
       if (typeof m.tool_call_id !== "string") {
@@ -428,9 +431,15 @@ function parseUserParts(content: unknown, ctx: CodecContext): ContentPart[] {
       if (typeof b.text !== "string") throw validationError("text block requires a string text");
       parts.push({ type: "text", text: b.text });
     } else if (b.type === "image_url") {
-      const url = (b.image_url as { url?: unknown } | undefined)?.url;
+      const imageUrl = b.image_url as { url?: unknown; detail?: unknown } | undefined;
+      const url = imageUrl?.url;
       if (typeof url !== "string") throw validationError("image_url block requires image_url.url");
-      parts.push({ type: "image", source: { type: "url", url } });
+      const detail = imageUrl?.detail;
+      parts.push({
+        type: "image",
+        source: parseImageSource(url),
+        ...(isImageDetail(detail) ? { native: { chat: { imageDetail: detail } } } : {}),
+      });
     } else {
       ctx.warnings.push({
         code: "unknown_content_block",
@@ -441,6 +450,40 @@ function parseUserParts(content: unknown, ctx: CodecContext): ContentPart[] {
     }
   }
   return parts;
+}
+
+const BASE64_IMAGE_DATA_URL = /^data:(image\/[^;,]+);base64,([\s\S]*)$/;
+
+/** Parse an OpenAI image URL; base64 data URLs become canonical base64 sources. */
+function parseImageSource(url: string): ImageSource {
+  const match = BASE64_IMAGE_DATA_URL.exec(url);
+  if (!match) return { type: "url", url };
+  return { type: "base64", mediaType: match[1], data: match[2] };
+}
+
+function isImageDetail(value: unknown): value is "auto" | "low" | "high" {
+  return value === "auto" || value === "low" || value === "high";
+}
+
+function parseChatFunctionCall(
+  value: unknown,
+  messageIndex: number,
+): { name: string; arguments?: string } | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object") {
+    throw validationError(`messages[${messageIndex}].function_call must be an object`);
+  }
+  const fc = value as { name?: unknown; arguments?: unknown };
+  if (typeof fc.name !== "string") {
+    throw validationError(`messages[${messageIndex}].function_call requires name`);
+  }
+  if (fc.arguments !== undefined && fc.arguments !== null && typeof fc.arguments !== "string") {
+    throw validationError(`messages[${messageIndex}].function_call arguments must be a string`);
+  }
+  return {
+    name: fc.name,
+    ...(typeof fc.arguments === "string" ? { arguments: fc.arguments } : {}),
+  };
 }
 
 function parseAssistantParts(
@@ -625,22 +668,25 @@ function renderUserContent(parts: ContentPart[], ctx: CodecContext): string | un
     const joined = parts.map((p) => (p.type === "text" ? p.text : "")).join("");
     return joined;
   }
-  return parts
-    .map((p): unknown => {
-      if (p.type === "text") return { type: "text", text: p.text };
-      if (p.type === "image") {
-        if (p.source.type === "url") {
-          return { type: "image_url", image_url: { url: p.source.url } };
-        }
-        // OpenAI accepts base64 images as data URLs, so this is lossless.
-        return {
-          type: "image_url",
-          image_url: { url: `data:${p.source.mediaType};base64,${p.source.data}` },
-        };
-      }
-      return p;
-    })
-    .filter((b): b is unknown => b !== null);
+  return parts.map((p): unknown => {
+    if (p.type === "text") return { type: "text", text: p.text };
+    if (p.type === "image") {
+      const detail = p.native?.chat?.imageDetail;
+      const url =
+        p.source.type === "url"
+          ? p.source.url
+          : // OpenAI accepts base64 images as data URLs, so this is lossless.
+            `data:${p.source.mediaType};base64,${p.source.data}`;
+      return {
+        type: "image_url",
+        image_url: { url, ...(detail ? { detail } : {}) },
+      };
+    }
+    // Never serialize a canonical IR part into the OpenAI wire body: a part
+    // the target cannot express must fail closed (same policy as `opaque_native`
+    // at the message level).
+    throw fieldProjectionError(p.type, "openai-chat");
+  });
 }
 
 function renderAssistantMessage(
@@ -672,6 +718,13 @@ function renderAssistantMessage(
   if (signature !== undefined && signatureField) {
     msg[signatureField] = signature;
   }
+  const functionCall = m.native?.chat?.functionCall;
+  if (functionCall) {
+    msg.function_call = {
+      name: functionCall.name,
+      ...(functionCall.arguments !== undefined ? { arguments: functionCall.arguments } : {}),
+    };
+  }
   if (calls.length) {
     msg.tool_calls = calls.map((c) => ({
       id: c.id,
@@ -694,7 +747,7 @@ function warnDroppedCacheControl(
   let dropped = false;
   const scan = (parts: ContentPart[] | undefined): void => {
     for (const part of parts ?? []) {
-      if (part.type === "text" && getCacheControl(part)) dropped = true;
+      if (getCacheControl(part)) dropped = true;
       if (part.type === "tool_result") scan(part.content);
     }
   };

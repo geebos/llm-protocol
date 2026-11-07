@@ -223,4 +223,96 @@ describe("Anthropic native request fields (L-8)", () => {
       }),
     ).rejects.toMatchObject({ kind: "unsupported", code: "non_droppable_field" });
   });
+
+  it("round-trips cache_control on image, tool_use and tool_result blocks", async () => {
+    const { fetch, lastRequest } = fakeFetch(() => jsonResponse(anthropicResponse));
+    await translate.messages.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "<redacted>" },
+      body: {
+        model: "claude-sonnet",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/png", data: "AAAA" },
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "t1",
+                name: "f",
+                input: {},
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "t1",
+                content: "done",
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+        tools: [{ name: "f", description: "d", input_schema: { type: "object" } }],
+      },
+      fetch,
+    });
+    const messages = lastRequest().body.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+    expect(messages[0].content[0]).toMatchObject({
+      type: "image",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(messages[1].content[0]).toMatchObject({
+      type: "tool_use",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(messages[2].content[0]).toMatchObject({
+      type: "tool_result",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("warns when cache_control on a non-text block is dropped for Chat", async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(chatResponse));
+    const traces: TranslationTrace[] = [];
+    await translate.messages.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer k" },
+      body: {
+        model: "claude-sonnet",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "url", url: "https://x/y.png" },
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+      },
+      fetch,
+      trace: (t) => traces.push(t),
+    });
+    expect(traces[0].warnings.some((w) => w.code === "privacy_cache_control_dropped")).toBe(true);
+  });
 });

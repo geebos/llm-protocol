@@ -23,7 +23,7 @@ import { getCacheControl } from "../../ir/native/accessors.js";
 import { recordExtensionDisposition } from "../extension-evidence.js";
 import type { AnthropicNativeRequest, AnthropicNativeTool } from "../../ir/native/index.js";
 import type { ProviderProfile, RoleCapabilities } from "../../capabilities/provider-profile.js";
-import { roleProjectionError } from "../../ir/projection/role.js";
+import { fieldProjectionError, roleProjectionError } from "../../ir/projection/role.js";
 import { projectChatRequest } from "../../ir/projection/native.js";
 import { applyFieldPolicy } from "../../ir/projection/apply.js";
 
@@ -264,7 +264,18 @@ export function createAnthropicRequestCodec(profile: ProviderProfile): RequestCo
     }
     // Anthropic requires well-formed turns (tool_result placement, no runs of
     // adjacent same-role turns); normalize before rendering (P0-7).
+    // Chat legacy `function_call` has no Anthropic equivalent and is a
+    // `required` field, so fail closed before normalization drops message
+    // native metadata.
+    for (const m of rest) {
+      if (m.native?.chat?.functionCall !== undefined) {
+        throw fieldProjectionError("native.chat.functionCall", "anthropic-messages");
+      }
+    }
     const messages = normalizeAnthropicTurns(rest, ctx);
+    messages.forEach((m, mi) =>
+      reportDroppedChatPartFields(m.content, ctx, `messages[${mi}].content`),
+    );
     if (messages.length) {
       body.messages = messages.map((m) => renderMessage(m, ctx, roles));
     }
@@ -471,6 +482,29 @@ function simplifyTextBlocks(blocks: unknown[]): unknown {
 /** Single-text user content renders as a plain string (Anthropic allows it). */
 function simplifyUserContent(blocks: unknown[]): unknown {
   return simplifyTextBlocks(blocks);
+}
+
+/** Record droppable Chat part-native fields that Anthropic cannot express. */
+function reportDroppedChatPartFields(
+  parts: ContentPart[],
+  ctx: CodecContext,
+  path: string,
+): void {
+  parts.forEach((part, i) => {
+    const partPath = `${path}[${i}]`;
+    if (part.type === "image" && part.native?.chat?.imageDetail !== undefined) {
+      applyFieldPolicy(
+        ctx,
+        `${partPath}.native.chat.imageDetail`,
+        part.native.chat.imageDetail,
+        "droppable",
+        { kind: "unsupported", cause: "unsupported_by_target" },
+      );
+    }
+    if (part.type === "tool_result") {
+      reportDroppedChatPartFields(part.content, ctx, `${partPath}.content`);
+    }
+  });
 }
 
 function renderToolChoice(choice: CanonicalToolChoice): Record<string, unknown> {

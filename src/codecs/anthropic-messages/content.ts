@@ -66,7 +66,13 @@ export function parseAnthropicContent(
         });
         break;
       case "image":
-        parts.push({ type: "image", source: toImageSource(b) });
+        parts.push({
+          type: "image",
+          source: toImageSource(b),
+          ...(isEphemeralCacheControl(b.cache_control)
+            ? { native: { anthropic: { cacheControl: b.cache_control } } }
+            : {}),
+        });
         break;
       case "tool_use":
         if (typeof b.id !== "string" || typeof b.name !== "string") {
@@ -77,6 +83,9 @@ export function parseAnthropicContent(
           id: b.id,
           name: b.name,
           argumentsText: JSON.stringify(b.input ?? {}),
+          ...(isEphemeralCacheControl(b.cache_control)
+            ? { native: { anthropic: { cacheControl: b.cache_control } } }
+            : {}),
         });
         break;
       case "tool_result":
@@ -88,6 +97,9 @@ export function parseAnthropicContent(
           toolCallId: b.tool_use_id,
           content: parseAnthropicContent(b.content ?? "", ctx),
           isError: b.is_error === true,
+          ...(isEphemeralCacheControl(b.cache_control)
+            ? { native: { anthropic: { cacheControl: b.cache_control } } }
+            : {}),
         });
         break;
       case "thinking":
@@ -130,25 +142,37 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
         });
         break;
       }
-      case "image":
-        blocks.push({ type: "image", source: renderImageSource(part.source) });
+      case "image": {
+        const cacheControl = getCacheControl(part);
+        blocks.push({
+          type: "image",
+          source: renderImageSource(part.source),
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
+        });
         break;
-      case "tool_call":
+      }
+      case "tool_call": {
+        const cacheControl = getCacheControl(part);
         blocks.push({
           type: "tool_use",
           id: part.id,
           name: part.name,
           input: safeParseJson(part.argumentsText),
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
         });
         break;
-      case "tool_result":
+      }
+      case "tool_result": {
+        const cacheControl = getCacheControl(part);
         blocks.push({
           type: "tool_result",
           tool_use_id: part.toolCallId,
           content: renderToolResultContent(part.content),
           ...(part.isError ? { is_error: true } : {}),
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
         });
         break;
+      }
       case "reasoning":
         if (part.native?.anthropic?.thinkingKind === "redacted_thinking") {
           blocks.push({
@@ -183,9 +207,7 @@ export function renderAnthropicContent(parts: ContentPart[]): unknown[] {
 function renderToolResultContent(parts: ContentPart[]): string | unknown[] {
   const text = parts.filter((p) => p.type === "text").map((p) => p.text);
   if (parts.length === text.length) return text.join("");
-  return parts.map((p) =>
-    p.type === "text" ? { type: "text", text: p.text } : p,
-  );
+  return renderAnthropicContent(parts);
 }
 
 export function safeParseJson(text: string): unknown {

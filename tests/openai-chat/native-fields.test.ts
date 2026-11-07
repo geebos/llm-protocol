@@ -130,4 +130,98 @@ describe("Chat native request fields (P5-2)", () => {
     expect(traces[0].drops?.map((d) => d.path)).toEqual(["native.chat.store"]);
     expect(traces[0].fidelity).toBe("LOSSY");
   });
+
+  it("round-trips legacy function_call on Chat -> Chat", async () => {
+    const { fetch, lastRequest } = fakeFetch(() => jsonResponse(chatResponse));
+    await translate.chat.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer k" },
+      body: {
+        model: "gpt-4o",
+        messages: [
+          { role: "user", content: "hi" },
+          {
+            role: "assistant",
+            content: null,
+            function_call: { name: "lookup", arguments: '{"q":"x"}' },
+          },
+        ],
+      },
+      fetch,
+    });
+    const messages = lastRequest().body.messages as Array<Record<string, unknown>>;
+    expect(messages[1]).toEqual({
+      role: "assistant",
+      content: null,
+      function_call: { name: "lookup", arguments: '{"q":"x"}' },
+    });
+    expect(messages[1].tool_calls).toBeUndefined();
+  });
+
+  it("round-trips image_url detail on Chat -> Chat", async () => {
+    const { fetch, lastRequest } = fakeFetch(() => jsonResponse(chatResponse));
+    await translate.chat.chat({
+      url: "https://api.openai.com/v1/chat/completions",
+      headers: { authorization: "Bearer k" },
+      body: {
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: "https://x/y.png", detail: "high" } },
+            ],
+          },
+        ],
+      },
+      fetch,
+    });
+    const messages = lastRequest().body.messages as Array<{ content: unknown }>;
+    expect(messages[0].content).toEqual([
+      { type: "image_url", image_url: { url: "https://x/y.png", detail: "high" } },
+    ]);
+  });
+
+  it("fails closed on legacy function_call for an Anthropic target", async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(anthropicResponse));
+    await expect(
+      translate.chat.messages({
+        url: "https://api.anthropic.com/v1/messages",
+        headers: { "x-api-key": "k" },
+        body: {
+          model: "gpt-4o",
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "assistant", content: null, function_call: { name: "lookup", arguments: "{}" } },
+          ],
+        },
+        fetch,
+      }),
+    ).rejects.toMatchObject({ kind: "unsupported", code: "non_droppable_field" });
+  });
+
+  it("records image detail drops for an Anthropic target", async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(anthropicResponse));
+    const traces: TranslationTrace[] = [];
+    await translate.chat.messages({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "k" },
+      body: {
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: "https://x/y.png", detail: "high" } },
+            ],
+          },
+        ],
+      },
+      fetch,
+      trace: (t) => traces.push(t),
+    });
+    expect(traces[0].drops?.map((d) => d.path)).toContain(
+      "messages[0].content[0].native.chat.imageDetail",
+    );
+  });
 });

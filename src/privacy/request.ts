@@ -276,6 +276,21 @@ export function collectRequestRegions(
 
   canonical.messages.forEach((message, mi) => {
     const content = message.content;
+    // Legacy Chat `function_call` arguments are tool arguments; cover them
+    // through the same channel as canonical tool calls.
+    const functionCall = message.native?.chat?.functionCall;
+    if (typeof functionCall?.arguments === "string") {
+      addJsonRegion(
+        functionCall.arguments,
+        "tool_arguments",
+        `messages[${mi}].native.chat.functionCall.arguments`,
+        coverage.tool_arguments,
+        regions,
+        (text) => {
+          functionCall.arguments = text;
+        },
+      );
+    }
     const isSystem = message.role === "system" || message.role === "developer";
     const textChannel = isSystem ? "system" : "message_text";
     const textAction = isSystem ? coverage.system : coverage.message_text;
