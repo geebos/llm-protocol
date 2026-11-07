@@ -18,12 +18,8 @@ export type {
 export { CompletionRecorder, DEFAULT_MAX_SSE_EVENTS } from "./pipeline/completion.js";
 export { toUnifiedUsage } from "./pipeline/usage.js";
 
-// Opt-in request patches over the outbound target body. Built-ins are also
-// exported from the `llm-protocol/patch` entry point.
-export {
-  deepseekImageThinkingPatch,
-  IMAGE_THINKING_PLACEHOLDER,
-} from "./patches/index.js";
+// Opt-in request patches over the outbound target body (also exported from the
+// `llm-protocol/patch` entry point).
 export type { RequestPatch } from "./patches/index.js";
 
 export { API_FORMATS, isApiFormat } from "./formats.js";

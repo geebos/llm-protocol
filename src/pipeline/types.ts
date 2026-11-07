@@ -84,8 +84,7 @@ export interface TranslateOptions {
   /**
    * Opt-in patches over the outbound (target-protocol) request body, applied in
    * order after rendering. Each patch may declare a `filter` gate and must
-   * return the replacement body from `apply`; `deepseekImageThinkingPatch` is
-   * the built-in patch (gated to DeepSeek model ids).
+   * return the replacement body from `apply`.
    */
   patches?: readonly RequestPatch[];
 }
