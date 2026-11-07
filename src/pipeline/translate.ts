@@ -44,6 +44,7 @@ import {
 import type { CacheAffinity } from "../cache/types.js";
 import { createAnthropicPrivacySafeCacheResolver } from "../cache/anthropic/privacy-safe-cache.js";
 import { applyOpenAIChatCacheAffinity } from "../cache/openai-chat/apply-cache-affinity.js";
+import { applyRequestPatches } from "../patches/request-patch.js";
 import { resolvePrivacyConfig, type ResolvedPrivacyConfig } from "../privacy/config.js";
 import { PrivacySession } from "../privacy/session.js";
 import { PrivacyGuardError } from "../privacy/errors.js";
@@ -279,7 +280,13 @@ export async function translateCall(
     const cacheApplication = cacheEnabled
       ? applyOpenAIChatCacheAffinity(targetPayload, cacheAffinity, target.profile, ctx)
       : undefined;
-    const outboundPayload = cacheApplication?.body ?? targetPayload;
+    // Patches run on the final body so what is verified and sent is exactly
+    // what the caller patched.
+    const renderedPayload = cacheApplication?.body ?? targetPayload;
+    const outboundPayload =
+      options.patches && options.patches.length > 0
+        ? applyRequestPatches(renderedPayload, options.patches)
+        : renderedPayload;
 
     if (privacyConfig && privacySession) {
       try {

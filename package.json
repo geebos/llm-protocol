@@ -13,6 +13,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./patch": {
+      "types": "./dist/patches/index.d.ts",
+      "import": "./dist/patches/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

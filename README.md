@@ -17,6 +17,7 @@ A clean-room LLM protocol translation core: **Anthropic Messages ↔ OpenAI Chat
 | Observability | per-call `onComplete` (request body, response body, canonical SSE events, unified usage), `logid`, diagnostic trace |
 | Security | caller-owned credentials, final headers forwarded verbatim, body size limits, timeouts, cancellation propagation, trace redaction |
 | Privacy | optional recognizer-driven redaction / restore across request, response and stream (incremental tool-argument restore) |
+| Patches | opt-in `patches` list over the final outbound body; built-in `deepseekImageThinkingPatch` for image `tool_result` thinking |
 
 **Not yet supported:** OpenAI Responses format `openai-responses`.
 
@@ -143,6 +144,7 @@ for (;;) {
 | `policies` | `TranslationPolicies` | no | Translation policies (default `DEFAULT_POLICIES`). |
 | `cache` | `{ resolvers?, privacySafeResolvers?, key?, namespace? }` | no | Prompt-cache affinity (Anthropic `cache_control` → Chat `prompt_cache_key`). |
 | `privacy` | `PrivacyOptions` | no | Privacy recognition / redaction / restore. |
+| `patches` | `readonly RequestPatch[]` | no | Opt-in patches over the final outbound body; built-in `deepseekImageThinkingPatch`. |
 
 ### Fidelity and drops
 
@@ -156,6 +158,34 @@ Every call records what the translation did to the payload. `trace` receives a `
 | `UNSUPPORTED` | The target cannot express the construct at all. |
 
 Droppability is decided per field from the `ProviderProfile` capabilities: fields the target can express are adapted, droppable fields are dropped and listed in `trace.drops` (`path`, `cause`, `authorization`), and fields that may not be dropped fail closed — the call rejects with a `TranslationError` (`code: "non_droppable_field"`) instead of losing data. Response-side projection failures surface as a source-protocol error `Response` with `failurePhase` set. Nothing is dropped silently.
+
+### Request patches
+
+Provider quirks the capability model cannot express can be patched per call. `patches` is a list of `{ filter?, apply }` definitions over the **final outbound request body** (target protocol, after codec rendering and cache-affinity rewriting); `apply` receives the body and returns the body to send. They run in order, before egress verification and the upstream call, for streaming and non-streaming alike, and `onComplete.requestBody` reflects the patched body.
+
+```ts
+import { translate } from "llm-protocol";
+import { deepseekImageThinkingPatch } from "llm-protocol/patch";
+
+await translate.messages.messages({
+  url,
+  headers,
+  body,
+  // DeepSeek Anthropic-compatible channels reject an image tool_result whose
+  // assistant message carries no thinking block; this inserts a placeholder.
+  patches: [deepseekImageThinkingPatch],
+});
+```
+
+Built-in patches are exported from the `llm-protocol/patch` entry point (`RequestPatch` is exported from both it and the package root).
+
+A patch that throws, or returns a non-object, rejects the call as a `validation` error naming its position. A patch may carry a `filter(request) => boolean` gate: it is evaluated over the request as it stands when the patch is reached, and the patch is skipped when it returns `false`. `deepseekImageThinkingPatch` uses it to run only for model ids whose prefix is `deepseek`, so it can stay enabled on mixed traffic. Patches are trusted code: never use them to inject credentials, and never enable the DeepSeek patch for a real Anthropic endpoint, which validates thinking signatures.
+
+```ts
+patches: [
+  { filter: (req) => req.model === "some-model", apply: (req) => ({ ...req, temperature: 0 }) },
+]
+```
 
 ### Privacy transform
 

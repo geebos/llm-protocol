@@ -17,6 +17,7 @@
 | 可观测 | 每次调用的 `onComplete`（请求体、响应体、canonical SSE 事件、统一 usage）、`logid`、诊断 trace |
 | 安全 | 凭据由调用方持有、最终 headers 原样转发、body 大小限制、超时、取消传播、trace 脱敏 |
 | 隐私 | 可选的识别/替换/还原，覆盖请求、响应与流式（含工具参数增量还原） |
+| 补丁 | 按需启用的 `patches` 列表，作用于最终出站请求体；内置 `deepseekImageThinkingPatch` 处理图片 `tool_result` 缺 thinking |
 
 **暂不支持**：OpenAI Responses 格式 `openai-responses`。
 
@@ -143,6 +144,7 @@ for (;;) {
 | `policies` | `TranslationPolicies` | 否 | 转换策略（默认 `DEFAULT_POLICIES`）。 |
 | `cache` | `{ resolvers?, privacySafeResolvers?, key?, namespace? }` | 否 | Prompt-cache 亲和性（Anthropic `cache_control` → Chat `prompt_cache_key`）。 |
 | `privacy` | `PrivacyOptions` | 否 | 隐私识别 / 替换 / 还原。 |
+| `patches` | `readonly RequestPatch[]` | 否 | 作用于最终出站请求体的补丁列表；内置 `deepseekImageThinkingPatch`。 |
 
 ### 保真与字段丢弃
 
@@ -156,6 +158,34 @@ for (;;) {
 | `UNSUPPORTED` | 目标协议完全无法表达该构造。 |
 
 可丢弃性由 `ProviderProfile` 能力声明逐字段裁决：目标能等价表达的字段做适配；可丢弃字段被丢弃并记入 `trace.drops`（`path`、`cause`、`authorization`）；不可丢弃字段 fail-closed——调用以 `TranslationError`（`code: "non_droppable_field"`）失败，而不是丢数据。响应侧投影失败则以源协议错误 `Response` 返回并带上 `failurePhase`。不存在静默降级。
+
+### 请求补丁
+
+能力模型无法表达的供应商差异，可以按调用打补丁。`patches` 是一组 `{ filter?, apply }` 定义，作用于**最终出站请求体**（目标协议，已完成 codec 渲染与 cache 改写）：`apply` 接收请求体，返回要发送的请求体。它们按顺序执行，在 egress 校验与上游调用之前生效，流式与非流式一致；`onComplete.requestBody` 即补丁后的真实请求体。
+
+```ts
+import { translate } from "llm-protocol";
+import { deepseekImageThinkingPatch } from "llm-protocol/patch";
+
+await translate.messages.messages({
+  url,
+  headers,
+  body,
+  // DeepSeek 的 Anthropic 兼容渠道：含 image 的 tool_result 对应的 assistant
+  // 消息若没有 thinking 块会被 400；该补丁插入占位 thinking。
+  patches: [deepseekImageThinkingPatch],
+});
+```
+
+内置补丁从 `llm-protocol/patch` 入口导出（`RequestPatch` 在该入口和包根都有导出）。
+
+补丁抛异常、或返回的不是对象时，调用以 `validation` 错误失败并标明是第几个补丁。补丁可以带 `filter(request) => boolean` 门控：它在补丁执行前按当时的请求体求值，返回 `false` 则跳过该补丁。`deepseekImageThinkingPatch` 用它只处理模型 id 前缀为 `deepseek` 的请求，因此可以在混合流量中保持启用。补丁是可信代码：不要用它注入凭据；真实 Anthropic 渠道禁止启用该 DeepSeek 补丁（会校验 thinking signature）。
+
+```ts
+patches: [
+  { filter: (req) => req.model === "some-model", apply: (req) => ({ ...req, temperature: 0 }) },
+]
+```
 
 ### 隐私转换
 

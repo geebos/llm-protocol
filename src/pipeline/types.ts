@@ -12,6 +12,7 @@ import type { DropRecord } from "../ir/projection/drop-record.js";
 import type { TranslationFailurePhase } from "../ir/projection/failure.js";
 import type { CanonicalStreamEvent } from "../streams/types.js";
 import type { PrivacyCompletionReport, PrivacyOptions, PrivacyRequestTrace } from "../privacy/types.js";
+import type { RequestPatch } from "../patches/request-patch.js";
 
 /**
  * Options for a single `translate.<source>.<target>(options)` call.
@@ -80,6 +81,13 @@ export interface TranslateOptions {
   };
   /** Privacy recognition/redaction/restore (04.privacy-transform.md). */
   privacy?: PrivacyOptions;
+  /**
+   * Opt-in patches over the outbound (target-protocol) request body, applied in
+   * order after rendering. Each patch may declare a `filter` gate and must
+   * return the replacement body from `apply`; `deepseekImageThinkingPatch` is
+   * the built-in patch (gated to DeepSeek model ids).
+   */
+  patches?: readonly RequestPatch[];
 }
 
 /** A single source->target call: options in, source-protocol `Response` out. */
